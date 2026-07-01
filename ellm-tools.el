@@ -100,24 +100,40 @@ or `llm-make-tool' etc. via doing something like:
                :category ,category)
          ,(format "Tool definition plist for %s.\n%s" name doc))
        ,(if async?
+            ;; TODO: Define timeouts for async functions and raise a
+            ;; timeout error. Users should be able to define :timeout
+            ;; through the SPECS and there should be a default value
+
+            ;; TODO: Fix lexical variables via gensym for hygine
             `(defun ,const-sym (callback ,@lambda-args)
-               (let ((tool-args (list ,@lambda-args)))
+               (let ((tool-args (list ,@lambda-args))
+                     (error? nil))
                  (ellm-tools--tool-call-start-hook ',const-sym tool-args)
                  (cl-flet ((callback (raw-result)
                                      (let ((result (ellm-tools--transform-tool-result
-                                                    tool-args ',const-sym raw-result)))
+                                                    tool-args ',const-sym error? raw-result)))
                                        (ellm-tools--tool-call-end-hook
-                                        ',const-sym tool-args raw-result result)
+                                        ',const-sym tool-args error? raw-result result)
                                        (funcall callback result))))
-                   ,@body)))
+                   (condition-case err
+                       (progn ,@body)
+                     (error
+                      (funcall callback (format "Error while calling the tool: %s" err)))))))
           `(defun ,const-sym ,lambda-args
+             ,doc
              (let ((tool-args (list ,@lambda-args)))
                (ellm-tools--tool-call-start-hook ',const-sym tool-args)
-               (let* ((raw-result (progn ,@body))
+               (let* ((error? nil)
+                      (raw-result
+                       (condition-case err
+                           (progn ,@body)
+                         (error
+                          (setq error? t)
+                          (format "Error while calling the tool: %s" err))))
                       (result (ellm-tools--transform-tool-result
-                               tool-args ',const-sym raw-result)))
+                               tool-args ',const-sym error? raw-result)))
                  (ellm-tools--tool-call-end-hook
-                  ',const-sym tool-args raw-result result)
+                  ',const-sym tool-args error? raw-result result)
                  result))))
        (cl-pushnew ',const-sym ellm-tools-refs)
        (setq ellm-tools-list
@@ -125,23 +141,29 @@ or `llm-make-tool' etc. via doing something like:
                            ellm-tools-list))
        (push (apply #'ellm-make-tool ,const-sym) ellm-tools-list))))
 
+
 ;;;; Tool lifecycle
 
 (defun ellm-tools--tool-call-start-hook (hook args)
   (message "TODO: tool start hook"))
 
-(defun ellm-tools--tool-call-end-hook (hook args raw result)
+(defun ellm-tools--tool-call-end-hook (hook args error? raw result)
   (message "TODO: tool start hook"))
 
-(defun ellm-tools--transform-tool-result (hook args raw)
+(defun ellm-tools--transform-tool-result (hook args error? raw)
   (message "TODO: tool result transformer")
-  (car (last args)))
+  raw)
 
-(defun ellm-tools--error (reason)
-  (error reason))
+(defun ellm-tools--error (reason &rest args)
+  (if args
+      (apply #'error reason args)
+    (error reason))
+  )
 
-(defun ellm-tools--success (result)
-  result)
+(defun ellm-tools--success (result &rest args)
+  (if args
+      (apply #'format result args)
+    result))
 
 ;;;; Tools
 
@@ -151,11 +173,11 @@ or `llm-make-tool' etc. via doing something like:
   ((file-path :string "The absolute or relative path to the file to edit.")
    (old-string :string "The exact text to search for and replace in the file.")
    (new-string :string "The text to replace OLD-STRING with.")
-   (replace-all :boolean "If non-nil, replace all occurrences of OLD-STRING. Otherwise replace only the first occurrence, erroring if it is not unique."))
+   (replace-all :boolean "If non-nil, replace all occurrences of OLD-STRING. Otherwise replace only the first occurrence, erroring if it is not unique." &optional))
   "Edit a file by replacing OLD-STRING with NEW-STRING.
 OLD-STRING must appear exactly once in the file unless REPLACE-ALL
 is non-nil, in which case all occurrences are replaced."
-  (ellm-tools--edit-tool 'file file-path old-string new-string replace-all))
+  (ellm-tools--edit-tool file-path old-string new-string replace-all))
 
 (ellm-deftool files/read-file-lines ()
   ((file-path :string "Path to the file. Path is relative to the current project's root.")
@@ -187,7 +209,7 @@ is non-nil, in which case all occurrences are replaced."
   "Edit a buffer by replacing OLD-STRING with NEW-STRING.
 OLD-STRING must appear exactly once in the buffer unless REPLACE-ALL
 is non-nil, in which case all occurrences are replaced."
-  (ellm-tools--edit-tool 'buffer buffer-name old-string new-string replace-all))
+  (ellm-tools--edit-tool (get-buffer buffer-name) old-string new-string replace-all))
 
 (ellm-deftool buffers/list-buffers ()
   ()
@@ -300,14 +322,14 @@ Optionally specify a line range."
 
 ;;;;; Internal
 
-(defun ellm-tools--edit-tool (type buffer-or-file old-string new-string &optional replace-all)
+(defun ellm-tools--edit-tool (buffer-or-file old-string new-string &optional replace-all)
   "Replace occurrence(s) of OLD-STRING with NEW-STRING.
 BUFFER-OR-FILE is either a buffer object or a file path string.
 If REPLACE-ALL is non-nil, replace all occurrences; otherwise replace
-exactly one occurrence.  TYPE can be a \\='buffer or \\='file."
+exactly one occurrence."
   (when (string= old-string "")
     (ellm-tools--error "`old_string' cannot be empty"))
-  (let* ((is-file? (equal type 'file))
+  (let* ((is-file? (not (bufferp buffer-or-file)))
          (name (if is-file?
                    (concat "file " buffer-or-file)
                  (concat "buffer " (buffer-name buffer-or-file))))
