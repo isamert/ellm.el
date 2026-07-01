@@ -120,12 +120,12 @@ Returns nil for bare provider objects or plist entries without a
 
 (cl-defstruct (ellm-tool (:include llm-tool)
                          (:constructor ellm-make-tool))
-  "An `llm-tool' with an extra CATEGORY slot for grouping in `ellm-tools'.
+  "An `llm-tool' with an extra CATEGORY slot for grouping in `ellm-tools-list'.
 Inherits all `llm-tool' slots; passes `llm-tool-p' so it flows
 unchanged into `llm-make-chat-prompt's `:tools' argument."
   category)
 
-(defcustom ellm-tools nil
+(defcustom ellm-tools-list nil
   "List of `ellm-tool' (or `llm-tool') objects available to ellm buffers.
 
 Tools are referenced from a buffer's YAML frontmatter `tools:' key
@@ -134,7 +134,7 @@ either by the tool's `name' slot, or by `@CATEGORY' to enable every
 
 Example:
 
-  (setq ellm-tools
+  (setq ellm-tools-list
         (list
          (ellm-make-tool
           :name \"current_time\"
@@ -1258,7 +1258,7 @@ turns and turns them into an alist of (ARG-SYMBOL . VALUE).  If no
 `tool-param' children are present, falls back to the single-arg form:
 the tool-call body is the value of the tool's first declared arg
 \(looked up via BASE-PROMPT's `tools' slot, falling back to
-`ellm-tools').
+`ellm-tools-list').
 
 TURNS-CONSUMED is the count of trailing depth-3 `tool-param' turns that
 were consumed."
@@ -1287,7 +1287,7 @@ were consumed."
                                        (llm-chat-prompt-tools base-prompt)
                                        :key #'llm-tool-name
                                        :test #'equal)
-                              (cl-find name ellm-tools
+                              (cl-find name ellm-tools-list
                                        :key #'llm-tool-name
                                        :test #'equal)))
                     (arg-name (and tool (llm-tool-args tool)
@@ -1460,11 +1460,11 @@ Signals `user-error' when no provider can be resolved."
   "Return the list of tools enabled for the current buffer.
 
 Reads the `tools' key from FRONTMATTER (a list of strings), and for
-each entry resolves it against `ellm-tools':
+each entry resolves it against `ellm-tools-list':
 
   - A bare string is matched against `llm-tool-name' equality.
   - A string of the form `@CATEGORY' expands to every `ellm-tool' in
-    `ellm-tools' whose `category' slot equals CATEGORY."
+    `ellm-tools-list' whose `category' slot equals CATEGORY."
   (let ((entries (alist-get 'tools frontmatter))
         (resolved nil))
     (cond
@@ -1478,7 +1478,7 @@ each entry resolves it against `ellm-tools':
         (unless (memq tool resolved)
           (push tool resolved))))
      ((eq entries t)
-      (setq resolved (copy-sequence ellm-tools))))
+      (setq resolved (copy-sequence ellm-tools-list))))
     resolved))
 
 (defun ellm--resolve-tool (entry)
@@ -1491,18 +1491,18 @@ can be a tool name like \"a_tool_name\"."
      ((and (> (length spec) 1) (eq (aref spec 0) ?@))
       (let* ((cat (substring spec 1))
              (matches
-              (cl-loop for tool in ellm-tools
+              (cl-loop for tool in ellm-tools-list
                        when (equal (ellm-tool-category tool) cat)
                        collect tool)))
         (if matches matches
-          (warn "ellm: no tools in `ellm-tools' have category `%s'" cat))))
+          (warn "ellm: no tools in `ellm-tools-list' have category `%s'" cat))))
      ;; name ref
      (t
-      (let ((tool (cl-find spec ellm-tools
+      (let ((tool (cl-find spec ellm-tools-list
                            :key #'llm-tool-name
                            :test #'equal)))
         (if tool (list tool)
-          (warn "ellm: tool `%s' not found in `ellm-tools'" spec)))))))
+          (warn "ellm: tool `%s' not found in `ellm-tools-list'" spec)))))))
 
 ;;;;; Frontmatter completion
 
@@ -1523,7 +1523,7 @@ can be a tool name like \"a_tool_name\"."
      :desc "Reasoning level: light, medium, maximum, none."
      :values ("light" "medium" "maximum" "none"))
     ("tools"       :ann "list"
-     :desc "Tools enabled for this buffer; names from `ellm-tools' or `@CATEGORY'."
+     :desc "Tools enabled for this buffer; names from `ellm-tools-list' or `@CATEGORY'."
      :values ellm--capf-tool-candidates))
   "Alist of (KEY . SPEC) for known YAML frontmatter keys.
 SPEC is a plist with:
@@ -1595,13 +1595,13 @@ MODELS is a list of model name strings.  SOURCE is one of:
 
 (defun ellm--capf-tool-candidates ()
   "Return list of completion strings for `tools:' frontmatter.
-Combines every tool name in `ellm-tools' with `@CATEGORY' for each
+Combines every tool name in `ellm-tools-list' with `@CATEGORY' for each
 distinct `category' slot of `ellm-tool' entries."
   (append
-   (mapcar #'llm-tool-name ellm-tools)
+   (mapcar #'llm-tool-name ellm-tools-list)
    (mapcar (lambda (cat) (concat "@" cat))
            (delete-dups
-            (delq nil (mapcar #'ellm-tool-category ellm-tools))))))
+            (delq nil (mapcar #'ellm-tool-category ellm-tools-list))))))
 
 (defun ellm--capf-resolve-values (values-spec)
   "Resolve VALUES-SPEC from a `ellm--frontmatter-keys' entry.

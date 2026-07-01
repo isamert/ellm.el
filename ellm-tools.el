@@ -60,9 +60,6 @@ or `llm-make-tool' etc. via doing something like:
     (lambda (tool) (apply #\\='gptel-make-tool (symbol-value tool)))
     `ellm-tools-refs')")
 
-(defvar ellm-tools-list '()
-  "List of all ellm tool objects.")
-
 ;;;; `ellm-deftool' macro
 
 (defun ellm-tools--normalize-name (s)
@@ -70,7 +67,7 @@ or `llm-make-tool' etc. via doing something like:
 
 (defmacro ellm-deftool (name specs arglist doc &rest body)
   (declare (indent 2))
-  (pcase-let* ((`(,_category ,tool-name-def) (string-split (symbol-name name) "/"))
+  (pcase-let* ((`(,category ,tool-name-def) (string-split (symbol-name name) "/"))
                (tool-name (ellm-tools--normalize-name tool-name-def))
                (const-sym (intern (format "ellm-tools/%s-tool" tool-name-def)))
                (lambda-args (mapcar #'car arglist))
@@ -99,7 +96,8 @@ or `llm-make-tool' etc. via doing something like:
                                  param-name-replacements
                                  (nth 2 it))))
                         arglist)
-               :function #',const-sym)
+               :function #',const-sym
+               :category ,category)
          ,(format "Tool definition plist for %s.\n%s" name doc))
        ,(if async?
             `(defun ,const-sym (callback ,@lambda-args)
