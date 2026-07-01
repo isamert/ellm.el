@@ -250,6 +250,15 @@ a continuation for visual nesting (no horizontal rule above it)."
 Group 1: header (`ellm-turn-header-1', `ellm-turn-header-2', or
 `ellm-turn-header-3'), Group 2: role, Group 3: rest of attributes.")
 
+(defconst ellm-page-delimiter-regexp
+  (concat "^"
+          (regexp-quote ellm-turn-header-1)
+          " ")
+  "Regexp matching top-level turn delimiter lines only.
+These are exactly the lines that get a horizontal rule drawn above them
+by `ellm--make-rule-overlay'.  Used as the buffer-local `page-delimiter'
+so `forward-page' / `backward-page' stop at each rendered ruler.")
+
 (defconst ellm-code-block-header-regexp
   "^[ \t]*``` ?\\([a-zA-Z-]+\\)?\n"
   "Regexp matching the opening line of a fenced code block.
@@ -2191,6 +2200,10 @@ Errors during streaming are signalled normally."
   (add-hook 'completion-at-point-functions #'ellm--frontmatter-capf nil t)
   (setq-local outline-search-function #'ellm--outline-search-function)
   (setq-local outline-level #'ellm--outline-level)
+  ;; Treat top-level turn delimiters (the lines rendered with a
+  ;; horizontal rule above them) as page boundaries so `forward-page' /
+  ;; `backward-page' navigate turn-by-turn.
+  (setq-local page-delimiter ellm-page-delimiter-regexp)
   (outline-minor-mode 1)
   (ellm--rebuild-fence-cache))
 
