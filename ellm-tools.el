@@ -26,18 +26,27 @@
 ;;; Commentary:
 
 ;; Some of the tools and ideas are taken from
-;; skissue/llm-tool-collection and edited.
+;; skissue/llm-tool-collection and adapted.
 
 ;;; Code:
 
 (require 'llm)
 (require 'ellm)
+(require 'seq)
+(require 's)
 
 ;;;; Customization
 
 (defgroup ellm-tools nil
   "Settings for `ellm-tools'."
   :link '(url-link "https://github.com/isamert/ellm.el"))
+
+(defcustom ellm-tools-current-project-function #'ellm-tools-current-project-root
+  "Function for getting the root of the current project.
+Some of the tools functionality depends on finding the root of the
+current project.  Default implementation simply finds the closest .git
+directories parent folder."
+  :group 'ellm-tools)
 
 ;;;; Variables
 
@@ -48,8 +57,8 @@ This is provided so that you can use these tools with `gptel-make-tool'
 or `llm-make-tool' etc. via doing something like:
 
   (mapcar
-    (lambda (tool) (apply #'gptel-make-tool (symbol-value tool)))
-    ellm-tools-refs)")
+    (lambda (tool) (apply #\\='gptel-make-tool (symbol-value tool)))
+    `ellm-tools-refs')")
 
 (defvar ellm-tools-list '()
   "List of all ellm tool objects.")
@@ -66,17 +75,29 @@ or `llm-make-tool' etc. via doing something like:
                (const-sym (intern (format "ellm-tools/%s-tool" tool-name-def)))
                (lambda-args (mapcar #'car arglist))
                (async? (plist-get specs :async))
-               (final-args (if async? `(callback ,@lambda-args) lambda-args)))
+               (param-name-replacements
+                (seq-mapn
+                 #'cons
+                 (mapcar (lambda (it) (upcase (symbol-name (nth 0 it)))) arglist)
+                 (mapcar (lambda (it) (format
+                                  "`%s`"
+                                  (ellm-tools--normalize-name (symbol-name (nth 0 it))))) arglist))))
     `(progn
        (defconst ,const-sym
          (list :name ,tool-name
-               :description ,doc
+               :description ,(s-replace-all
+                              param-name-replacements
+                              doc)
                :async ,async?
                :args ',(mapcar
                         (lambda (it)
                           (list :name (ellm-tools--normalize-name (symbol-name (nth 0 it)))
-                                :type  (nth 2 it)
-                                :description (nth 3 it)))
+                                :type  (intern (string-trim-left (symbol-name (nth 1 it)) ":"))
+                                :optional (or (eq (nth 3 it) '&optional) (eq (nth 3 it) :optional))
+                                :description
+                                (s-replace-all
+                                 param-name-replacements
+                                 (nth 2 it))))
                         arglist)
                :function #',const-sym)
          ,(format "Tool definition plist for %s.\n%s" name doc))
@@ -115,12 +136,240 @@ or `llm-make-tool' etc. via doing something like:
   (message "TODO: tool start hook"))
 
 (defun ellm-tools--transform-tool-result (hook args raw)
-  ""
   (message "TODO: tool result transformer")
   (car (last args)))
 
+(defun ellm-tools--error (reason)
+  (error reason))
+
+(defun ellm-tools--success (result)
+  result)
+
 ;;;; Tools
 
+;;;;; Files
+
+(ellm-deftool files/file-edit ()
+  ((file-path :string "The absolute or relative path to the file to edit.")
+   (old-string :string "The exact text to search for and replace in the file.")
+   (new-string :string "The text to replace OLD-STRING with.")
+   (replace-all :boolean "If non-nil, replace all occurrences of OLD-STRING. Otherwise replace only the first occurrence, erroring if it is not unique."))
+  "Edit a file by replacing OLD-STRING with NEW-STRING.
+OLD-STRING must appear exactly once in the file unless REPLACE-ALL
+is non-nil, in which case all occurrences are replaced."
+  (ellm-tools--edit-tool 'file file-path old-string new-string replace-all))
+
+(ellm-deftool files/read-file-lines ()
+  ((file-path :string "Path to the file. Path is relative to the current project's root.")
+   (start-line :integer "Starting line number.")
+   (end-line :integer "Ending line number."))
+  "Return the contents of the file from START-LINE to END-LINE (inclusive)."
+  (when (or (s-blank? file-path)
+            (not (and (numberp start-line) (numberp end-line)))
+            (< start-line 1)
+            (< end-line start-line))
+    (ellm-tools--error "invalid input"))
+  (let ((default-directory (funcall ellm-tools-current-project-function)))
+    (with-temp-buffer
+      (insert-file-contents file-path)
+      (let ((start-pos (progn (goto-char (point-min)) (forward-line (1- start-line)) (point)))
+            (end-pos (progn (goto-char (point-min)) (forward-line (1- end-line)) (point))))
+        (concat
+         (format "<file_lines start_line=%s end_line=%s>\n" start-line end-line)
+         (buffer-substring-no-properties start-pos end-pos)
+         "\n</file_lines>")))))
+
+;;;;; Buffers
+
+(ellm-deftool buffers/buffer-edit ()
+  ((buffer-name :string "The name of the buffer to edit.")
+   (old-string :string "The exact text to search for and replace in the buffer.")
+   (new-string :string "The text to replace OLD-STRING with.")
+   (replace-all :boolean "If non-nil, replace all occurrences of OLD-STRING. Otherwise replace only the first occurrence, erroring if it is not unique."))
+  "Edit a buffer by replacing OLD-STRING with NEW-STRING.
+OLD-STRING must appear exactly once in the buffer unless REPLACE-ALL
+is non-nil, in which case all occurrences are replaced."
+  (ellm-tools--edit-tool 'buffer buffer-name old-string new-string replace-all))
+
+(ellm-deftool buffers/list-buffers ()
+  ()
+  "List names of open buffers. Act directly on buffers if you know the name already, without listing."
+  (ellm-tools--success
+   (concat
+    "<buffers>\n"
+    (mapconcat
+     (lambda (n) n)
+     (cl-loop for b in (buffer-list)
+              for n = (buffer-name b)
+              when (and n (not (string-prefix-p " " n)))
+              collect n)
+     "\n")
+    "\n</buffers>")))
+
+(ellm-deftool buffers/read-buffer-lines ()
+  ((buffer-name :string "Name of the buffer to read.")
+   (start-line :integer "Starting line number (1-indexed). Optional." &optional)
+   (end-line :integer "Ending line number (1-indexed). Optional." &optional))
+  "Return the contents of the buffer with the given name (max 500 lines).
+Optionally specify a line range."
+  (when (or (string-empty-p buffer-name)
+            (not (get-buffer buffer-name)))
+    (ellm-tools--error "Operation failed: invalid input." ))
+  (with-current-buffer buffer-name
+    (let* ((start-pos (if start-line
+                          (save-excursion
+                            (goto-char (point-min))
+                            (forward-line (1- start-line))
+                            (point))
+                        (point-min)))
+           (end-pos (if end-line
+                        (save-excursion
+                          (goto-char (point-min))
+                          (forward-line end-line)
+                          (point))
+                      (point-max)))
+           (content (buffer-substring-no-properties start-pos end-pos))
+           (lines (split-string content "\n"))
+           (limited-lines (seq-take lines 500))
+           (truncated (> (length lines) 500)))
+      (concat
+       (format "<buffer name=%S%s%s>\n"
+               buffer-name
+               (if start-line (format " start-line=%d" start-line) "")
+               (if end-line (format " end-line=%d" end-line) ""))
+       (string-join limited-lines "\n")
+       (if truncated "\n[... truncated, showing first 500 lines ...]" "")
+       "\n</buffer>"))))
+
+(ellm-deftool buffers/search-buffer ()
+  ((buffer-name :string "Name of the buffer to search in.")
+   (pattern :string "The search pattern to look for.")
+   (regexp :boolean "If true, treat pattern as a regular expression. Default is false." &optional)
+   (case-sensitive :boolean "If true, search is case-sensitive. By default does a case-insensitive search." &optional))
+  "Search for a PATTERN in buffer BUFFER-NAME and return matching lines with line numbers (max 50 matches)."
+  (when (or (string-empty-p buffer-name) (not (get-buffer buffer-name)))
+    (ellm-tools--error "invalid buffer name"))
+  (when (s-blank? pattern)
+    (ellm-tools--error "search pattern is empty"))
+  (with-current-buffer buffer-name
+    (let ((case-fold-search (not case-sensitive))
+          (search-fn (if regexp #'re-search-forward #'search-forward))
+          (matches '())
+          (max-matches 50))
+      (save-excursion
+        (goto-char (point-min))
+        (while (and (< (length matches) max-matches)
+                    (funcall search-fn pattern nil t))
+          (let* ((line-num (line-number-at-pos (match-beginning 0)))
+                 (line-content (buffer-substring-no-properties
+                                (line-beginning-position)
+                                (line-end-position))))
+            (push (format "%d: %s" line-num line-content) matches))))
+      (if matches
+          (concat
+           (format "<search_results buffer=%S pattern=%S matches=%d%s>\n"
+                   buffer-name pattern (length matches)
+                   (if (= (length matches) max-matches) " truncated=true" ""))
+           (string-join (nreverse matches) "\n")
+           "\n</search_results>")
+        (format "No matches found for %S in buffer %S." pattern buffer-name)))))
+
+(ellm-deftool buffers/get-buffer-issues ()
+  ((buffer :string "Name of the buffer to get flymake diagnostics for."))
+  "List all current flymake diagnostics for given buffer with line-range:type:message."
+  (with-current-buffer (get-buffer buffer)
+    (let ((issues (flymake-diagnostics)))
+      (if issues
+          (mapconcat
+           (lambda (diag)
+             (format "%d-%d:%s: %s"
+                     (line-number-at-pos (flymake-diagnostic-beg diag))
+                     (line-number-at-pos (flymake-diagnostic-end diag))
+                     (flymake-diagnostic-type diag)
+                     (flymake-diagnostic-text diag)))
+           issues
+           "\n")
+        "No flymake issues found."))))
+
+;;;; Tool helpers
+
+;;;;; Public
+
+(defun ellm-tools-current-project-root ()
+  "Return the root path of current project."
+  (when-let* ((path (locate-dominating-file default-directory ".git")))
+    (expand-file-name path)))
+
+;;;;; Internal
+
+(defun ellm-tools--edit-tool (type buffer-or-file old-string new-string &optional replace-all)
+  "Replace occurrence(s) of OLD-STRING with NEW-STRING.
+BUFFER-OR-FILE is either a buffer object or a file path string.
+If REPLACE-ALL is non-nil, replace all occurrences; otherwise replace
+exactly one occurrence.  TYPE can be a \\='buffer or \\='file."
+  (when (string= old-string "")
+    (ellm-tools--error "`old_string' cannot be empty"))
+  (let* ((is-file? (equal type 'file))
+         (name (if is-file?
+                   (concat "file " buffer-or-file)
+                 (concat "buffer " (buffer-name buffer-or-file))))
+         (file-path (when is-file? (expand-file-name buffer-or-file)))
+         (existing-buffer (when file-path (find-buffer-visiting file-path))))
+    (if (bufferp buffer-or-file)
+        (with-current-buffer buffer-or-file
+          (ellm-tools--do-edit old-string new-string replace-all name))
+      (if existing-buffer
+          ;; There's an existing buffer; edit in temp buffer, write file, revert existing buffer
+          (let ((temp-buf (generate-new-buffer " *temp*")))
+            (with-current-buffer temp-buf
+              (insert-file-contents file-path)
+              (ellm-tools--do-edit old-string new-string replace-all name)
+              (write-file file-path))
+            (with-current-buffer existing-buffer
+              (revert-buffer t t))
+            (kill-buffer temp-buf)
+            (format "Successfully edited %s" name))
+        ;; No existing buffer, edit in temp buffer and write file
+        (let ((temp-buf (generate-new-buffer " *temp*"))
+              (result nil))
+          (with-current-buffer temp-buf
+            (insert-file-contents file-path)
+            (setq result (do-edit))
+            (write-file file-path))
+          (kill-buffer temp-buf)
+          (ellm-tools--success result))))))
+
+(defun ellm-tools--do-edit (old-string new-string replace-all name)
+  "Perform the replacement of OLD-STRING with NEW-STRING in the current buffer.
+If REPLACE-ALL is non-nil, replace all occurrences; otherwise replace
+exactly one occurrence.  NAME is used for error and status messages."
+  (let ((case-fold-search nil))
+    (save-excursion
+      (goto-char (point-min))
+      (let ((count 0)
+            (first-match-pos nil))
+        (while (search-forward old-string nil 'noerror)
+          (setq count (1+ count))
+          (unless first-match-pos
+            (setq first-match-pos (match-beginning 0))))
+        (cond
+         ((= count 0)
+          (ellm-tools--error "Could not find text '%s' to replace in %s"
+                             old-string name))
+         ((and (> count 1) (not replace-all))
+          (ellm-tools--error "Found %d matches for '%s' in %s, need exactly one"
+                             count old-string name))
+         (replace-all
+          (goto-char (point-min))
+          (while (search-forward old-string nil 'noerror)
+            (replace-match new-string 'fixedcase 'literal))
+          (ellm-tools--success "Successfully edited %s (%d replacement%s)"
+                               name count (if (= count 1) "" "s")))
+         (t
+          (goto-char first-match-pos)
+          (search-forward old-string nil 'noerror)
+          (replace-match new-string 'fixedcase 'literal)
+          (format "Successfully edited %s" name)))))))
 
 ;;;; Footer
 
