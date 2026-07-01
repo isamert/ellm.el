@@ -1964,6 +1964,52 @@ contract exactly:
             (setq found t)))
         found))))
 
+;;;;;; Defun navigation (turns & headings as defuns)
+
+;; Treat every heading line -- a turn delimiter (`ellm-turn-header-1/2/3')
+;; or a Markdown heading -- as the start of a "defun".  Wiring this into
+;; `beginning-of-defun-function' / `end-of-defun-function' makes all the
+;; defun-oriented commands work over turns and headings: `C-M-a' /
+;; `C-M-e', `mark-defun', `narrow-to-defun', `bounds-of-thing-at-point'
+;; with the `defun' thing, and Evil's section motions (`[[', `]]', `[]',
+;; `][', and `evil-{forward,backward}-section-{begin,end}').
+
+(defun ellm--heading-at-point-p ()
+  "Return non-nil if point is on a heading line (turn or Markdown).
+Headings inside fenced code blocks do not count."
+  (save-excursion
+    (forward-line 0)
+    (ellm--outline-search-function nil nil nil t)))
+
+(defun ellm-beginning-of-defun (&optional arg)
+  "Move backward to the beginning of the ARG-th preceding heading.
+A heading is a turn delimiter or a Markdown heading (outside code
+blocks).  Serves as `beginning-of-defun-function'; with negative ARG
+moves forward.  Returns non-nil when point moved to a heading."
+  (let ((arg (or arg 1))
+        (found nil))
+    (if (< arg 0)
+        (dotimes (_ (- arg))
+          (when (ellm--heading-at-point-p)
+            (end-of-line))
+          (setq found (ellm--outline-search-function nil nil nil))
+          (when found (forward-line 0)))
+      (dotimes (_ arg)
+        (setq found (ellm--outline-search-function nil nil t))
+        (when found (forward-line 0))))
+    found))
+
+(defun ellm-end-of-defun ()
+  "Move forward to the end of the current heading's section.
+The section ends just before the next heading (turn or Markdown) or at
+end of buffer.  Serves as `end-of-defun-function'."
+  (unless (eobp)
+    (when (ellm--heading-at-point-p)
+      (forward-line 1))
+    (if (ellm--outline-search-function nil nil nil)
+        (forward-line 0)
+      (goto-char (point-max)))))
+
 ;;;; Narrowing
 
 (defun ellm-narrow-to-turn ()
@@ -2200,6 +2246,12 @@ Errors during streaming are signalled normally."
   (add-hook 'completion-at-point-functions #'ellm--frontmatter-capf nil t)
   (setq-local outline-search-function #'ellm--outline-search-function)
   (setq-local outline-level #'ellm--outline-level)
+  ;; Treat every heading (turn delimiter or Markdown heading) as a defun,
+  ;; so `beginning-of-defun'/`end-of-defun', `mark-defun',
+  ;; `narrow-to-defun', `bounds-of-thing-at-point' with `defun', and
+  ;; Evil's section motions all navigate turn-by-turn / heading-by-heading.
+  (setq-local beginning-of-defun-function #'ellm-beginning-of-defun)
+  (setq-local end-of-defun-function #'ellm-end-of-defun)
   ;; Treat top-level turn delimiters (the lines rendered with a
   ;; horizontal rule above them) as page boundaries so `forward-page' /
   ;; `backward-page' navigate turn-by-turn.
