@@ -205,7 +205,7 @@ is non-nil, in which case all occurrences are replaced."
   ((buffer-name :string "The name of the buffer to edit.")
    (old-string :string "The exact text to search for and replace in the buffer.")
    (new-string :string "The text to replace OLD-STRING with.")
-   (replace-all :boolean "If non-nil, replace all occurrences of OLD-STRING. Otherwise replace only the first occurrence, erroring if it is not unique."))
+   (replace-all :boolean "If non-nil, replace all occurrences of OLD-STRING. Otherwise replace only the first occurrence, erroring if it is not unique." &optional))
   "Edit a buffer by replacing OLD-STRING with NEW-STRING.
 OLD-STRING must appear exactly once in the buffer unless REPLACE-ALL
 is non-nil, in which case all occurrences are replaced."

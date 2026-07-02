@@ -197,13 +197,11 @@ Set to nil to make all headings the same size."
   :type 'boolean
   :group 'ellm-visuals)
 
-;; TODO: Not implemented yet.
 (defcustom ellm-fold-tool-calls t
   "If non-nil, insert `tool-call' turns folded (collapsed)."
   :type 'boolean
   :group 'ellm-visuals)
 
-;; TODO: Not implemented yet.
 (defcustom ellm-fold-reasoning-blocks t
   "If non-nil, insert reasoning turns folded (collapsed).
 It can also be the symbol `after', which folds after reasoning is finished."
@@ -1926,14 +1924,15 @@ Level mapping:
   turn depth 3 (\">>>-|\") → level 3
   Markdown \"#\"           → level 4
   Markdown \"##\"          → level 5  (and so on)"
-  (let ((text (match-string 0)))
-    (cond
-     ((string-prefix-p (concat ellm-turn-header-3 " ") text) 3)
-     ((string-prefix-p (concat ellm-turn-header-2 " ") text) 2)
-     ((string-prefix-p (concat ellm-turn-header-1 " ") text) 1)
-     ((string-match "^\\(#+\\) " text)
-      (+ 3 (length (match-string 1 text))))
-     (t 1))))
+  (save-match-data
+    (let ((text (or (match-string 0) "")))
+      (cond
+       ((string-prefix-p (concat ellm-turn-header-3 " ") text) 3)
+       ((string-prefix-p (concat ellm-turn-header-2 " ") text) 2)
+       ((string-prefix-p (concat ellm-turn-header-1 " ") text) 1)
+       ((string-match "^\\(#+\\) " text)
+        (+ 3 (length (match-string 1 text))))
+       (t 1)))))
 
 (defun ellm--outline-search-function (&optional bound move backward looking-at)
   "Code-block-aware heading search for `outline-search-function'.
@@ -2009,6 +2008,69 @@ end of buffer.  Serves as `end-of-defun-function'."
     (if (ellm--outline-search-function nil nil nil)
         (forward-line 0)
       (goto-char (point-max)))))
+
+;;;;; Automatic turn folding
+
+;; Folding is expressed entirely in terms of the outline machinery wired
+;; up above (`outline-search-function' / `outline-level'), so folded
+;; turns integrate with `outline-cycle' (TAB), `outline-show-all', etc.
+;; A single primitive -- `ellm--fold-subtree-at' -- does the actual
+;; hiding; everything else (tool calls, reasoning, load-time folding)
+;; drives that one primitive so the behaviour never diverges.
+
+(defun ellm--fold-subtree-at (pos)
+  "Collapse the outline subtree of the heading containing POS."
+  (save-excursion
+    (goto-char pos)
+    (when (ignore-errors (outline-back-to-heading t) t)
+      (let ((heading-end (line-end-position))
+            (subtree-end (progn (outline-end-of-subtree) (point))))
+        ;; When this is the last subtree in the buffer, `outline-end-of-
+        ;; subtree' runs all the way to `point-max'.  Folding through the
+        ;; final position would swallow anything later appended there
+        ;; (e.g. the next streamed turn inserted at `point-max'), which
+        ;; is exactly the "results not folded / next turn hidden"
+        ;; failure.  Keep the trailing newline outside the fold so new
+        ;; content lands in visible territory.
+        (when (and (= subtree-end (point-max))
+                   (> subtree-end heading-end)
+                   (eq (char-before subtree-end) ?\n))
+          (setq subtree-end (1- subtree-end)))
+        (when (> subtree-end heading-end)
+          (outline-flag-region heading-end subtree-end t))))))
+
+(defun ellm--role-should-fold-p (role)
+  "Return non-nil if a turn with ROLE should be inserted folded.
+Honours `ellm-fold-tool-calls' and `ellm-fold-reasoning-blocks'."
+  (cond
+   ((member role '("tool-call" "tool-result")) ellm-fold-tool-calls)
+   ((equal role "reasoning") (and ellm-fold-reasoning-blocks t))
+   (t nil)))
+
+(defun ellm--fold-turn-at (pos role)
+  "Fold the subtree of the turn with ROLE at POS, if configured to.
+Shared entry point used both for freshly inserted turns and when
+folding a loaded buffer.  A no-op when ROLE should not be folded."
+  (when (and (ellm--role-should-fold-p role)
+             (save-excursion
+               (goto-char pos)
+               (ignore-errors (outline-back-to-heading t))
+               (< (line-end-position) (save-excursion
+                                        (outline-end-of-subtree)
+                                        (point)))))
+    (ellm--fold-subtree-at pos)))
+
+(defun ellm--fold-configured-turns ()
+  "Fold every turn in the buffer that is configured to be folded.
+Walks the parsed turns and folds each `tool-call' / `reasoning' turn
+according to `ellm-fold-tool-calls' / `ellm-fold-reasoning-blocks'."
+  (dolist (turn (ellm--parse-turns))
+    (let ((role (ellm-turn-role turn)))
+      (when (and (ellm--role-should-fold-p role)
+                 ;; Skip continuation-nested params etc.; only fold the
+                 ;; top of a foldable subtree.
+                 (not (equal role "tool-param")))
+        (ellm--fold-subtree-at (ellm-turn-beg turn))))))
 
 ;;;; Narrowing
 
@@ -2104,6 +2166,15 @@ as a `tool-param' sub-turn."
       (llm-cancel-request request-to-cancel))
     (user-error "ellm :: Buffer is gone")))
 
+(defun ellm--fold-reasoning-in-region (start end)
+  "Fold the `reasoning' turn located between START and END, if any."
+  (save-excursion
+    (goto-char start)
+    (when (re-search-forward
+           (concat "^" (regexp-quote ellm-turn-header-2) " reasoning\\b")
+           end t)
+      (ellm--fold-subtree-at (match-beginning 0)))))
+
 (defun ellm--render-streaming-response (buf request start end result)
   (ellm--ensure-buffer buf request)
   (with-current-buffer buf
@@ -2132,22 +2203,57 @@ as a `tool-param' sub-turn."
           (goto-char (+ start prefix-length))
           (delete-region (point) end)
           (insert (substring new-text prefix-length))))
+      (when (and ellm-fold-reasoning-blocks
+                 reasoning (not (string-empty-p reasoning))
+                 text (not (string-empty-p text)))
+        (ellm--fold-reasoning-in-region start end))
       (dolist (state saved)
         (pcase-let* ((`(,w ,ws ,wp) state))
           (when (window-live-p w)
             (set-window-start w ws t)
             (set-window-point w wp)))))))
 
+(defun ellm--insert-and-mark-turn (insert-fn header role)
+  "Run INSERT-FN and return a `(MARKER . ROLE)' cons for the inserted turn.
+INSERT-FN inserts one turn (possibly with nested children).  HEADER is
+the delimiter string for the turn to be folded (e.g. `ellm-turn-header-2')
+and ROLE its role string; together they locate the heading line of the
+just-inserted turn -- important because INSERT-FN may append deeper
+children (e.g. `tool-param') after it.  MARKER points at that heading
+line for deferred folding.  Returns nil if the heading is not found."
+  (let ((before (point-max)))
+    (funcall insert-fn)
+    (save-excursion
+      (goto-char before)
+      (when (re-search-forward
+             (concat "^" (regexp-quote header) " " (regexp-quote role) "\\b")
+             nil t)
+        (cons (copy-marker (match-beginning 0) nil) role)))))
+
 (defun ellm--render-tool-uses (tool-uses tool-results)
-  (let ((ids (mapcar #'ellm--gen-call-id tool-uses)))
+  "Insert `tool-call' / `tool-result' turns for TOOL-USES and TOOL-RESULTS.
+When `ellm-fold-tool-calls' is non-nil each inserted turn is folded."
+  (let ((ids (mapcar #'ellm--gen-call-id tool-uses))
+        (fold-markers nil))
     (cl-loop for id in ids
              for tu in tool-uses
-             do (ellm--insert-tool-call id tu))
+             do (push (ellm--insert-and-mark-turn
+                       (lambda () (ellm--insert-tool-call id tu))
+                       ellm-turn-header-2 "tool-call")
+                      fold-markers))
     (cl-loop for id in ids
              for tu in tool-uses
              for tr in tool-results
-             do (ellm--insert-tool-result
-                 id (plist-get tu :name) (cdr tr)))))
+             do (push (ellm--insert-and-mark-turn
+                       (lambda ()
+                         (ellm--insert-tool-result
+                          id (plist-get tu :name) (cdr tr)))
+                       ellm-turn-header-2 "tool-result")
+                      fold-markers))
+    (when ellm-fold-tool-calls
+      (dolist (cell (delq nil fold-markers))
+        (ellm--fold-turn-at (marker-position (car cell)) (cdr cell))
+        (set-marker (car cell) nil)))))
 
 (defun ellm--send-once (provider prompt buf)
   "Stream PROVIDER's reply for PROMPT into the trailing assistant turn of BUF.
@@ -2169,6 +2275,12 @@ is text-only, a fresh trailing `user' turn is appended."
               (funcall partial-render result)
               (with-current-buffer buf
                 (setq ellm--active-request nil)
+                ;; Catch the reasoning-only case: if the block never got
+                ;; folded during streaming (because no assistant text
+                ;; followed it), fold it now that the response is
+                ;; complete.  Covers both `t' and `after'.
+                (when ellm-fold-reasoning-blocks
+                  (ellm--fold-reasoning-in-region start end))
                 (if-let* ((tool-uses (plist-get result :tool-uses))
                           (tool-results (plist-get result :tool-results)))
                     (progn
@@ -2257,7 +2369,10 @@ Errors during streaming are signalled normally."
   ;; `backward-page' navigate turn-by-turn.
   (setq-local page-delimiter ellm-page-delimiter-regexp)
   (outline-minor-mode 1)
-  (ellm--rebuild-fence-cache))
+  (ellm--rebuild-fence-cache)
+  ;; Collapse configured turns (tool calls / reasoning) in loaded
+  ;; conversations.  Safe here because every turn is already complete.
+  (ellm--fold-configured-turns))
 
 ;;;###autoload
 (add-to-list 'auto-mode-alist '("\\.ellm\\'" . ellm-mode))
