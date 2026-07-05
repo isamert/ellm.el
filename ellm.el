@@ -1386,23 +1386,33 @@ can be a tool name like \"a_tool_name\"."
      :desc "Max output tokens (integer).")
     ("reasoning"   :ann "level"
      :desc "Reasoning level: light, medium, maximum, none."
-     :values ("light" "medium" "maximum" "none"))
+     :values (("light" :desc "Prefer a small reasoning budget.")
+              ("medium" :desc "Prefer a moderate reasoning budget.")
+              ("maximum" :desc "Prefer the largest reasoning budget.")
+              ("none" :desc "Disable reasoning when supported.")))
     ("tools"       :ann "list"
      :desc "Tools enabled for this buffer; names from `ellm-tools-list' or `@CATEGORY'."
-     :values ellm--capf-tool-candidates)
+     :items ellm--capf-tool-candidates)
     ("acp" :ann "acp"
      :desc "ACP related configurations."
-     :values ("session-id")))
+     :children (("session-id" :ann "string"
+                 :desc "ACP session id used to continue an existing session."))))
   "Alist of (KEY . SPEC) for known YAML frontmatter keys.
 SPEC is a plist with:
   :ann     Short annotation string, shown inline next to the candidate
-           (via `:annotation-function').
+            (via `:annotation-function').
   :desc    Longer description, exposed via `:company-doc-buffer' for
            rich documentation popups.
-  :values  Either a list of strings (static candidates) or a function
-           returning either a list of strings or `(STRINGS . SOURCE)'
-           where SOURCE is appended to the value annotation.
-Keys without `:values' get only key-side completion.")
+  :values  Scalar value candidates.  Either a list or a function
+            returning either a list of strings or `(STRINGS . SOURCE)'
+            where SOURCE is appended to the value annotation.
+  :items   Array item candidates, resolved the same way as `:values'.
+           Used for block lists (`- ITEM') and inline arrays (`[ITEM]').
+  :children Nested key entries with the same shape as this top-level alist.
+
+Candidate lists may contain plain strings or entries of the form
+`(STRING :ann ANN :desc DESC)'.  ANN and DESC are optional.
+Keys without `:values', `:items', or `:children' get only key-side completion.")
 
 (defun ellm--in-frontmatter-p (&optional pos)
   "Return non-nil if POS (or point) is inside YAML frontmatter body.
@@ -1463,6 +1473,86 @@ Returns (CANDIDATES . SOURCE) where SOURCE may be nil."
     (if (and (consp raw) (not (stringp (car raw))) (symbolp (cdr raw)))
         raw
       (cons raw nil))))
+
+(defun ellm--frontmatter-capf--candidate-name (candidate)
+  "Return the completion string for CANDIDATE."
+  (if (consp candidate) (car candidate) candidate))
+
+(defun ellm--frontmatter-capf--candidate-plist (candidate)
+  "Return metadata plist for CANDIDATE, or nil."
+  (and (consp candidate) (cdr candidate)))
+
+(defun ellm--frontmatter-capf--candidate-plist-for (candidate candidates)
+  "Return metadata plist for CANDIDATE in CANDIDATES."
+  (catch 'found
+    (dolist (entry candidates)
+      (when (equal candidate (ellm--frontmatter-capf--candidate-name entry))
+        (throw 'found (ellm--frontmatter-capf--candidate-plist entry))))))
+
+(defun ellm--frontmatter-capf--doc-buffer (text)
+  "Return a documentation buffer containing TEXT."
+  (with-current-buffer (get-buffer-create " *ellm-doc*")
+    (erase-buffer)
+    (insert text)
+    (current-buffer)))
+
+(defun ellm--frontmatter-capf--make-result (beg end candidates context &optional source)
+  "Return a completion-at-point result for CANDIDATES from BEG to END.
+CONTEXT is used as the fallback annotation.  SOURCE, when non-nil, is
+appended to the fallback annotation."
+  (let ((names (mapcar #'ellm--frontmatter-capf--candidate-name candidates)))
+    (list beg end names
+          :exclusive 'no
+          :annotation-function
+          (lambda (cand)
+            (or (when-let* ((plist (ellm--frontmatter-capf--candidate-plist-for cand candidates))
+                            (ann (plist-get plist :ann)))
+                  (concat " " ann))
+                (if source
+                    (format " %s (%s)" context source)
+                  (concat " " context))))
+          :company-doc-buffer
+          (lambda (cand)
+            (when-let* ((plist (ellm--frontmatter-capf--candidate-plist-for cand candidates))
+                        (desc (plist-get plist :desc)))
+              (ellm--frontmatter-capf--doc-buffer desc))))))
+
+(defun ellm--frontmatter-capf--key-entries (spec)
+  "Return child key entries for SPEC, or top-level entries when SPEC is nil."
+  (if spec
+      (plist-get spec :children)
+    ellm--frontmatter-keys))
+
+(defun ellm--frontmatter-capf--lookup-key (key entries)
+  "Return the spec for KEY in ENTRIES."
+  (cdr (assoc key entries)))
+
+(defun ellm--frontmatter-capf--parent-spec (indent)
+  "Return the nearest known parent key spec for a line at INDENT."
+  (pcase-let ((`(_ _ ,contents-beg _ _) (ellm--frontmatter-bounds))
+              (current-bol (line-beginning-position))
+              (stack nil))
+    (save-excursion
+      (goto-char contents-beg)
+      (while (< (point) current-bol)
+        (when (looking-at "^\\([ \t]*\\)\\([a-zA-Z0-9_-]+\\):")
+          (let* ((line-indent (length (match-string-no-properties 1)))
+                 (key (match-string-no-properties 2)))
+            (while (and stack (>= (caar stack) line-indent))
+              (pop stack))
+            (when-let* ((spec (ellm--frontmatter-capf--lookup-key
+                               key (ellm--frontmatter-capf--key-entries (cdar stack)))))
+              (push (cons line-indent spec) stack))))
+        (forward-line 1)))
+    (while (and stack (>= (caar stack) indent))
+      (pop stack))
+    (cdar stack)))
+
+(defun ellm--frontmatter-capf--key-spec (key indent)
+  "Return the known spec for KEY on a line at INDENT."
+  (ellm--frontmatter-capf--lookup-key
+   key (ellm--frontmatter-capf--key-entries
+        (ellm--frontmatter-capf--parent-spec indent))))
 
 (defun ellm--frontmatter-capf--token-bounds-at (pos)
   "Return (BEG . END) of the YAML/JSON-array token at POS.
@@ -1535,101 +1625,84 @@ Returns nil when POS is outside the value region or not on a token."
       (when (and (>= pos val-beg) (<= pos val-end))
         (ellm--frontmatter-capf--token-bounds-at pos)))))
 
-(defun ellm--frontmatter-capf--find-list-key ()
-  "Search backward from point for a `KEY:' line that owns the current block list.
-A block list item is a line starting with optional whitespace then `- '.
-Walk backward past contiguous such lines plus blank lines and return the
-key string when a `KEY:' (empty-value) line is found immediately above,
-or nil otherwise."
+(defun ellm--frontmatter-capf--inline-array-p (value-beg value-end)
+  "Return non-nil when VALUE-BEG..VALUE-END is a bracketed inline array."
   (save-excursion
-    (forward-line 0)
-    ;; We are called only when the current line matches `  - ...'.
-    ;; Walk backward looking for the owning key.
-    (while (and (not (bobp))
-                (progn (forward-line -1)
-                       (looking-at-p "^[ \t]*-\\|^[ \t]*$"))))
-    ;; Now we should be on the `KEY:' line (possibly with trailing spaces).
-    (when (looking-at "^[ \t]*\\([a-zA-Z_-]+\\):[ \t]*$")
-      (match-string-no-properties 1))))
+    (goto-char value-beg)
+    (skip-chars-forward " \t" value-end)
+    (and (< (point) value-end)
+         (eq (char-after) ?\[))))
 
 (defun ellm--frontmatter-capf ()
   "Completion-at-point function for ellm YAML frontmatter.
 Completes:
-  - YAML keys (from `ellm--frontmatter-keys') at the start of a line
-    that does not yet contain a `:',
-  - per-key value candidates (see `:values' in `ellm--frontmatter-keys')
-    after `KEY: VALUE' (inline, including inside `[...]' arrays),
-  - per-key value candidates on block-list item lines (`  - ITEM')
-    when the owning `KEY:' line is found immediately above."
+  - YAML keys from `ellm--frontmatter-keys' and nested `:children',
+  - scalar `:values' after `KEY: VALUE',
+  - array `:items' on block-list item lines (`- ITEM') and inside
+    bracketed inline arrays (`KEY: [ITEM]')."
   (when (ellm--in-frontmatter-p)
     (let ((orig (point)))
       (save-excursion
         (beginning-of-line)
         (cond
-         ((looking-at "^[ \t]*-[ \t]*\\(.*\\)$") ; - <something>
-          (let* ((item-beg (match-beginning 1))
-                 (item-end (match-end 1))
-                 (key (ellm--frontmatter-capf--find-list-key))
-                 (spec (and key (cdr (assoc key ellm--frontmatter-keys))))
-                 (values-spec (and spec (plist-get spec :values))))
-            (when (and values-spec (>= orig item-beg) (<= orig item-end))
+         ((looking-at "^\\([ \t]*\\)-[ \t]*\\(.*\\)$") ; - <something>
+          (let* ((indent (length (match-string-no-properties 1)))
+                 (item-beg (match-beginning 2))
+                 (item-end (match-end 2))
+                 (spec (ellm--frontmatter-capf--parent-spec indent))
+                 (items-spec (and spec (plist-get spec :items))))
+            (when (and items-spec (>= orig item-beg) (<= orig item-end))
               ;; Find the precise token bounds at point so completion replaces
               ;; only the word being typed, not the whole line suffix.
               (let* ((tok (ellm--frontmatter-capf--token-bounds-at orig))
                      (tbeg (or (car tok) orig))
                      (tend (or (cdr tok) orig)))
                 (pcase-let ((`(,cands . ,source)
-                             (ellm--capf-resolve-values values-spec)))
-                  (list tbeg tend cands
-                        :exclusive 'no
-                        :annotation-function
-                        (lambda (_)
-                          (if source
-                              (format " %s (%s)" key source)
-                            (concat " " key)))))))))
+                             (ellm--capf-resolve-values items-spec)))
+                  (ellm--frontmatter-capf--make-result
+                   tbeg tend cands "item" source))))))
          ;; KEY: VALUE (inline) — value-side completion.
          ;; Handles both bare values and inline arrays like ["a", "b"].
-         ((looking-at "^[ \t]*\\([a-zA-Z_-]+\\):[ \t]*\\(.*?\\)[ \t]*$")
-          (let* ((key (match-string-no-properties 1))
-                 (vbeg (match-beginning 2))
-                 (vend (match-end 2))
-                 (spec (cdr (assoc key ellm--frontmatter-keys)))
-                 (values-spec (plist-get spec :values)))
-            (when values-spec
+         ((looking-at "^\\([ \t]*\\)\\([a-zA-Z0-9_-]+\\):[ \t]*\\(.*?\\)[ \t]*$")
+          (let* ((indent (length (match-string-no-properties 1)))
+                 (key (match-string-no-properties 2))
+                 (vbeg (match-beginning 3))
+                 (vend (match-end 3))
+                 (spec (ellm--frontmatter-capf--key-spec key indent))
+                 (values-spec (and spec (plist-get spec :values)))
+                 (items-spec (and spec (plist-get spec :items)))
+                 (arrayp (ellm--frontmatter-capf--inline-array-p vbeg vend))
+                 (candidates-spec (if arrayp items-spec values-spec)))
+            (when candidates-spec
               (let* ((tok (ellm--frontmatter-capf--inline-token-at orig vbeg vend))
                      (tbeg (or (car tok) orig))
                      (tend (or (cdr tok) orig)))
                 (when (and (>= orig vbeg) (<= orig vend))
                   (pcase-let ((`(,cands . ,source)
-                               (ellm--capf-resolve-values values-spec)))
-                    (list tbeg tend cands
-                          :exclusive 'no
-                          :annotation-function
-                          (lambda (_)
-                            (if source
-                                (format " %s (%s)" key source)
-                              (concat " " key))))))))))
+                               (ellm--capf-resolve-values candidates-spec)))
+                    (ellm--frontmatter-capf--make-result
+                     tbeg tend cands key source)))))))
          ;; No `:' yet — key-side completion.
-         ((looking-at "^[ \t]*\\([a-zA-Z_-]*\\)[ \t]*$")
-          (let ((kbeg (match-beginning 1))
-                (kend (match-end 1)))
+         ((looking-at "^\\([ \t]*\\)\\([a-zA-Z0-9_-]*\\)[ \t]*$")
+          (let* ((indent (length (match-string-no-properties 1)))
+                 (kbeg (match-beginning 2))
+                 (kend (match-end 2))
+                 (entries (ellm--frontmatter-capf--key-entries
+                           (ellm--frontmatter-capf--parent-spec indent))))
             (when (and (>= orig kbeg) (<= orig kend))
               (list kbeg kend
-                    (mapcar #'car ellm--frontmatter-keys)
+                    (mapcar #'car entries)
                     :exclusive 'no
                     :annotation-function
                     (lambda (cand)
-                      (when-let* ((spec (cdr (assoc cand ellm--frontmatter-keys)))
+                      (when-let* ((spec (ellm--frontmatter-capf--lookup-key cand entries))
                                   (ann (plist-get spec :ann)))
                         (concat " " ann)))
                     :company-doc-buffer
                     (lambda (cand)
-                      (when-let* ((spec (cdr (assoc cand ellm--frontmatter-keys)))
+                      (when-let* ((spec (ellm--frontmatter-capf--lookup-key cand entries))
                                   (desc (plist-get spec :desc)))
-                        (with-current-buffer (get-buffer-create " *ellm-doc*")
-                          (erase-buffer)
-                          (insert desc)
-                          (current-buffer))))
+                        (ellm--frontmatter-capf--doc-buffer desc)))
                     :exit-function
                     (lambda (_string status)
                       (when (and (memq status '(finished sole exact))
