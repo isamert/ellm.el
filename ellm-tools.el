@@ -62,8 +62,9 @@ or `llm-make-tool' etc. via doing something like:
 
 ;;;; `ellm-deftool' macro
 
-(defun ellm-tools--normalize-name (s)
-  (string-replace "-" "_" s))
+(eval-and-compile
+  (defun ellm-tools--normalize-name (s)
+    (string-replace "-" "_" s)))
 
 (defmacro ellm-deftool (name specs arglist doc &rest body)
   (declare (indent 2))

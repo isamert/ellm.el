@@ -46,6 +46,7 @@
 (require 'color)
 (require 'outline)
 (require 'llm)
+(require 'llm-provider-utils)
 (require 'llm-models)
 (require 'yaml)
 
@@ -65,10 +66,10 @@
   :group 'applications)
 
 (defcustom ellm-provider nil
-  "Default `llm' provider used by `ellm-send'.
-A provider object created with one of the constructors from `llm.el',
-e.g. `(make-llm-openai :key \"sk-…\")', `(make-llm-claude :key …)',
-`(make-llm-ollama :chat-model \"llama3\")'.
+  "Default provider used by `ellm-send'.
+A provider object supported by one of ellm's backends.  Built-in support
+includes `llm.el' provider objects, e.g. `(make-llm-openai :key \"sk-...\")',
+`(make-llm-claude :key ...)', `(make-llm-ollama :chat-model \"llama3\")'.
 
 Used as a fallback when the buffer's frontmatter does not specify a
 `provider:' key (resolved through `ellm-provider-alist').  Can also be
@@ -77,7 +78,7 @@ set buffer-locally."
   :group 'ellm)
 
 (defcustom ellm-provider-alist nil
-  "Alist mapping symbolic provider names to `llm' provider objects.
+  "Alist mapping symbolic provider names to provider objects.
 The car is a symbol usable from frontmatter as `provider: NAME'.  The
 cdr is either:
 
@@ -2115,10 +2116,19 @@ one, then narrows to its outline subtree."
 ;;;; Sending
 
 (defvar-local ellm--active-request nil
-  "Active `llm' request handle for this buffer, or nil.
-Set by `ellm-send' to the object returned by `llm-chat-streaming' so
-`ellm-cancel' can pass it to `llm-cancel-request'.  Cleared on
-completion, error, or cancellation.")
+  "Active backend request handle for this buffer, or nil.
+Set by `ellm-send' to the object returned by `ellm-backend-send'.
+Cleared on completion, error, or cancellation.")
+
+(cl-defgeneric ellm-backend-send (provider frontmatter buffer)
+  "Send BUFFER's trailing user turn through PROVIDER.
+FRONTMATTER is the parsed YAML frontmatter alist for BUFFER.
+Implementations should stream into the assistant turn already appended by
+`ellm-send' and return a backend-specific request handle suitable for
+`ellm-backend-cancel'.")
+
+(cl-defgeneric ellm-backend-cancel (request)
+  "Cancel backend-specific REQUEST created by `ellm-backend-send'.")
 
 (defun ellm--ensure-trailing-user-turn ()
   "Signal `user-error' unless the buffer ends with a `user' turn."
@@ -2128,188 +2138,17 @@ completion, error, or cancellation.")
       (user-error "ellm: last turn must be `user' (got %s)"
                   (if last (ellm-turn-role last) "no turns")))))
 
-(defun ellm--gen-call-id (&rest _)
-  "Return a fresh synthetic tool-call ID for buffer serialization.
-Provider IDs are not surfaced through `llm.el's multi-output result, so
-ellm assigns its own opaque IDs to pair `tool-call' and `tool-result'
-turns across re-parses."
-  (format "call_%08x" (random (expt 2 32))))
-
-(defun ellm--insert-tool-call (id tool-use)
-  "Insert a `tool-call' turn for TOOL-USE plist with synthetic ID.
-TOOL-USE is `(:name NAME :args ARGS)' as produced by `llm.el' multi-
-output.  ARGS is an alist of (ARG-SYM . VALUE).  With one arg, the
-value is dumped as the call body; with multiple args, each is emitted
-as a `tool-param' sub-turn."
-  (let* ((name (plist-get tool-use :name))
-         (args (plist-get tool-use :args)))
-    (cond
-     ((null args)
-      (ellm--insert-turn "tool-call" :pipe-arg name :id id))
-     ((= (length args) 1)
-      (ellm--insert-turn "tool-call" :pipe-arg name :id id)
-      (insert (format "%s\n" (cdar args))))
-     (t
-      (ellm--insert-turn "tool-call" :pipe-arg name :id id)
-      (dolist (a args)
-        (ellm--insert-turn "tool-param" :pipe-arg (format "%s" (car a)))
-        (insert (format "%s\n" (cdr a))))))))
-
-(defun ellm--insert-tool-result (id name result)
-  "Insert a `tool-result' turn for NAME pairing call ID with RESULT body."
-  (ellm--insert-turn "tool-result" :pipe-arg name :id id)
-  (insert (format "%s\n" result)))
-
-(defun ellm--ensure-buffer (buf &optional request-to-cancel)
-  (unless (buffer-live-p buf)
-    (when request-to-cancel
-      (llm-cancel-request request-to-cancel))
-    (user-error "ellm :: Buffer is gone")))
-
-(defun ellm--fold-reasoning-in-region (start end)
-  "Fold the `reasoning' turn located between START and END, if any."
-  (save-excursion
-    (goto-char start)
-    (when (re-search-forward
-           (concat "^" (regexp-quote ellm-turn-header-2) " reasoning\\b")
-           end t)
-      (ellm--fold-subtree-at (match-beginning 0)))))
-
-(defun ellm--render-streaming-response (buf request start end result)
-  (ellm--ensure-buffer buf request)
-  (with-current-buffer buf
-    (let* ((inhibit-read-only t)
-           (saved (mapcar
-                   (lambda (w)
-                     (list w (window-start w) (window-point w)))
-                   (get-buffer-window-list buf nil t)))
-           (reasoning (plist-get result :reasoning))
-           (text      (plist-get result :text))
-           (new-text
-            (concat
-             (when (and reasoning (not (string-empty-p reasoning)))
-               (concat (ellm--get-turn "reasoning" :continuation t) "\n"
-                       (ellm--ensure-newline reasoning)))
-             (when (and text (not (string-empty-p text)))
-               (concat (ellm--get-turn "assistant" :continuation t) "\n"
-                       (ellm--ensure-newline text))))))
-      (save-excursion
-        (goto-char start)
-        (let* ((current-text
-                (buffer-substring-no-properties start end))
-               (prefix-length
-                (length (fill-common-string-prefix
-                         current-text new-text))))
-          (goto-char (+ start prefix-length))
-          (delete-region (point) end)
-          (insert (substring new-text prefix-length))))
-      (when (and ellm-fold-reasoning-blocks
-                 reasoning (not (string-empty-p reasoning))
-                 text (not (string-empty-p text)))
-        (ellm--fold-reasoning-in-region start end))
-      (dolist (state saved)
-        (pcase-let* ((`(,w ,ws ,wp) state))
-          (when (window-live-p w)
-            (set-window-start w ws t)
-            (set-window-point w wp)))))))
-
-(defun ellm--insert-and-mark-turn (insert-fn header role)
-  "Run INSERT-FN and return a `(MARKER . ROLE)' cons for the inserted turn.
-INSERT-FN inserts one turn (possibly with nested children).  HEADER is
-the delimiter string for the turn to be folded (e.g. `ellm-turn-header-2')
-and ROLE its role string; together they locate the heading line of the
-just-inserted turn -- important because INSERT-FN may append deeper
-children (e.g. `tool-param') after it.  MARKER points at that heading
-line for deferred folding.  Returns nil if the heading is not found."
-  (let ((before (point-max)))
-    (funcall insert-fn)
-    (save-excursion
-      (goto-char before)
-      (when (re-search-forward
-             (concat "^" (regexp-quote header) " " (regexp-quote role) "\\b")
-             nil t)
-        (cons (copy-marker (match-beginning 0) nil) role)))))
-
-(defun ellm--render-tool-uses (tool-uses tool-results)
-  "Insert `tool-call' / `tool-result' turns for TOOL-USES and TOOL-RESULTS.
-When `ellm-fold-tool-calls' is non-nil each inserted turn is folded."
-  (let ((ids (mapcar #'ellm--gen-call-id tool-uses))
-        (fold-markers nil))
-    (cl-loop for id in ids
-             for tu in tool-uses
-             do (push (ellm--insert-and-mark-turn
-                       (lambda () (ellm--insert-tool-call id tu))
-                       ellm-turn-header-2 "tool-call")
-                      fold-markers))
-    (cl-loop for id in ids
-             for tu in tool-uses
-             for tr in tool-results
-             do (push (ellm--insert-and-mark-turn
-                       (lambda ()
-                         (ellm--insert-tool-result
-                          id (plist-get tu :name) (cdr tr)))
-                       ellm-turn-header-2 "tool-result")
-                      fold-markers))
-    (when ellm-fold-tool-calls
-      (dolist (cell (delq nil fold-markers))
-        (ellm--fold-turn-at (marker-position (car cell)) (cdr cell))
-        (set-marker (car cell) nil)))))
-
-(defun ellm--send-once (provider prompt buf)
-  "Stream PROVIDER's reply for PROMPT into the trailing assistant turn of BUF.
-Uses multi-output mode.  If the LLM emits tool calls, llm.el executes
-them and populates PROMPT with both calls and results before the final
-callback fires; this function then writes corresponding `tool-call' /
-`tool-result' turns into BUF, opens a continuation `assistant' turn,
-and recurses with the (already populated) PROMPT.  When the response
-is text-only, a fresh trailing `user' turn is appended."
-  (with-current-buffer buf
-    (let* ((start (copy-marker (point-max) nil))
-           (end   (copy-marker (point-max) t))
-           request
-           (partial-render
-            (apply-partially #'ellm--render-streaming-response buf request start end))
-           (final-render
-            (lambda (result)
-              (ellm--ensure-buffer buf request)
-              (funcall partial-render result)
-              (with-current-buffer buf
-                (setq ellm--active-request nil)
-                ;; Catch the reasoning-only case: if the block never got
-                ;; folded during streaming (because no assistant text
-                ;; followed it), fold it now that the response is
-                ;; complete.  Covers both `t' and `after'.
-                (when ellm-fold-reasoning-blocks
-                  (ellm--fold-reasoning-in-region start end))
-                (if-let* ((tool-uses (plist-get result :tool-uses))
-                          (tool-results (plist-get result :tool-results)))
-                    (progn
-                      (ellm--render-tool-uses tool-uses tool-results)
-                      (ellm--send-once provider prompt buf))
-                  (ellm--insert-turn "user")))))
-           (on-error
-            (lambda (type msg)
-              (ellm--ensure-buffer buf request)
-              (with-current-buffer buf
-                (setq ellm--active-request nil))
-              (signal type (list msg)))))
-      (setq request (llm-chat-streaming
-                     provider prompt
-                     partial-render final-render on-error
-                     'multi-output))
-      (setq ellm--active-request request))))
-
 (defun ellm-send ()
-  "Send the conversation to the LLM provider and stream the reply.
+  "Send the conversation to the configured provider and stream the reply.
 
 The buffer must end in a `user' turn.  An `assistant' turn is appended
 and the streamed response is inserted into it as it arrives.
 
-If the LLM invokes tools, the calls are executed via `llm.el' and the
-calls plus results are written into the buffer as `tool-call' /
-`tool-result' turns; ellm then re-sends so the model can react to the
-results.  This loop continues until the model produces a text-only
-response, after which a fresh empty `user' turn is appended.
+Backend implementations decide how provider requests, tool calls, and
+results are handled.  The built-in `llm.el' backend preserves the original
+tool-call loop: tool calls and results are written into the buffer as
+`tool-call' / `tool-result' turns, then ellm re-sends so the model can
+react to the results.
 
 Errors during streaming are signalled normally."
   (interactive)
@@ -2318,17 +2157,16 @@ Errors during streaming are signalled normally."
   (ellm--ensure-trailing-user-turn)
   (let* ((fm       (ellm--parse-frontmatter))
          (provider (ellm--resolve-provider fm))
-         (prompt   (ellm--parse-buffer-as-llm-chat provider))
          (buf      (current-buffer)))
     (ellm--insert-turn "assistant")
-    (ellm--send-once provider prompt buf)))
+    (setq ellm--active-request (ellm-backend-send provider fm buf))))
 
 (defun ellm-cancel ()
   "Cancel the in-flight LLM request for this buffer, if any."
   (interactive)
   (if (not ellm--active-request)
       (message "ellm: no active request")
-    (llm-cancel-request ellm--active-request)
+    (ellm-backend-cancel ellm--active-request)
     (setq ellm--active-request nil)
     (message "ellm: request cancelled")))
 

@@ -67,4 +67,7 @@ These lines can also carry custom data:
 ...
 ```
 
-For LLM API interactions, *ellm* uses *llm.el* and it comes with pre-defined tools for *agentic* work (I hate this word).
+For LLM API interactions, *ellm* uses backend implementations behind a
+small generic dispatch surface.  The default backend is `ellm-llm.el`,
+which uses `llm.el` provider flow and tool handling, `llm.el` does the
+heavy-lifting for interacting with the providers APIs.
