@@ -5,7 +5,7 @@
 ;; Author: Isa Mert Gurbuz <isamertgurbuz@gmail.com>
 ;; URL: https://github.com/isamert/ellm.el
 ;; Version: 0.0.1
-;; Package-Requires: ((emacs "29.1") (llm "0.30") (yaml "0.5.5"))
+;; Package-Requires: ((emacs "29.1") (yaml "0.5.5"))
 ;; Keywords: TODO
 
 ;; This file is not part of GNU Emacs.
@@ -45,19 +45,7 @@
 (require 'cl-lib)
 (require 'color)
 (require 'outline)
-(require 'llm)
-(require 'llm-provider-utils)
-(require 'llm-models)
 (require 'yaml)
-
-;; `llm.el' signals `(not-implemented)' from generic fall-through methods
-;; \(see e.g. `llm-chat-streaming' default method) but never registers
-;; `not-implemented' as an error symbol via `define-error'.  As a result
-;; Emacs reports the cryptic "Invalid error symbol: not-implemented"
-;; instead of letting the signal propagate properly.  Register it here
-;; so users get a real error message and a usable backtrace.
-(unless (get 'not-implemented 'error-conditions)
-  (define-error 'not-implemented "Operation is not implemented for this LLM provider"))
 
 ;;;; Customization
 
@@ -67,9 +55,7 @@
 
 (defcustom ellm-provider nil
   "Default provider used by `ellm-send'.
-A provider object supported by one of ellm's backends.  Built-in support
-includes `llm.el' provider objects, e.g. `(make-llm-openai :key \"sk-...\")',
-`(make-llm-claude :key ...)', `(make-llm-ollama :chat-model \"llama3\")'.
+A provider object supported by one of ellm's loaded backends.
 
 Used as a fallback when the buffer's frontmatter does not specify a
 `provider:' key (resolved through `ellm-provider-alist').  Can also be
@@ -82,17 +68,10 @@ set buffer-locally."
 The car is a symbol usable from frontmatter as `provider: NAME'.  The
 cdr is either:
 
-  - a provider object directly, e.g. `(make-llm-openai :key …)', or
+  - a provider object directly, or
   - a plist `(:provider PROV :models (\"m1\" \"m2\" …))' where the
     optional `:models' list constrains the candidates offered by
     frontmatter `model:' completion.
-
-Example:
-
-  ((openai  . ,(make-llm-openai :key …))
-   (claude  . (:provider ,(make-llm-claude :key …)
-               :models (\"claude-opus-4\" \"claude-sonnet-4\")))
-   (local   . ,(make-llm-ollama :chat-model \"llama3\")))
 
 Used by `ellm--resolve-provider' to look up the provider named in the
 buffer's frontmatter, and by `ellm--frontmatter-capf' for completion."
@@ -119,15 +98,12 @@ Returns nil for bare provider objects or plist entries without a
        (plist-member entry :models)
        (plist-get entry :models)))
 
-(cl-defstruct (ellm-tool (:include llm-tool)
-                         (:constructor ellm-make-tool))
-  "An `llm-tool' with an extra CATEGORY slot for grouping in `ellm-tools-list'.
-Inherits all `llm-tool' slots; passes `llm-tool-p' so it flows
-unchanged into `llm-make-chat-prompt's `:tools' argument."
-  category)
+(cl-defstruct (ellm-tool (:constructor ellm-make-tool))
+  "Backend-neutral tool definition used by ellm buffers."
+  name description args function async category)
 
 (defcustom ellm-tools-list nil
-  "List of `ellm-tool' (or `llm-tool') objects available to ellm buffers.
+  "List of `ellm-tool' objects available to ellm buffers.
 
 Tools are referenced from a buffer's YAML frontmatter `tools:' key
 either by the tool's `name' slot, or by `@CATEGORY' to enable every
@@ -153,7 +129,7 @@ Example:
 
 A buffer can then enable a single tool with `tools: [current_time]' or
 a whole category with `tools: [\"@shell\"]'."
-  :type '(repeat (restricted-sexp :match-alternatives (llm-tool-p)))
+  :type '(repeat (restricted-sexp :match-alternatives (ellm-tool-p)))
   :group 'ellm)
 
 (defconst ellm--heading-specs
@@ -1281,184 +1257,20 @@ parsing fails (a `lwarn' is issued in the latter case)."
        (lwarn 'ellm :warning "Failed to parse frontmatter: %S" err)
        nil))))
 
-;;;;; LLM chat prompt assembly
-
-(defun ellm--collect-tool-call-args (tool-call-turn following-turns base-prompt)
-  "Return (ARGS . TURNS-CONSUMED) for TOOL-CALL-TURN.
-
-Walks FOLLOWING-TURNS for immediately-adjacent depth-3 `tool-param'
-turns and turns them into an alist of (ARG-SYMBOL . VALUE).  If no
-`tool-param' children are present, falls back to the single-arg form:
-the tool-call body is the value of the tool's first declared arg
-\(looked up via BASE-PROMPT's `tools' slot, falling back to
-`ellm-tools-list').
-
-TURNS-CONSUMED is the count of trailing depth-3 `tool-param' turns that
-were consumed."
-  (let ((params nil)
-        (consumed 0)
-        (rest following-turns))
-    (while (and rest
-                (let ((nx (car rest)))
-                  (and (equal (ellm-turn-role nx) "tool-param")
-                       (eql (ellm-turn-depth nx) 3))))
-      (let* ((p (car rest))
-             (pname (alist-get "arg" (ellm-turn-attrs p) nil nil #'equal)))
-        (push (cons (intern (or pname "_")) (ellm-turn-content p))
-              params))
-      (setq rest (cdr rest))
-      (cl-incf consumed))
-    (let ((args
-           (cond
-            (params (nreverse params))
-            ((not (string-empty-p
-                   (string-trim (ellm-turn-content tool-call-turn))))
-             (let* ((name (alist-get "arg"
-                                     (ellm-turn-attrs tool-call-turn)
-                                     nil nil #'equal))
-                    (tool (or (cl-find name
-                                       (llm-chat-prompt-tools base-prompt)
-                                       :key #'llm-tool-name
-                                       :test #'equal)
-                              (cl-find name ellm-tools-list
-                                       :key #'llm-tool-name
-                                       :test #'equal)))
-                    (arg-name (and tool (llm-tool-args tool)
-                                   (plist-get (car (llm-tool-args tool))
-                                              :name))))
-               (when arg-name
-                 (list (cons (intern arg-name)
-                             (ellm-turn-content tool-call-turn))))))
-            (t nil))))
-      (cons args consumed))))
-
-(defun ellm--apply-turns-to-prompt (provider turns prompt)
-  "Walk TURNS and append corresponding interactions onto PROMPT.
-
-PROVIDER is required so its `llm-provider-populate-tool-uses' method can
-record tool calls in the prompt's provider-specific shape (e.g. Claude
-expects a vector of plists with `:type \"tool_use\"' inside the assistant
-interaction's content; OpenAI uses a different shape).  Plain text
-turns become regular interactions.  Contiguous runs of `tool-call'
-turns (each optionally followed by depth-3 `tool-param' children) are
-batched into one provider populate call.  Contiguous `tool-result'
-turns are batched into one `tool-results' interaction.  Orphan
-`tool-param' turns are skipped.
-
-Returns PROMPT (mutated)."
-  (let ((rest turns))
-    (while rest
-      (let* ((turn (car rest))
-             (role (ellm-turn-role turn)))
-        (cond
-         ;; tool-call run
-         ((equal role "tool-call")
-          (let (tool-uses)
-            (while (and rest (equal (ellm-turn-role (car rest)) "tool-call"))
-              (let* ((tc (car rest))
-                     (attrs (ellm-turn-attrs tc))
-                     (name (alist-get "arg" attrs nil nil #'equal))
-                     (id (alist-get "id" attrs nil nil #'equal))
-                     (collected (ellm--collect-tool-call-args
-                                 tc (cdr rest) prompt))
-                     (args (car collected))
-                     (consumed (cdr collected)))
-                (push (make-llm-provider-utils-tool-use
-                       :id id :name name :args args)
-                      tool-uses)
-                ;; Advance past the tool-call and any consumed tool-param children.
-                (setq rest (nthcdr (1+ consumed) rest))))
-            (llm-provider-populate-tool-uses
-             provider prompt (nreverse tool-uses))))
-         ;; tool-result run
-         ((equal role "tool-result")
-          (let (results)
-            (while (and rest (equal (ellm-turn-role (car rest)) "tool-result"))
-              (let* ((tr (car rest))
-                     (attrs (ellm-turn-attrs tr))
-                     (id (alist-get "id" attrs nil nil #'equal))
-                     (name (alist-get "arg" attrs nil nil #'equal)))
-                (push (make-llm-chat-prompt-tool-result
-                       :call-id id :tool-name name
-                       :result (ellm-turn-content tr))
-                      results)
-                (setq rest (cdr rest))))
-            (llm-provider-utils-append-to-prompt
-             prompt nil (nreverse results))))
-         ;; orphan tool-param: skip
-         ((equal role "tool-param")
-          (setq rest (cdr rest)))
-         ;; everything else: append a regular interaction
-         (t
-          (setf (llm-chat-prompt-interactions prompt)
-                (append (llm-chat-prompt-interactions prompt)
-                        (list (make-llm-chat-prompt-interaction
-                               :role (intern role)
-                               :content (ellm-turn-content turn)))))
-          (setq rest (cdr rest)))))))
-  prompt)
-
-(defun ellm--parse-buffer-as-llm-chat (provider)
-  "Build an `llm-chat-prompt' from the current buffer for PROVIDER.
-
-PROVIDER's `llm-provider-populate-tool-uses' method is used to record
-tool calls in the provider-specific shape it expects on subsequent
-sends.
-
-The system prompt is conveyed as an interaction with role `system' at
-the front of the interactions list (this is the canonical
-representation; `:context' is reserved for plain string context that
-providers synthesise into a system prompt themselves).  The system
-prompt comes from the first `system' turn in the buffer if present,
-else from the frontmatter `system:' value.
-
-Frontmatter keys consumed: `temperature', `max-tokens', `reasoning',
-`system', `tools'."
-  (let* ((fm          (ellm--parse-frontmatter))
-         (turns       (cl-loop for turn in (ellm--parse-turns)
-                               unless (equal "reasoning" (ellm-turn-role turn))
-                               collect turn))
-         (fm-system   (alist-get 'system fm))
-         (has-system  (and turns
-                           (equal (ellm-turn-role (car turns)) "system")))
-         (reasoning   (alist-get 'reasoning fm))
-         (tools       (ellm--resolve-tools fm))
-         (initial     (and (not has-system) fm-system
-                           (list (make-llm-chat-prompt-interaction
-                                  :role 'system
-                                  :content fm-system))))
-         (prompt      (make-llm-chat-prompt
-                       :interactions initial
-                       :tools        tools
-                       :temperature  (alist-get 'temperature fm)
-                       :max-tokens   (alist-get 'max-tokens fm)
-                       :reasoning    (and reasoning
-                                          (intern (format "%s" reasoning))))))
-    (ellm--apply-turns-to-prompt provider turns prompt)
-    prompt))
-
 ;;;;; Provider resolution
 
 (defun ellm--provider-with-model (provider model)
-  "Return a copy of PROVIDER with its `chat-model' slot set to MODEL.
-
-The slot is set by attempting `cl-struct-slot-value' on the live
-struct rather than by inspecting class metadata, because the latter
-can be unreliable across different Emacs/cl-generic load orders
-\(e.g. when a parent struct's slots are inherited via `:include').
-
-If PROVIDER doesn't have a `chat-model' slot, the model is silently
-ignored and PROVIDER is returned unchanged."
+  "Return PROVIDER configured with MODEL where its backend supports it."
   (ellm-provider-with-model provider model))
 
 (defun ellm--resolve-provider (frontmatter)
-  "Return the `llm' provider to use for the current buffer.
+  "Return the provider to use for the current buffer.
 Lookup order:
   1. `provider' in FRONTMATTER, looked up in `ellm-provider-alist'.
   2. `ellm-provider' (buffer-local or global).
 
-When FRONTMATTER specifies a `model:', the resolved provider is
-shallow-copied with its chat-model slot updated.
+When FRONTMATTER specifies a `model:', the resolved provider is passed
+through `ellm-provider-with-model'.
 
 Signals `user-error' when no provider can be resolved."
   (let* ((named (alist-get 'provider frontmatter))
@@ -1488,7 +1300,7 @@ Signals `user-error' when no provider can be resolved."
 Reads the `tools' key from FRONTMATTER (a list of strings), and for
 each entry resolves it against `ellm-tools-list':
 
-  - A bare string is matched against `llm-tool-name' equality.
+  - A bare string is matched against `ellm-tool-name' equality.
   - A string of the form `@CATEGORY' expands to every `ellm-tool' in
     `ellm-tools-list' whose `category' slot equals CATEGORY."
   (let ((entries (alist-get 'tools frontmatter))
@@ -1524,8 +1336,8 @@ can be a tool name like \"a_tool_name\"."
           (warn "ellm: no tools in `ellm-tools-list' have category `%s'" cat))))
      ;; name ref
      (t
-      (let ((tool (cl-find spec ellm-tools-list
-                           :key #'llm-tool-name
+       (let ((tool (cl-find spec ellm-tools-list
+                            :key #'ellm-tool-name
                            :test #'equal)))
         (if tool (list tool)
           (warn "ellm: tool `%s' not found in `ellm-tools-list'" spec)))))))
@@ -1586,35 +1398,29 @@ delimiter starting from POS."
   "Return list of provider name strings from `ellm-provider-alist'."
   (mapcar (lambda (e) (symbol-name (car e))) ellm-provider-alist))
 
-(defun ellm--extract-chat-model-from-provider (provider)
-  (ellm-provider-current-model provider))
-
 (defun ellm--capf-model-candidates ()
   "Return (MODELS . SOURCE) for `model:' frontmatter completion.
 MODELS is a list of model name strings.  SOURCE is one of:
   `explicit'   - taken from the alist entry's `:models' list,
-  `chat-model' - the resolved provider's `chat-model' slot,
-  `generic'    - fallback list of all symbols from `llm-models'."
+  `provider'   - supplied by the resolved provider backend."
   (let* ((fm (ignore-errors (ellm--parse-frontmatter)))
          (named (alist-get 'provider fm))
          (sym (and named (if (stringp named) (intern named) named)))
          (entry (and sym (alist-get sym ellm-provider-alist)))
          (explicit (and entry (ellm--provider-entry-models entry)))
          (provider (and entry (ellm--provider-entry-provider entry)))
-         (chat-model (ellm--extract-chat-model-from-provider provider)))
+         (models (and provider (ellm-provider-model-candidates provider))))
     (cond
-     (explicit (cons explicit 'explicit))
-     (chat-model (cons (list chat-model) 'chat-model))
-     (t (cons (mapcar (lambda (m) (symbol-name (llm-model-symbol m)))
-                      llm-models)
-              'generic)))))
+      (explicit (cons explicit 'explicit))
+      (models (cons models 'provider))
+      (t (cons nil nil)))))
 
 (defun ellm--capf-tool-candidates ()
   "Return list of completion strings for `tools:' frontmatter.
 Combines every tool name in `ellm-tools-list' with `@CATEGORY' for each
 distinct `category' slot of `ellm-tool' entries."
   (append
-   (mapcar #'llm-tool-name ellm-tools-list)
+   (mapcar #'ellm-tool-name ellm-tools-list)
    (mapcar (lambda (cat) (concat "@" cat))
            (delete-dups
             (delq nil (mapcar #'ellm-tool-category ellm-tools-list))))))
@@ -1811,7 +1617,9 @@ Completes:
     (with-current-buffer buf
       (insert (format "---\nprovider: %s\nmodel: %s\ncreated: %s\n---\n\n"
                       (or provider-name "null")
-                      (or (ellm--extract-chat-model-from-provider provider) "null")
+                      (or (ellm-provider-current-model
+                           (ellm--provider-entry-provider provider))
+                          "null")
                       (ellm--timestamp)))
       (ellm--insert-turn "user" :ts (ellm--timestamp))
       (ellm-mode))
@@ -2118,10 +1926,7 @@ The buffer must end in a `user' turn.  An `assistant' turn is appended
 and the streamed response is inserted into it as it arrives.
 
 Backend implementations decide how provider requests, tool calls, and
-results are handled.  The built-in `llm.el' backend preserves the original
-tool-call loop: tool calls and results are written into the buffer as
-`tool-call' / `tool-result' turns, then ellm re-sends so the model can
-react to the results.
+results are handled.
 
 Errors during streaming are signalled normally."
   (interactive)
@@ -2148,37 +1953,23 @@ Errors during streaming are signalled normally."
 (cl-defgeneric ellm-provider-current-model (provider)
   "Return PROVIDER's current model name, or nil when unknown.")
 
-(cl-defmethod ellm-provider-current-model (provider)
-  "Default model lookup for providers with a `chat-model' struct slot."
-  (let* ((resolved-provider (if (recordp provider)
-                                provider
-                              (ignore-errors
-                                (plist-get provider :provider))))
-         (chat-model (and resolved-provider
-                          (recordp resolved-provider)
-                          (condition-case nil
-                              (cl-struct-slot-value
-                               (type-of resolved-provider)
-                               'chat-model resolved-provider)
-                            (error nil)))))
-    (when (and (stringp chat-model)
-               (not (string-empty-p chat-model))
-               (not (equal "unset" chat-model)))
-      chat-model)))
+(cl-defmethod ellm-provider-current-model (_provider)
+  "Default model lookup for unknown PROVIDER types."
+  nil)
+
+(cl-defgeneric ellm-provider-model-candidates (provider)
+  "Return model completion candidates for PROVIDER, or nil when unknown.")
+
+(cl-defmethod ellm-provider-model-candidates (_provider)
+  "Default model candidates for unknown PROVIDER types."
+  nil)
 
 (cl-defgeneric ellm-provider-with-model (provider model)
   "Return PROVIDER configured to use MODEL where supported.")
 
-(cl-defmethod ellm-provider-with-model (provider model)
-  "Default model setter for providers with a `chat-model' struct slot."
-  (if (not (recordp provider))
-      provider
-    (let ((copy (copy-sequence provider)))
-      (condition-case nil
-          (progn
-            (setf (cl-struct-slot-value (type-of copy) 'chat-model copy) model)
-            copy)
-        (error provider)))))
+(cl-defmethod ellm-provider-with-model (provider _model)
+  "Default model setter for unknown PROVIDER types."
+  provider)
 
 (cl-defgeneric ellm-backend-send (provider frontmatter buffer)
   "Send BUFFER's trailing user turn through PROVIDER.

@@ -31,7 +31,14 @@
 
 (require 'cl-lib)
 (require 'llm)
+(require 'llm-provider-utils)
+(require 'llm-models)
 (require 'ellm)
+
+;; `llm.el' signals `(not-implemented)' from generic fall-through methods
+;; without registering it as an error symbol.
+(unless (get 'not-implemented 'error-conditions)
+  (define-error 'not-implemented "Operation is not implemented for this LLM provider"))
 
 (cl-defstruct (ellm-llm-request (:constructor ellm-llm--make-request))
   "Active request handle for the `llm.el' backend."
@@ -54,7 +61,24 @@ Backend-specific provider types should define a more specific
   "Cancel an active `llm.el' REQUEST."
   (llm-cancel-request (ellm-llm-request-raw request)))
 
+(cl-defmethod ellm-provider-current-model ((provider llm-standard-chat-provider))
+  "Return PROVIDER's `llm.el' chat model name, or nil when unset."
+  (ellm-llm--provider-current-model provider))
+
+(cl-defmethod ellm-provider-model-candidates ((provider llm-standard-chat-provider))
+  "Return model completion candidates for `llm.el' PROVIDER."
+  (or (and-let* ((model (ellm-llm--provider-current-model provider)))
+        (list model))
+      (mapcar (lambda (m) (symbol-name (llm-model-symbol m)))
+              llm-models)))
+
+(cl-defmethod ellm-provider-with-model ((provider llm-standard-chat-provider) model)
+  "Return a copy of PROVIDER with its `chat-model' slot set to MODEL."
+  (ellm-llm--provider-with-model provider model))
+
 ;;;; Internal
+
+;;;;; Tool handling
 
 (defun ellm-llm--gen-call-id (&rest _)
   "Return a fresh synthetic tool-call ID for buffer serialization.
@@ -62,6 +86,124 @@ Provider IDs are not surfaced through `llm.el's multi-output result, so
 ellm assigns its own opaque IDs to pair `tool-call' and `tool-result'
 turns across re-parses."
   (format "call_%08x" (random (expt 2 32))))
+
+(defun ellm-llm--provider-current-model (provider)
+  "Return PROVIDER's `chat-model' slot when present and meaningful."
+  (let ((chat-model (and (recordp provider)
+                         (condition-case nil
+                             (cl-struct-slot-value
+                              (type-of provider) 'chat-model provider)
+                           (error nil)))))
+    (when (and (stringp chat-model)
+               (not (string-empty-p chat-model))
+               (not (equal "unset" chat-model)))
+      chat-model)))
+
+(defun ellm-llm--make-llm-tool (tool)
+  "Convert backend-neutral ellm TOOL to an `llm-tool'."
+  (llm-make-tool
+   :name (ellm-tool-name tool)
+   :description (ellm-tool-description tool)
+   :args (ellm-tool-args tool)
+   :function (ellm-tool-function tool)
+   :async (ellm-tool-async tool)))
+
+(defun ellm-llm--resolve-tools (frontmatter)
+  "Return FRONTMATTER selected tools converted to `llm-tool' objects."
+  (mapcar #'ellm-llm--make-llm-tool (ellm--resolve-tools frontmatter)))
+
+(defun ellm-llm--collect-tool-call-args (tool-call-turn following-turns base-prompt)
+  "Return (ARGS . TURNS-CONSUMED) for TOOL-CALL-TURN."
+  (let ((params nil)
+        (consumed 0)
+        (rest following-turns))
+    (while (and rest
+                (let ((nx (car rest)))
+                  (and (equal (ellm-turn-role nx) "tool-param")
+                       (eql (ellm-turn-depth nx) 3))))
+      (let* ((p (car rest))
+             (pname (alist-get "arg" (ellm-turn-attrs p) nil nil #'equal)))
+        (push (cons (intern (or pname "_")) (ellm-turn-content p))
+              params))
+      (setq rest (cdr rest))
+      (cl-incf consumed))
+    (let ((args
+           (cond
+            (params (nreverse params))
+            ((not (string-empty-p
+                   (string-trim (ellm-turn-content tool-call-turn))))
+             (let* ((name (alist-get "arg"
+                                     (ellm-turn-attrs tool-call-turn)
+                                     nil nil #'equal))
+                    (tool (or (cl-find name
+                                       (llm-chat-prompt-tools base-prompt)
+                                       :key #'llm-tool-name
+                                       :test #'equal)
+                              (cl-find name ellm-tools-list
+                                       :key #'ellm-tool-name
+                                       :test #'equal)))
+                    (arg-name (and tool
+                                   (if (llm-tool-p tool)
+                                       (and (llm-tool-args tool)
+                                            (plist-get (car (llm-tool-args tool))
+                                                       :name))
+                                     (and (ellm-tool-args tool)
+                                          (plist-get (car (ellm-tool-args tool))
+                                                     :name))))))
+               (when arg-name
+                 (list (cons (intern arg-name)
+                             (ellm-turn-content tool-call-turn))))))
+            (t nil))))
+      (cons args consumed))))
+
+(defun ellm-llm--apply-turns-to-prompt (provider turns prompt)
+  "Walk TURNS and append corresponding interactions onto PROMPT."
+  (let ((rest turns))
+    (while rest
+      (let* ((turn (car rest))
+             (role (ellm-turn-role turn)))
+        (cond
+         ((equal role "tool-call")
+          (let (tool-uses)
+            (while (and rest (equal (ellm-turn-role (car rest)) "tool-call"))
+              (let* ((tc (car rest))
+                     (attrs (ellm-turn-attrs tc))
+                     (name (alist-get "arg" attrs nil nil #'equal))
+                     (id (alist-get "id" attrs nil nil #'equal))
+                     (collected (ellm-llm--collect-tool-call-args
+                                 tc (cdr rest) prompt))
+                     (args (car collected))
+                     (consumed (cdr collected)))
+                (push (make-llm-provider-utils-tool-use
+                       :id id :name name :args args)
+                      tool-uses)
+                (setq rest (nthcdr (1+ consumed) rest))))
+            (llm-provider-populate-tool-uses
+             provider prompt (nreverse tool-uses))))
+         ((equal role "tool-result")
+          (let (results)
+            (while (and rest (equal (ellm-turn-role (car rest)) "tool-result"))
+              (let* ((tr (car rest))
+                     (attrs (ellm-turn-attrs tr))
+                     (id (alist-get "id" attrs nil nil #'equal))
+                     (name (alist-get "arg" attrs nil nil #'equal)))
+                (push (make-llm-chat-prompt-tool-result
+                       :call-id id :tool-name name
+                       :result (ellm-turn-content tr))
+                      results)
+                (setq rest (cdr rest))))
+            (llm-provider-utils-append-to-prompt
+             prompt nil (nreverse results))))
+         ((equal role "tool-param")
+          (setq rest (cdr rest)))
+         (t
+          (setf (llm-chat-prompt-interactions prompt)
+                (append (llm-chat-prompt-interactions prompt)
+                        (list (make-llm-chat-prompt-interaction
+                               :role (intern role)
+                               :content (ellm-turn-content turn)))))
+          (setq rest (cdr rest)))))))
+  prompt)
 
 (defun ellm-llm--insert-tool-call (id tool-use)
   "Insert a `tool-call' turn for TOOL-USE plist with synthetic ID.
@@ -88,20 +230,66 @@ as a `tool-param' sub-turn."
   (ellm--insert-turn "tool-result" :pipe-arg name :id id)
   (insert (format "%s\n" result)))
 
-(defun ellm-llm--ensure-buffer (buf &optional request-to-cancel)
-  (unless (buffer-live-p buf)
-    (when request-to-cancel
-      (llm-cancel-request request-to-cancel))
-    (user-error "ellm :: Buffer is gone")))
+(defun ellm-llm--render-tool-uses (tool-uses tool-results)
+  "Insert `tool-call' / `tool-result' turns for TOOL-USES and TOOL-RESULTS.
+When `ellm-fold-tool-calls' is non-nil each inserted turn is folded."
+  (let ((ids (mapcar #'ellm-llm--gen-call-id tool-uses))
+        (fold-markers nil))
+    (cl-loop for id in ids
+             for tu in tool-uses
+             do (push (ellm-llm--insert-and-mark-turn
+                       (lambda () (ellm-llm--insert-tool-call id tu))
+                       ellm-turn-header-2 "tool-call")
+                      fold-markers))
+    (cl-loop for id in ids
+             for tu in tool-uses
+             for tr in tool-results
+             do (push (ellm-llm--insert-and-mark-turn
+                       (lambda ()
+                         (ellm-llm--insert-tool-result
+                          id (plist-get tu :name) (cdr tr)))
+                       ellm-turn-header-2 "tool-result")
+                      fold-markers))
+    (when ellm-fold-tool-calls
+      (dolist (cell (delq nil fold-markers))
+        (ellm--fold-turn-at (marker-position (car cell)) (cdr cell))
+        (set-marker (car cell) nil)))))
 
-(defun ellm-llm--fold-reasoning-in-region (start end)
-  "Fold the `reasoning' turn located between START and END, if any."
-  (save-excursion
-    (goto-char start)
-    (when (re-search-forward
-           (concat "^" (regexp-quote ellm-turn-header-2) " reasoning\\b")
-           end t)
-      (ellm--fold-subtree-at (match-beginning 0)))))
+;;;;; Parsing & sending
+
+(defun ellm-llm--provider-with-model (provider model)
+  "Return a copy of PROVIDER with its `chat-model' slot set to MODEL."
+  (let ((copy (copy-sequence provider)))
+    (condition-case nil
+        (progn
+          (setf (cl-struct-slot-value (type-of copy) 'chat-model copy) model)
+          copy)
+      (error provider))))
+
+(defun ellm-llm--parse-buffer-as-chat (provider)
+  "Build an `llm-chat-prompt' from the current buffer for PROVIDER."
+  (let* ((fm          (ellm--parse-frontmatter))
+         (turns       (cl-loop for turn in (ellm--parse-turns)
+                               unless (equal "reasoning" (ellm-turn-role turn))
+                               collect turn))
+         (fm-system   (alist-get 'system fm))
+         (has-system  (and turns
+                           (equal (ellm-turn-role (car turns)) "system")))
+         (reasoning   (alist-get 'reasoning fm))
+         (tools       (ellm-llm--resolve-tools fm))
+         (initial     (and (not has-system) fm-system
+                           (list (make-llm-chat-prompt-interaction
+                                  :role 'system
+                                  :content fm-system))))
+         (prompt      (make-llm-chat-prompt
+                       :interactions initial
+                       :tools        tools
+                       :temperature  (alist-get 'temperature fm)
+                       :max-tokens   (alist-get 'max-tokens fm)
+                       :reasoning    (and reasoning
+                                          (intern (format "%s" reasoning))))))
+    (ellm-llm--apply-turns-to-prompt provider turns prompt)
+    prompt))
 
 (defun ellm-llm--render-streaming-response (buf request start end result)
   (ellm-llm--ensure-buffer buf request)
@@ -158,31 +346,6 @@ line for deferred folding.  Returns nil if the heading is not found."
              nil t)
         (cons (copy-marker (match-beginning 0) nil) role)))))
 
-(defun ellm-llm--render-tool-uses (tool-uses tool-results)
-  "Insert `tool-call' / `tool-result' turns for TOOL-USES and TOOL-RESULTS.
-When `ellm-fold-tool-calls' is non-nil each inserted turn is folded."
-  (let ((ids (mapcar #'ellm-llm--gen-call-id tool-uses))
-        (fold-markers nil))
-    (cl-loop for id in ids
-             for tu in tool-uses
-             do (push (ellm-llm--insert-and-mark-turn
-                       (lambda () (ellm-llm--insert-tool-call id tu))
-                       ellm-turn-header-2 "tool-call")
-                      fold-markers))
-    (cl-loop for id in ids
-             for tu in tool-uses
-             for tr in tool-results
-             do (push (ellm-llm--insert-and-mark-turn
-                       (lambda ()
-                         (ellm-llm--insert-tool-result
-                          id (plist-get tu :name) (cdr tr)))
-                       ellm-turn-header-2 "tool-result")
-                      fold-markers))
-    (when ellm-fold-tool-calls
-      (dolist (cell (delq nil fold-markers))
-        (ellm--fold-turn-at (marker-position (car cell)) (cdr cell))
-        (set-marker (car cell) nil)))))
-
 (defun ellm-llm--send-once (provider prompt buf)
   "Stream PROVIDER's reply for PROMPT into the trailing assistant turn of BUF.
 Uses multi-output mode.  If the LLM emits tool calls, llm.el executes
@@ -232,8 +395,25 @@ is text-only, a fresh trailing `user' turn is appended."
 (defun ellm-llm--backend-send (provider buffer)
   "Send BUFFER through a normal `llm.el' PROVIDER."
   (with-current-buffer buffer
-    (let ((prompt (ellm--parse-buffer-as-llm-chat provider)))
+    (let ((prompt (ellm-llm--parse-buffer-as-chat provider)))
       (ellm-llm--send-once provider prompt buffer))))
+
+;;;;; Utility
+
+(defun ellm-llm--ensure-buffer (buf &optional request-to-cancel)
+  (unless (buffer-live-p buf)
+    (when request-to-cancel
+      (llm-cancel-request request-to-cancel))
+    (user-error "ellm :: Buffer is gone")))
+
+(defun ellm-llm--fold-reasoning-in-region (start end)
+  "Fold the `reasoning' turn located between START and END, if any."
+  (save-excursion
+    (goto-char start)
+    (when (re-search-forward
+           (concat "^" (regexp-quote ellm-turn-header-2) " reasoning\\b")
+           end t)
+      (ellm--fold-subtree-at (match-beginning 0)))))
 
 ;;;; Footer
 

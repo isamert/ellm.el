@@ -6,7 +6,7 @@
 ;; URL: https://github.com/isamert/ellm.el
 ;; Version: 0.0.1
 ;; Package-Requires: ((emacs "25.2"))
-;; Keywords: llm, tools
+;; Keywords: tools
 
 ;; This file is not part of GNU Emacs.
 
@@ -30,7 +30,6 @@
 
 ;;; Code:
 
-(require 'llm)
 (require 'ellm)
 (require 'seq)
 (require 's)
