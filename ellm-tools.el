@@ -354,7 +354,7 @@ exactly one occurrence."
               (result nil))
           (with-current-buffer temp-buf
             (insert-file-contents file-path)
-            (setq result (do-edit))
+            (setq result (ellm-tools--do-edit old-string new-string replace-all name))
             (write-file file-path))
           (kill-buffer temp-buf)
           (ellm-tools--success result))))))
