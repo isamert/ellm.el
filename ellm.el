@@ -335,6 +335,19 @@ pretty mode."
    ((equal header ellm-turn-header-2) 2)
    ((equal header ellm-turn-header-3) 3)))
 
+;;;; General utilities
+
+(defun ellm--alist-set-nested (alist keys value)
+  "Return ALIST with VALUE set at nested KEYS path, creating levels as needed.
+KEYS may be a single key or a list of keys."
+  (let ((keys (if (listp keys) keys (list keys))))
+    (if (null (cdr keys))
+        (setf (alist-get (car keys) alist) value)
+      (setf (alist-get (car keys) alist)
+            (ellm--alist-set-nested (alist-get (car keys) alist)
+                                    (cdr keys) value))))
+  alist)
+
 ;;;; Faces
 ;;;;; Utilities
 
@@ -1227,26 +1240,27 @@ stored without their leading colon, e.g. `:id call_1' becomes
 ;;;;; Frontmatter
 
 (defun ellm--frontmatter-bounds ()
-  "Return (BEG . END) of YAML frontmatter, or nil if absent.
+  "Return (BEG END CONTENTS-BEG CONTENTS-END CONTENTS) of YAML frontmatter.
 BEG is `point-min'; END is the position just after the closing `---'
 delimiter line (i.e. the end of the match against
 `ellm-frontmatter-regexp')."
   (save-excursion
     (save-match-data
       (goto-char (point-min))
-      (when (looking-at ellm-frontmatter-regexp)
-        (cons (match-beginning 0) (match-end 0))))))
+      (and-let* (((looking-at ellm-frontmatter-regexp))
+                 (beg (match-beginning 0))
+                 (end (match-end 0)))
+        (list beg
+              end
+              (+ beg 4)
+              (- end 4)
+              (match-string-no-properties 1))))))
 
 (defun ellm--parse-frontmatter ()
   "Return alist parsed from the buffer's YAML frontmatter, or nil.
 Keys are symbols.  Returns nil when there is no frontmatter or when
 parsing fails (a `lwarn' is issued in the latter case)."
-  (when-let* ((bounds (ellm--frontmatter-bounds))
-              (body   (save-excursion
-                        (save-match-data
-                          (goto-char (car bounds))
-                          (looking-at ellm-frontmatter-regexp)
-                          (match-string-no-properties 1)))))
+  (pcase-let* ((`(_ _ _ _ ,body) (ellm--frontmatter-bounds)))
     (condition-case err
         (yaml-parse-string body
                            :object-type 'alist
@@ -1256,6 +1270,19 @@ parsing fails (a `lwarn' is issued in the latter case)."
       (error
        (lwarn 'ellm :warning "Failed to parse frontmatter: %S" err)
        nil))))
+
+(defun ellm--set-frontmatter-value (key &optional value)
+  "Set scalar frontmatter KEY to VALUE in the current buffer.
+When the buffer has no frontmatter, create one at the beginning.  VALUE is
+written as a YAML scalar string.  Nil VALUE deletes KEY."
+  (pcase-let ((fm (ellm--parse-frontmatter))
+              (`(_ _ ,beg ,end _) (ellm--frontmatter-bounds)))
+    (replace-region-contents
+     (or beg (point-min)) (or end (point-min))
+     (lambda ()
+       (concat (unless beg "---\n")
+               (yaml-encode (ellm--alist-set-nested fm key value))
+               (unless beg "\n---\n"))))))
 
 ;;;;; Provider resolution
 
@@ -1362,7 +1389,10 @@ can be a tool name like \"a_tool_name\"."
      :values ("light" "medium" "maximum" "none"))
     ("tools"       :ann "list"
      :desc "Tools enabled for this buffer; names from `ellm-tools-list' or `@CATEGORY'."
-     :values ellm--capf-tool-candidates))
+     :values ellm--capf-tool-candidates)
+    ("acp" :ann "acp"
+     :desc "ACP related configurations."
+     :values ("session-id")))
   "Alist of (KEY . SPEC) for known YAML frontmatter keys.
 SPEC is a plist with:
   :ann     Short annotation string, shown inline next to the candidate

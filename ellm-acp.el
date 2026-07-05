@@ -285,13 +285,18 @@ ACP agent exposes a model config option, selected for the session."
    ((ellm-acp--connection-session-id connection)
     (funcall on-ready))
    ((ellm-acp--connection-initialized connection)
-    (ellm-acp--new-session connection provider frontmatter on-ready on-error))
+    (if-let* ((session-id (let-alist frontmatter .acp.session-id)))
+        (progn
+          (setf (ellm-acp--connection-session-id connection) session-id)
+          (funcall on-ready))
+      (ellm-acp--new-session connection provider frontmatter on-ready on-error)))
    (t
     (ellm-acp--initialize
      connection
      (lambda (_result)
        (setf (ellm-acp--connection-initialized connection) t)
-       (ellm-acp--new-session connection provider frontmatter on-ready on-error))
+       (ellm-acp--ensure-session
+        connection provider frontmatter on-ready on-error))
      on-error))))
 
 (defun ellm-acp--initialize (connection on-result on-error)
@@ -319,18 +324,27 @@ ACP agent exposes a model config option, selected for the session."
     (jsonrpc-async-request
      connection :session/new
      `(:cwd ,cwd :mcpServers [])
-     :success-fn
-     (lambda (result)
-       (setf (ellm-acp--connection-session-id connection)
-             (plist-get result :sessionId))
-       (ellm-acp--maybe-set-model
-        connection
+      :success-fn
+      (lambda (result)
+        (let ((session-id (plist-get result :sessionId)))
+          (setf (ellm-acp--connection-session-id connection) session-id)
+          (when session-id
+            (ellm-acp--persist-session-id connection session-id)))
+        (ellm-acp--maybe-set-model
+         connection
         (or (alist-get 'model frontmatter)
             (ellm-acp-provider-model provider))
         (plist-get result :configOptions)
         on-ready
         on-error))
-     :error-fn on-error)))
+      :error-fn on-error)))
+
+(defun ellm-acp--persist-session-id (connection session-id)
+  "Persist ACP SESSION-ID in CONNECTION's conversation frontmatter."
+  (when-let* ((buffer (ellm-acp--connection-buffer connection)))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (ellm--set-frontmatter-value '(acp session-id) session-id)))))
 
 (defun ellm-acp--maybe-set-model (connection model config-options on-ready on-error)
   "Set ACP session MODEL via CONFIG-OPTIONS when possible, then call ON-READY."
