@@ -1449,14 +1449,7 @@ can be unreliable across different Emacs/cl-generic load orders
 
 If PROVIDER doesn't have a `chat-model' slot, the model is silently
 ignored and PROVIDER is returned unchanged."
-  (if (not (recordp provider))
-      provider
-    (let ((copy (copy-sequence provider)))
-      (condition-case nil
-          (progn
-            (setf (cl-struct-slot-value (type-of copy) 'chat-model copy) model)
-            copy)
-        (error provider)))))
+  (ellm-provider-with-model provider model))
 
 (defun ellm--resolve-provider (frontmatter)
   "Return the `llm' provider to use for the current buffer.
@@ -1594,17 +1587,7 @@ delimiter starting from POS."
   (mapcar (lambda (e) (symbol-name (car e))) ellm-provider-alist))
 
 (defun ellm--extract-chat-model-from-provider (provider)
-  (let* ((resolved-provider (if (recordp provider)
-                                provider
-                              (ignore-errors
-                                (plist-get provider :provider))))
-         (chat-model (and resolved-provider
-                          (recordp resolved-provider)
-                          (cl-struct-slot-value (type-of resolved-provider) 'chat-model resolved-provider))))
-    (when (and (stringp chat-model)
-               (not (string-empty-p chat-model))
-               (not (equal "unset" chat-model)))
-      chat-model)))
+  (ellm-provider-current-model provider))
 
 (defun ellm--capf-model-candidates ()
   "Return (MODELS . SOURCE) for `model:' frontmatter completion.
@@ -2120,16 +2103,6 @@ one, then narrows to its outline subtree."
 Set by `ellm-send' to the object returned by `ellm-backend-send'.
 Cleared on completion, error, or cancellation.")
 
-(cl-defgeneric ellm-backend-send (provider frontmatter buffer)
-  "Send BUFFER's trailing user turn through PROVIDER.
-FRONTMATTER is the parsed YAML frontmatter alist for BUFFER.
-Implementations should stream into the assistant turn already appended by
-`ellm-send' and return a backend-specific request handle suitable for
-`ellm-backend-cancel'.")
-
-(cl-defgeneric ellm-backend-cancel (request)
-  "Cancel backend-specific REQUEST created by `ellm-backend-send'.")
-
 (defun ellm--ensure-trailing-user-turn ()
   "Signal `user-error' unless the buffer ends with a `user' turn."
   (let* ((turns (ellm--parse-turns))
@@ -2169,6 +2142,53 @@ Errors during streaming are signalled normally."
     (ellm-backend-cancel ellm--active-request)
     (setq ellm--active-request nil)
     (message "ellm: request cancelled")))
+
+;;;; Backend interface
+
+(cl-defgeneric ellm-provider-current-model (provider)
+  "Return PROVIDER's current model name, or nil when unknown.")
+
+(cl-defmethod ellm-provider-current-model (provider)
+  "Default model lookup for providers with a `chat-model' struct slot."
+  (let* ((resolved-provider (if (recordp provider)
+                                provider
+                              (ignore-errors
+                                (plist-get provider :provider))))
+         (chat-model (and resolved-provider
+                          (recordp resolved-provider)
+                          (condition-case nil
+                              (cl-struct-slot-value
+                               (type-of resolved-provider)
+                               'chat-model resolved-provider)
+                            (error nil)))))
+    (when (and (stringp chat-model)
+               (not (string-empty-p chat-model))
+               (not (equal "unset" chat-model)))
+      chat-model)))
+
+(cl-defgeneric ellm-provider-with-model (provider model)
+  "Return PROVIDER configured to use MODEL where supported.")
+
+(cl-defmethod ellm-provider-with-model (provider model)
+  "Default model setter for providers with a `chat-model' struct slot."
+  (if (not (recordp provider))
+      provider
+    (let ((copy (copy-sequence provider)))
+      (condition-case nil
+          (progn
+            (setf (cl-struct-slot-value (type-of copy) 'chat-model copy) model)
+            copy)
+        (error provider)))))
+
+(cl-defgeneric ellm-backend-send (provider frontmatter buffer)
+  "Send BUFFER's trailing user turn through PROVIDER.
+FRONTMATTER is the parsed YAML frontmatter alist for BUFFER.
+Implementations should stream into the assistant turn already appended by
+`ellm-send' and return a backend-specific request handle suitable for
+`ellm-backend-cancel'.")
+
+(cl-defgeneric ellm-backend-cancel (request)
+  "Cancel backend-specific REQUEST created by `ellm-backend-send'.")
 
 ;;;; Major mode
 
