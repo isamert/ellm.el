@@ -691,6 +691,9 @@ it."
 Maintained by `ellm--update-fences-after-change'.  A nil value means the
 cache is uninitialized; call `ellm--rebuild-fence-cache' to populate it.")
 
+(defvar-local ellm--fence-positions-vector []
+  "Vector copy of `ellm--fence-positions' for binary-search lookups.")
+
 (defvar-local ellm--fence-cache-valid nil
   "Non-nil when `ellm--fence-positions' is up to date with the buffer.")
 
@@ -704,13 +707,24 @@ cache is uninitialized; call `ellm--rebuild-fence-cache' to populate it.")
           (push (line-beginning-position) positions)
           (forward-line 1))
         (setq ellm--fence-positions (nreverse positions)
-              ellm--fence-cache-valid t)))))
+              ellm--fence-cache-valid t)
+        (ellm--sync-fence-vector)))))
 
 (defvar-local ellm--fence-parity-flipped nil
   "Set non-nil by `ellm--update-fences-after-change' when the most
 recent change altered fence count by an odd number.  Read (and cleared)
 by `ellm--extend-after-change-region' to decide whether to extend
 fontification all the way to `point-max'.")
+
+(defvar-local ellm--pending-fold-turn nil
+  "Pending foldable turn waiting for a stable following boundary.
+The value is a list (MARKER ROLE LEVEL), where MARKER points at the
+turn delimiter line, ROLE is the turn role string, and LEVEL is its
+outline level.")
+
+(defun ellm--sync-fence-vector ()
+  "Synchronize `ellm--fence-positions-vector' from the fence list."
+  (setq ellm--fence-positions-vector (vconcat ellm--fence-positions)))
 
 (defun ellm--update-fences-after-change (beg end old-len)
   "Incrementally update `ellm--fence-positions' for a buffer change.
@@ -760,6 +774,7 @@ flipped, swapping code-block membership of every following line)."
               (setq ellm--fence-positions
                     (sort (nconc (nreverse new-fences) ellm--fence-positions)
                           #'<)))
+            (ellm--sync-fence-vector)
             (setq ellm--fence-parity-flipped
                   (cl-oddp (+ dropped added)))))))))
 
@@ -770,7 +785,16 @@ Assumes `ellm--fence-positions' is sorted ascending."
 
 (defun ellm--in-code-block-p (&optional pos)
   "Return non-nil if POS (or point) is inside a fenced code block."
-  (cl-oddp (cl-count-if (lambda (p) (< p (or pos (point)))) ellm--fence-positions)))
+  (let* ((target (or pos (point)))
+         (vec ellm--fence-positions-vector)
+         (lo 0)
+         (hi (length vec)))
+    (while (< lo hi)
+      (let ((mid (/ (+ lo hi) 2)))
+        (if (< (aref vec mid) target)
+            (setq lo (1+ mid))
+          (setq hi mid))))
+    (cl-oddp lo)))
 
 ;;;;; Core
 
@@ -1738,13 +1762,17 @@ Completes:
       s
     (concat s "\n")))
 
+(defun ellm--turn-header-for-role (role attrs)
+  "Return the delimiter header for ROLE with ATTRS plist."
+  (cond
+   ((equal role "tool-param") ellm-turn-header-3)
+   ((or (ellm--tool-role-p role)
+        (plist-get attrs :continuation))
+    ellm-turn-header-2)
+   (t ellm-turn-header-1)))
+
 (defun ellm--get-turn (role &rest attrs)
-  (let* ((continuation (or (plist-get attrs :continuation)
-                           (ellm--tool-role-p role)))
-         (header (cond
-                  ((equal role "tool-param") ellm-turn-header-3)
-                  (continuation ellm-turn-header-2)
-                  (t ellm-turn-header-1)))
+  (let* ((header (ellm--turn-header-for-role role attrs))
          (positional nil)
          (pipe-arg nil)
          (kv-tail nil))
@@ -1788,9 +1816,13 @@ ATTRS recognises three reserved keywords:
 
 All other keywords are serialised in `org-block' style as `:KEY VALUE'
 pairs, e.g. `:ts 2025-01-01T00:00:00 :id call_1'."
-  (goto-char (point-max))
-  (unless (bolp) (insert "\n"))
-  (insert (apply #'ellm--get-turn role attrs) "\n"))
+  (let ((depth (ellm--insert-turn-depth role attrs)))
+    (goto-char (point-max))
+    (unless (bolp) (insert "\n"))
+    (let ((beg (point)))
+      (insert (apply #'ellm--get-turn role attrs) "\n")
+      (ellm--flush-pending-fold depth)
+      (ellm--mark-pending-fold beg role depth))))
 
 ;;;;;; Outline / folding
 
@@ -1807,7 +1839,7 @@ Used unanchored — outline prepends \"^\" internally."
           (regexp-quote ellm-turn-header-3) "\\|"
           (regexp-quote ellm-turn-header-2) "\\|"
           (regexp-quote ellm-turn-header-1)
-          "\\) \\|#+\\ "))
+          "\\) .*\\|#+\\ .*$"))
 
 (defun ellm--outline-level ()
   "Return the outline level for the heading matched at point.
@@ -1851,9 +1883,10 @@ contract exactly:
             t))
       ;; Search mode: find the next/previous heading outside code blocks.
       (let ((search (if backward #'re-search-backward #'re-search-forward))
+            (noerror (if move 'move t))
             found)
         (while (and (not found)
-                    (funcall search re bound (if move t 'move)))
+                    (funcall search re bound noerror))
           (unless (ellm--in-code-block-p (match-beginning 0))
             (setq found t)))
         found))))
@@ -1874,6 +1907,13 @@ Headings inside fenced code blocks do not count."
   (save-excursion
     (forward-line 0)
     (ellm--outline-search-function nil nil nil t)))
+
+(defun ellm--outline-level-at-point ()
+  "Return the outline level of the heading on the current line."
+  (save-excursion
+    (forward-line 0)
+    (when (ellm--outline-search-function nil nil nil t)
+      (ellm--outline-level))))
 
 (defun ellm-beginning-of-defun (&optional arg)
   "Move backward to the beginning of the ARG-th preceding heading.
@@ -1913,26 +1953,85 @@ end of buffer.  Serves as `end-of-defun-function'."
 ;; hiding; everything else (tool calls, reasoning, load-time folding)
 ;; drives that one primitive so the behaviour never diverges.
 
+(defun ellm--insert-turn-depth (role attrs)
+  "Return the outline depth that `ellm--insert-turn' will use for ROLE.
+ATTRS is the plist passed to `ellm--insert-turn'."
+  (ellm--turn-header-depth (ellm--turn-header-for-role role attrs)))
+
+(defun ellm--clear-pending-fold ()
+  "Clear `ellm--pending-fold-turn' and release its marker."
+  (when-let* ((marker (car-safe ellm--pending-fold-turn)))
+    (set-marker marker nil))
+  (setq ellm--pending-fold-turn nil))
+
+(defun ellm--flush-pending-fold (&optional next-level)
+  "Fold the pending turn if NEXT-LEVEL closes its outline subtree.
+When NEXT-LEVEL is nil, fold any pending turn.  A nested heading does not
+close its parent, so it leaves the pending fold in place."
+  (pcase-let ((`(,marker ,role ,level) ellm--pending-fold-turn))
+    (when (and marker
+               (or (null next-level)
+                   (<= next-level level)))
+      (setq ellm--pending-fold-turn nil)
+      (unwind-protect
+          (when (marker-buffer marker)
+            (ellm--fold-turn-at marker role))
+        (set-marker marker nil)))))
+
+(defun ellm--mark-pending-fold (pos role level)
+  "Mark the foldable turn at POS as waiting for its following boundary.
+ROLE and LEVEL describe the turn at POS.  Non-foldable roles clear no
+existing pending fold because nested non-foldable children may belong to
+that pending parent."
+  (when (ellm--role-should-fold-p role)
+    (ellm--clear-pending-fold)
+    (setq ellm--pending-fold-turn
+          (list (copy-marker pos nil) role level))))
+
+(defun ellm--subtree-end-at-point ()
+  "Return the end of the outline subtree whose heading is at point."
+  (let ((level (ellm--outline-level-at-point)))
+    (save-excursion
+      (forward-line 1)
+      (catch 'end
+        (while (ellm--outline-search-function nil nil nil)
+          (forward-line 0)
+          (when (<= (ellm--outline-level-at-point) level)
+            (throw 'end (point)))
+          (forward-line 1))
+        (point-max)))))
+
+(defun ellm--fold-region-at (pos subtree-end)
+  "Collapse the heading at POS through SUBTREE-END.
+Empty or whitespace-only bodies are not folded."
+  (save-excursion
+    (goto-char pos)
+    (when (ignore-errors (outline-back-to-heading t) t)
+      (let* ((heading-end (line-end-position))
+             (body-beg (min (1+ heading-end) (point-max))))
+        (when (save-excursion
+                (goto-char (min body-beg subtree-end))
+                (re-search-forward "[^[:space:]]" subtree-end t))
+          (when (and (= subtree-end (point-max))
+                     (> subtree-end heading-end)
+                     (eq (char-before subtree-end) ?\n))
+            (setq subtree-end (1- subtree-end)))
+          (when (> subtree-end heading-end)
+            (outline-flag-region heading-end subtree-end t)
+            ;; The hidden region starts at the heading newline so child
+            ;; headings remain hidden in parent folds.  Re-emit one visible
+            ;; newline after the ellipsis so consecutive folded turns do not
+            ;; render on the same screen line.
+            (dolist (ov (overlays-in heading-end subtree-end))
+              (when (eq (overlay-get ov 'invisible) 'outline)
+                (overlay-put ov 'after-string "\n")))))))))
+
 (defun ellm--fold-subtree-at (pos)
   "Collapse the outline subtree of the heading containing POS."
   (save-excursion
     (goto-char pos)
     (when (ignore-errors (outline-back-to-heading t) t)
-      (let ((heading-end (line-end-position))
-            (subtree-end (progn (outline-end-of-subtree) (point))))
-        ;; When this is the last subtree in the buffer, `outline-end-of-
-        ;; subtree' runs all the way to `point-max'.  Folding through the
-        ;; final position would swallow anything later appended there
-        ;; (e.g. the next streamed turn inserted at `point-max'), which
-        ;; is exactly the "results not folded / next turn hidden"
-        ;; failure.  Keep the trailing newline outside the fold so new
-        ;; content lands in visible territory.
-        (when (and (= subtree-end (point-max))
-                   (> subtree-end heading-end)
-                   (eq (char-before subtree-end) ?\n))
-          (setq subtree-end (1- subtree-end)))
-        (when (> subtree-end heading-end)
-          (outline-flag-region heading-end subtree-end t))))))
+      (ellm--fold-region-at (point) (ellm--subtree-end-at-point)))))
 
 (defun ellm--role-should-fold-p (role)
   "Return non-nil if a turn with ROLE should be inserted folded.
@@ -1946,26 +2045,32 @@ Honours `ellm-fold-tool-calls' and `ellm-fold-reasoning-blocks'."
   "Fold the subtree of the turn with ROLE at POS, if configured to.
 Shared entry point used both for freshly inserted turns and when
 folding a loaded buffer.  A no-op when ROLE should not be folded."
-  (when (and (ellm--role-should-fold-p role)
-             (save-excursion
-               (goto-char pos)
-               (ignore-errors (outline-back-to-heading t))
-               (< (line-end-position) (save-excursion
-                                        (outline-end-of-subtree)
-                                        (point)))))
+  (when (ellm--role-should-fold-p role)
     (ellm--fold-subtree-at pos)))
 
 (defun ellm--fold-configured-turns ()
   "Fold every turn in the buffer that is configured to be folded.
 Walks the parsed turns and folds each `tool-call' / `reasoning' turn
 according to `ellm-fold-tool-calls' / `ellm-fold-reasoning-blocks'."
-  (dolist (turn (ellm--parse-turns))
-    (let ((role (ellm-turn-role turn)))
-      (when (and (ellm--role-should-fold-p role)
-                 ;; Skip continuation-nested params etc.; only fold the
-                 ;; top of a foldable subtree.
-                 (not (equal role "tool-param")))
-        (ellm--fold-subtree-at (ellm-turn-beg turn))))))
+  (let* ((turns (ellm--parse-turns))
+         (indexed (cl-loop for turn in turns
+                           for rest on turns
+                           collect (cons turn rest))))
+    (pcase-dolist (`(,turn . ,rest) indexed)
+      (let ((role (ellm-turn-role turn))
+            (depth (ellm-turn-depth turn)))
+        (when (and (ellm--role-should-fold-p role)
+                   ;; Skip continuation-nested params etc.; only fold the
+                   ;; top of a foldable subtree.
+                   (not (equal role "tool-param")))
+          (let ((subtree-end
+                 (or (cl-loop for next in (cdr rest)
+                              when (<= (ellm-turn-depth next) depth)
+                              return (save-excursion
+                                       (goto-char (ellm-turn-beg next))
+                                       (line-beginning-position)))
+                     (point-max))))
+            (ellm--fold-region-at (ellm-turn-beg turn) subtree-end)))))))
 
 ;;;; Narrowing
 
@@ -2088,8 +2193,6 @@ Implementations should stream into the assistant turn already appended by
 
 (defvar ellm-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "TAB")       #'outline-cycle)
-    (define-key map (kbd "<backtab>") #'outline-cycle-buffer)
     (define-key map (kbd "C-c C-c")   #'ellm-send)
     (define-key map (kbd "C-c C-k")   #'ellm-cancel)
     map)
@@ -2108,8 +2211,10 @@ Implementations should stream into the assistant turn already appended by
   (add-hook 'window-size-change-functions #'ellm--update-rules nil t)
   (add-hook 'post-command-hook #'ellm--reveal-separator-at-point nil t)
   (add-hook 'completion-at-point-functions #'ellm--frontmatter-capf nil t)
+  (setq-local outline-regexp (ellm--outline-regexp))
   (setq-local outline-search-function #'ellm--outline-search-function)
   (setq-local outline-level #'ellm--outline-level)
+  (setq-local outline-minor-mode-cycle t)
   ;; Treat every heading (turn delimiter or Markdown heading) as a defun,
   ;; so `beginning-of-defun'/`end-of-defun', `mark-defun',
   ;; `narrow-to-defun', `bounds-of-thing-at-point' with `defun', and

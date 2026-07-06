@@ -233,27 +233,15 @@ as a `tool-param' sub-turn."
 (defun ellm-llm--render-tool-uses (tool-uses tool-results)
   "Insert `tool-call' / `tool-result' turns for TOOL-USES and TOOL-RESULTS.
 When `ellm-fold-tool-calls' is non-nil each inserted turn is folded."
-  (let ((ids (mapcar #'ellm-llm--gen-call-id tool-uses))
-        (fold-markers nil))
+  (let ((ids (mapcar #'ellm-llm--gen-call-id tool-uses)))
     (cl-loop for id in ids
              for tu in tool-uses
-             do (push (ellm-llm--insert-and-mark-turn
-                       (lambda () (ellm-llm--insert-tool-call id tu))
-                       ellm-turn-header-2 "tool-call")
-                      fold-markers))
+             do (ellm-llm--insert-tool-call id tu))
     (cl-loop for id in ids
              for tu in tool-uses
              for tr in tool-results
-             do (push (ellm-llm--insert-and-mark-turn
-                       (lambda ()
-                         (ellm-llm--insert-tool-result
-                          id (plist-get tu :name) (cdr tr)))
-                       ellm-turn-header-2 "tool-result")
-                      fold-markers))
-    (when ellm-fold-tool-calls
-      (dolist (cell (delq nil fold-markers))
-        (ellm--fold-turn-at (marker-position (car cell)) (cdr cell))
-        (set-marker (car cell) nil)))))
+             do (ellm-llm--insert-tool-result
+                 id (plist-get tu :name) (cdr tr)))))
 
 ;;;;; Parsing & sending
 
@@ -319,6 +307,13 @@ When `ellm-fold-tool-calls' is non-nil each inserted turn is folded."
           (goto-char (+ start prefix-length))
           (delete-region (point) end)
           (insert (substring new-text prefix-length))))
+      (when (and (not (string-empty-p new-text))
+                 (save-excursion
+                   (goto-char start)
+                   (re-search-forward
+                    (concat "^" (regexp-quote ellm-turn-header-2) " ")
+                    end t)))
+        (ellm--flush-pending-fold 2))
       (when (and ellm-fold-reasoning-blocks
                  reasoning (not (string-empty-p reasoning))
                  text (not (string-empty-p text)))
@@ -328,23 +323,6 @@ When `ellm-fold-tool-calls' is non-nil each inserted turn is folded."
           (when (window-live-p w)
             (set-window-start w ws t)
             (set-window-point w wp)))))))
-
-(defun ellm-llm--insert-and-mark-turn (insert-fn header role)
-  "Run INSERT-FN and return a `(MARKER . ROLE)' cons for the inserted turn.
-INSERT-FN inserts one turn (possibly with nested children).  HEADER is
-the delimiter string for the turn to be folded (e.g. `ellm-turn-header-2')
-and ROLE its role string; together they locate the heading line of the
-just-inserted turn -- important because INSERT-FN may append deeper
-children (e.g. `tool-param') after it.  MARKER points at that heading
-line for deferred folding.  Returns nil if the heading is not found."
-  (let ((before (point-max)))
-    (funcall insert-fn)
-    (save-excursion
-      (goto-char before)
-      (when (re-search-forward
-             (concat "^" (regexp-quote header) " " (regexp-quote role) "\\b")
-             nil t)
-        (cons (copy-marker (match-beginning 0) nil) role)))))
 
 (defun ellm-llm--send-once (provider prompt buf)
   "Stream PROVIDER's reply for PROMPT into the trailing assistant turn of BUF.
@@ -357,40 +335,41 @@ is text-only, a fresh trailing `user' turn is appended."
   (with-current-buffer buf
     (let* ((start (copy-marker (point-max) nil))
            (end   (copy-marker (point-max) t))
-           request)
-      (let* ((partial-render
-              (lambda (result)
-                (ellm-llm--render-streaming-response
-                 buf request start end result)))
-             (final-render
-              (lambda (result)
-                (ellm-llm--ensure-buffer buf request)
-                (funcall partial-render result)
-                (with-current-buffer buf
-                  (setq ellm--active-request nil)
-                  ;; Catch the reasoning-only case: if the block never got
-                  ;; folded during streaming (because no assistant text
-                  ;; followed it), fold it now that the response is
-                  ;; complete.  Covers both `t' and `after'.
-                  (when ellm-fold-reasoning-blocks
-                    (ellm-llm--fold-reasoning-in-region start end))
+           request
+           (partial-render
+            (lambda (result)
+              (ellm-llm--render-streaming-response
+               buf request start end result)))
+           (final-render
+            (lambda (result)
+              (ellm-llm--ensure-buffer buf request)
+              (funcall partial-render result)
+              (with-current-buffer buf
+                (setq ellm--active-request nil)
+                (let ((recurse nil))
                   (if-let* ((tool-uses (plist-get result :tool-uses))
                             (tool-results (plist-get result :tool-results)))
                       (progn
                         (ellm-llm--render-tool-uses tool-uses tool-results)
-                        (ellm-llm--send-once provider prompt buf))
-                    (ellm--insert-turn "user")))))
-             (on-error
-              (lambda (type msg)
-                (ellm-llm--ensure-buffer buf request)
-                (with-current-buffer buf
-                  (setq ellm--active-request nil))
-                (signal type (list msg)))))
-        (setq request (llm-chat-streaming
-                       provider prompt
-                       partial-render final-render on-error
-                       'multi-output))
-        (setq ellm--active-request (ellm-llm--make-request :raw request))))))
+                        (setq recurse t))
+                    (ellm--insert-turn "user"))
+                  ;; Fold reasoning after the following turn gives it a
+                  ;; stable boundary; covers reasoning-only responses too.
+                  (when ellm-fold-reasoning-blocks
+                    (ellm-llm--fold-reasoning-in-region start end))
+                  (when recurse
+                    (ellm-llm--send-once provider prompt buf))))))
+           (on-error
+            (lambda (type msg)
+              (ellm-llm--ensure-buffer buf request)
+              (with-current-buffer buf
+                (setq ellm--active-request nil))
+              (signal type (list msg)))))
+      (setq request (llm-chat-streaming
+                     provider prompt
+                     partial-render final-render on-error
+                     'multi-output))
+      (setq ellm--active-request (ellm-llm--make-request :raw request)))))
 
 (defun ellm-llm--backend-send (provider buffer)
   "Send BUFFER through a normal `llm.el' PROVIDER."
