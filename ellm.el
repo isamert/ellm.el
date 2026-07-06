@@ -1495,7 +1495,9 @@ MODELS is a list of model name strings.  SOURCE is one of:
          (entry (and sym (alist-get sym ellm-provider-alist)))
          (explicit (and entry (ellm--provider-entry-models entry)))
          (provider (and entry (ellm--provider-entry-provider entry)))
-         (models (and provider (ellm-provider-model-candidates provider))))
+          (models (and provider
+                       (ellm-provider-buffer-model-candidates
+                        provider (current-buffer)))))
     (cond
       (explicit (cons explicit 'explicit))
       (models (cons models 'provider))
@@ -2251,6 +2253,15 @@ Errors during streaming are signalled normally."
 (cl-defmethod ellm-provider-model-candidates (_provider)
   "Default model candidates for unknown PROVIDER types."
   nil)
+
+(cl-defgeneric ellm-provider-buffer-model-candidates (provider buffer)
+  "Return model completion candidates for PROVIDER in BUFFER.
+Backends with session-scoped model lists can use BUFFER to prefer live
+session metadata over static provider configuration.")
+
+(cl-defmethod ellm-provider-buffer-model-candidates (provider _buffer)
+  "Default buffer model candidates for providers without session metadata."
+  (ellm-provider-model-candidates provider))
 
 (cl-defgeneric ellm-provider-with-model (provider model)
   "Return PROVIDER configured to use MODEL where supported.")

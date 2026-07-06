@@ -94,6 +94,15 @@ an optional list of model candidates used for frontmatter completion."
     (available-commands
      :initform nil
      :accessor ellm-acp--connection-available-commands)
+    (model-candidates
+     :initform nil
+     :accessor ellm-acp--connection-model-candidates)
+    (model-config-id
+     :initform nil
+     :accessor ellm-acp--connection-model-config-id)
+    (current-model
+     :initform nil
+     :accessor ellm-acp--connection-current-model)
    (log-buffer
     :initform nil
     :accessor ellm-acp--connection-log-buffer))
@@ -117,6 +126,15 @@ an optional list of model candidates used for frontmatter completion."
   (or (ellm-acp-provider-models provider)
       (and (ellm-acp-provider-model provider)
            (list (ellm-acp-provider-model provider)))))
+
+(cl-defmethod ellm-provider-buffer-model-candidates ((provider ellm-acp-provider) buffer)
+  "Return ACP model candidates from BUFFER's live session, or PROVIDER config."
+  (or (and (buffer-live-p buffer)
+           (with-current-buffer buffer
+             (and ellm-acp--connection
+                  (jsonrpc-running-p ellm-acp--connection)
+                  (ellm-acp--connection-model-candidates ellm-acp--connection))))
+      (ellm-provider-model-candidates provider)))
 
 (cl-defmethod ellm-provider-with-model ((provider ellm-acp-provider) model)
   "Return a copy of ACP PROVIDER using MODEL as its default model."
@@ -145,7 +163,12 @@ an optional list of model candidates used for frontmatter completion."
       (ellm-acp--ensure-session
        connection provider frontmatter
        (lambda ()
-         (ellm-acp--send-prompt connection buffer))
+          (ellm-acp--ensure-frontmatter-model
+           connection frontmatter
+           (lambda ()
+             (ellm-acp--send-prompt connection buffer))
+           (lambda (error-object)
+             (ellm-acp--finish-with-error buffer error-object))))
        (lambda (error-object)
          (ellm-acp--finish-with-error buffer error-object)))
       request)))
@@ -411,15 +434,16 @@ an optional list of model candidates used for frontmatter completion."
       (lambda (result)
         (let ((session-id (plist-get result :sessionId)))
           (setf (ellm-acp--connection-session-id connection) session-id)
-          (when session-id
+         (when session-id
             (ellm-acp--persist-session-id connection session-id)))
+        (ellm-acp--update-model-candidates
+         connection (plist-get result :configOptions))
         (ellm-acp--maybe-set-model
          connection
-        (or (alist-get 'model frontmatter)
-            (ellm-acp-provider-model provider))
-        (plist-get result :configOptions)
-        on-ready
-        on-error))
+         (or (alist-get 'model frontmatter)
+             (ellm-acp-provider-model provider))
+         on-ready
+         on-error))
       :error-fn on-error)))
 
 (defun ellm-acp--persist-session-id (connection session-id)
@@ -429,26 +453,68 @@ an optional list of model candidates used for frontmatter completion."
       (with-current-buffer buffer
         (ellm--set-frontmatter-value '(acp session-id) session-id)))))
 
-(defun ellm-acp--maybe-set-model (connection model config-options on-ready on-error)
-  "Set ACP session MODEL via CONFIG-OPTIONS when possible, then call ON-READY."
-  (let ((option (and model (ellm-acp--model-config-option config-options))))
-    (if (not option)
-        (funcall on-ready)
-      (jsonrpc-async-request
-       connection :session/set_config_option
-       `(:sessionId ,(ellm-acp--connection-session-id connection)
-         :configId ,(plist-get option :id)
-         :value ,model)
-       :success-fn (lambda (_result) (funcall on-ready))
-       :error-fn on-error))))
+(defun ellm-acp--ensure-frontmatter-model (connection frontmatter on-ready on-error)
+  "Apply FRONTMATTER `model:' to CONNECTION before calling ON-READY."
+  (ellm-acp--maybe-set-model
+   connection (alist-get 'model frontmatter) on-ready on-error))
+
+(defun ellm-acp--maybe-set-model (connection model on-ready on-error)
+  "Set ACP session MODEL when it differs, then call ON-READY."
+  (let ((config-id (ellm-acp--connection-model-config-id connection))
+        (current (ellm-acp--connection-current-model connection)))
+    (cond
+     ((or (not model) (equal model current))
+      (funcall on-ready))
+     ((not config-id)
+      ;; ACP agents conventionally use `model' as the model config id.  If a
+      ;; resumed session has not returned configOptions yet, this still lets a
+      ;; changed frontmatter model take effect before the prompt.
+      (setq config-id "model")
+      (ellm-acp--set-model connection config-id model on-ready on-error))
+     (t
+      (ellm-acp--set-model connection config-id model on-ready on-error)))))
+
+(defun ellm-acp--set-model (connection config-id model on-ready on-error)
+  "Set ACP session MODEL using CONFIG-ID, then call ON-READY."
+  (jsonrpc-async-request
+   connection :session/set_config_option
+   `(:sessionId ,(ellm-acp--connection-session-id connection)
+     :configId ,config-id
+     :value ,model)
+   :success-fn (lambda (result)
+                 (setf (ellm-acp--connection-current-model connection) model)
+                 (ellm-acp--update-model-candidates
+                  connection (plist-get result :configOptions))
+                 (funcall on-ready))
+   :error-fn on-error))
 
 (defun ellm-acp--model-config-option (config-options)
   "Return model-like ACP config option from CONFIG-OPTIONS."
   (cl-find-if
    (lambda (option)
      (or (equal (plist-get option :category) "model")
-         (equal (plist-get option :id) "model")))
-   config-options))
+          (equal (plist-get option :id) "model")))
+    config-options))
+
+(defun ellm-acp--update-model-candidates (connection config-options)
+  "Store model candidates from ACP CONFIG-OPTIONS on CONNECTION."
+  (when-let* ((option (ellm-acp--model-config-option config-options)))
+    (setf (ellm-acp--connection-model-config-id connection)
+          (plist-get option :id))
+    (setf (ellm-acp--connection-current-model connection)
+          (plist-get option :currentValue))
+    (setf (ellm-acp--connection-model-candidates connection)
+          (mapcar #'ellm-acp--model-candidate
+                  (plist-get option :options)))))
+
+(defun ellm-acp--model-candidate (option)
+  "Return a completion candidate for ACP model OPTION."
+  (let ((value (plist-get option :value))
+        (name (plist-get option :name))
+        (desc (plist-get option :description)))
+    (append (list value)
+            (append (when name (list :ann name))
+                    (when desc (list :desc desc))))))
 
 (defun ellm-acp--send-prompt (connection buffer)
   "Send BUFFER's last user turn through CONNECTION."
@@ -546,12 +612,16 @@ an optional list of model candidates used for frontmatter completion."
       (unless (ellm-acp--capability connection '(loadSession))
         (user-error "ellm ACP: agent does not support session/load"))
       (setf (ellm-acp--connection-session-id connection) session-id)
-      (ellm-acp--request-sync
-       connection :session/load
-       `(:sessionId ,session-id
-         :cwd ,cwd
-         :mcpServers []
-         :additionalDirectories ,(or (plist-get session :additionalDirectories) [])))
+      (ellm-acp--update-model-candidates
+       connection
+       (plist-get
+        (ellm-acp--request-sync
+         connection :session/load
+         `(:sessionId ,session-id
+           :cwd ,cwd
+           :mcpServers []
+           :additionalDirectories ,(or (plist-get session :additionalDirectories) [])))
+        :configOptions))
       (goto-char (point-max))
       (unless (and (ellm--parse-turns)
                    (equal (ellm-turn-role (car (last (ellm--parse-turns)))) "user"))
