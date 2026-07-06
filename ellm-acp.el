@@ -483,6 +483,7 @@ an optional list of model candidates used for frontmatter completion."
      :value ,model)
    :success-fn (lambda (result)
                  (setf (ellm-acp--connection-current-model connection) model)
+                 (ellm-acp--persist-current-model connection)
                  (ellm-acp--update-model-candidates
                   connection (plist-get result :configOptions))
                  (funcall on-ready))
@@ -503,9 +504,18 @@ an optional list of model candidates used for frontmatter completion."
           (plist-get option :id))
     (setf (ellm-acp--connection-current-model connection)
           (plist-get option :currentValue))
+    (ellm-acp--persist-current-model connection)
     (setf (ellm-acp--connection-model-candidates connection)
           (mapcar #'ellm-acp--model-candidate
                   (plist-get option :options)))))
+
+(defun ellm-acp--persist-current-model (connection)
+  "Persist CONNECTION's current ACP model in its buffer frontmatter."
+  (when-let* ((model (ellm-acp--connection-current-model connection))
+              (buffer (ellm-acp--connection-buffer connection)))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (ellm--set-frontmatter-value 'model model)))))
 
 (defun ellm-acp--model-candidate (option)
   "Return a completion candidate for ACP model OPTION."
