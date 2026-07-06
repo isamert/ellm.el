@@ -68,8 +68,9 @@ COMMAND is the executable used to start the ACP agent.  ARGS is a list of
 command-line arguments.  ENV is an alist of environment overrides.  CWD,
 when non-nil, is the session working directory; otherwise `default-directory'
 is used.  MODEL is the default model written to new buffers and, when the
-ACP agent exposes a model config option, selected for the session."
-  command args env cwd model)
+ACP agent exposes a model config option, selected for the session.  MODELS is
+an optional list of model candidates used for frontmatter completion."
+  command args env cwd model models)
 
 (defclass ellm-acp-connection (jsonrpc-connection)
   ((process
@@ -87,9 +88,12 @@ ACP agent exposes a model config option, selected for the session."
    (initialized
     :initform nil
     :accessor ellm-acp--connection-initialized)
-   (agent-capabilities
-    :initform nil
-    :accessor ellm-acp--connection-agent-capabilities)
+    (agent-capabilities
+     :initform nil
+     :accessor ellm-acp--connection-agent-capabilities)
+    (available-commands
+     :initform nil
+     :accessor ellm-acp--connection-available-commands)
    (log-buffer
     :initform nil
     :accessor ellm-acp--connection-log-buffer))
@@ -108,11 +112,30 @@ ACP agent exposes a model config option, selected for the session."
   "Return ACP PROVIDER's configured default model."
   (ellm-acp-provider-model provider))
 
+(cl-defmethod ellm-provider-model-candidates ((provider ellm-acp-provider))
+  "Return ACP PROVIDER's configured model candidates."
+  (or (ellm-acp-provider-models provider)
+      (and (ellm-acp-provider-model provider)
+           (list (ellm-acp-provider-model provider)))))
+
 (cl-defmethod ellm-provider-with-model ((provider ellm-acp-provider) model)
   "Return a copy of ACP PROVIDER using MODEL as its default model."
   (let ((copy (copy-sequence provider)))
     (setf (ellm-acp-provider-model copy) model)
     copy))
+
+(cl-defmethod ellm-provider-slash-command-candidates ((_provider ellm-acp-provider) buffer)
+  "Return slash command candidates advertised by BUFFER's ACP session."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (when (and ellm-acp--connection
+                 (jsonrpc-running-p ellm-acp--connection))
+        (mapcar #'ellm-acp--slash-command-candidate
+                (ellm-acp--connection-available-commands ellm-acp--connection))))))
+
+(cl-defmethod ellm-provider-load-session ((provider ellm-acp-provider) frontmatter)
+  "Select and load an ACP session for PROVIDER."
+  (ellm-acp-load-session provider frontmatter))
 
 (cl-defmethod ellm-backend-send ((provider ellm-acp-provider) frontmatter buffer)
   "Send BUFFER's trailing user turn through ACP PROVIDER."
@@ -267,6 +290,70 @@ ACP agent exposes a model config option, selected for the session."
      (ellm-acp--handle-session-update connection params))
     (_ nil)))
 
+(defun ellm-acp--request-sync (connection method params)
+  "Send METHOD with PARAMS over CONNECTION and synchronously return result."
+  (let ((done nil)
+        result error-object)
+    (jsonrpc-async-request
+     connection method params
+     :success-fn (lambda (value)
+                   (setq result value
+                         done t))
+     :error-fn (lambda (err)
+                 (setq error-object err
+                       done t)))
+    (while (and (not done) (jsonrpc-running-p connection))
+      (accept-process-output (ellm-acp--connection-process connection) 0.05))
+    (cond
+     (error-object
+      (user-error "ellm ACP: %s"
+                  (or (plist-get error-object :message) "request failed")))
+     (done result)
+     (t (user-error "ellm ACP: connection closed")))))
+
+(defun ellm-acp--initialize-sync (connection)
+  "Initialize CONNECTION synchronously when needed."
+  (unless (ellm-acp--connection-initialized connection)
+    (let ((result (ellm-acp--request-sync
+                   connection :initialize
+                   '(:protocolVersion 1
+                     :clientCapabilities (:fs (:readTextFile :json-false
+                                          :writeTextFile :json-false)
+                                          :terminal :json-false)
+                     :clientInfo (:name "ellm" :title "ellm" :version "0.0.1")))))
+      (setf (ellm-acp--connection-agent-capabilities connection)
+            (plist-get result :agentCapabilities))
+      (setf (ellm-acp--connection-initialized connection) t)
+      result)))
+
+(defun ellm-acp--capability (connection path)
+  "Return ACP capability at PATH for CONNECTION."
+  (let ((value (ellm-acp--connection-agent-capabilities connection))
+        present)
+    (while (and path (listp value))
+      (let ((key (if (keywordp (car path))
+                     (car path)
+                   (intern (format ":%s" (car path))))))
+        (setq present (plist-member value key)
+              value (plist-get value key)
+              path (cdr path))))
+    present))
+
+(defun ellm-acp--provider-cwd (provider frontmatter)
+  "Return absolute ACP cwd for PROVIDER and FRONTMATTER."
+  (expand-file-name
+   (file-name-as-directory
+    (or (ellm-acp-provider-cwd provider)
+        (alist-get 'cwd frontmatter)
+        default-directory))))
+
+(defun ellm-acp--provider-name (provider)
+  "Return frontmatter provider name for ACP PROVIDER, or nil."
+  (catch 'name
+    (dolist (entry ellm-provider-alist)
+      (when (eq provider (ellm--provider-entry-provider (cdr entry)))
+        (throw 'name (symbol-name (car entry)))))))
+
 (defun ellm-acp--dispatch-request (_connection method params)
   "Dispatch ACP request METHOD with PARAMS for CONNECTION."
   (pcase method
@@ -316,11 +403,7 @@ ACP agent exposes a model config option, selected for the session."
 
 (defun ellm-acp--new-session (connection provider frontmatter on-ready on-error)
   "Create a new ACP session for CONNECTION."
-  (let ((cwd (expand-file-name
-              (file-name-as-directory
-               (or (ellm-acp-provider-cwd provider)
-                   (alist-get 'cwd frontmatter)
-                   default-directory)))))
+  (let ((cwd (ellm-acp--provider-cwd provider frontmatter)))
     (jsonrpc-async-request
      connection :session/new
      `(:cwd ,cwd :mcpServers [])
@@ -384,8 +467,97 @@ ACP agent exposes a model config option, selected for the session."
   "Return the content of the most recent user turn in the current buffer."
   (when-let* ((turn (cl-find-if (lambda (turn)
                                   (equal (ellm-turn-role turn) "user"))
-                                (reverse (ellm--parse-turns)))))
+                                 (reverse (ellm--parse-turns)))))
     (ellm-turn-content turn)))
+
+;;;; Session listing/loading
+
+(defun ellm-acp--list-sessions (connection provider frontmatter)
+  "Return all ACP sessions for CONNECTION, PROVIDER, and FRONTMATTER."
+  (ellm-acp--initialize-sync connection)
+  (unless (ellm-acp--capability connection '(sessionCapabilities list))
+    (user-error "ellm ACP: agent does not support session/list"))
+  (let ((cursor nil)
+        sessions done)
+    (while (not done)
+      (let* ((params (append (list :cwd (ellm-acp--provider-cwd provider frontmatter))
+                             (when cursor (list :cursor cursor))))
+             (result (ellm-acp--request-sync connection :session/list params)))
+        (setq sessions (append sessions (plist-get result :sessions))
+              cursor (plist-get result :nextCursor)
+              done (not cursor))))
+    sessions))
+
+(defun ellm-acp--session-label (session)
+  "Return a completing-read label for ACP SESSION."
+  (let ((title (plist-get session :title))
+        (updated (plist-get session :updatedAt))
+        (cwd (plist-get session :cwd))
+        (id (plist-get session :sessionId)))
+    (string-join (delq nil (list (or title id) updated cwd id)) "  ")))
+
+(defun ellm-acp--session-choice (sessions)
+  "Read and return one session from SESSIONS."
+  (unless sessions
+    (user-error "ellm ACP: no sessions found"))
+  (let* ((choices (mapcar (lambda (session)
+                            (cons (ellm-acp--session-label session) session))
+                          sessions))
+         (choice (completing-read "ACP session: " choices nil t)))
+    (cdr (assoc choice choices))))
+
+(defun ellm-acp-load-session (provider frontmatter)
+  "Interactively load an ACP session for PROVIDER using FRONTMATTER context."
+  (let* ((list-buffer (generate-new-buffer " *ellm-acp-list*"))
+         (list-connection nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer list-buffer
+            (setq list-connection (ellm-acp--ensure-connection provider list-buffer)))
+          (let* ((sessions (ellm-acp--list-sessions list-connection provider frontmatter))
+                 (session (ellm-acp--session-choice sessions)))
+            (unless session
+              (user-error "ellm ACP: no session selected"))
+            (ellm-acp--load-session-into-new-buffer provider frontmatter session)))
+      (when (and list-connection (jsonrpc-running-p list-connection))
+        (jsonrpc-shutdown list-connection))
+      (when (buffer-live-p list-buffer)
+        (kill-buffer list-buffer)))))
+
+(defun ellm-acp--load-session-into-new-buffer (provider frontmatter session)
+  "Load ACP SESSION for PROVIDER into a new ellm buffer."
+  (let* ((session-id (plist-get session :sessionId))
+         (cwd (or (plist-get session :cwd)
+                  (ellm-acp--provider-cwd provider frontmatter)))
+         (buf (generate-new-buffer (format "*ellm:%s*"
+                                           (or (plist-get session :title)
+                                               session-id))))
+         connection)
+    (with-current-buffer buf
+      (insert (format "---\nprovider: %s\nmodel: %s\ncwd: %s\nacp:\n  session-id: %s\n---\n\n"
+                      (or (alist-get 'provider frontmatter)
+                          (ellm-acp--provider-name provider)
+                          "null")
+                      (or (ellm-acp-provider-model provider) "null")
+                      cwd session-id))
+      (ellm-mode)
+      (setq connection (ellm-acp--ensure-connection provider buf))
+      (ellm-acp--initialize-sync connection)
+      (unless (ellm-acp--capability connection '(loadSession))
+        (user-error "ellm ACP: agent does not support session/load"))
+      (setf (ellm-acp--connection-session-id connection) session-id)
+      (ellm-acp--request-sync
+       connection :session/load
+       `(:sessionId ,session-id
+         :cwd ,cwd
+         :mcpServers []
+         :additionalDirectories ,(or (plist-get session :additionalDirectories) [])))
+      (goto-char (point-max))
+      (unless (and (ellm--parse-turns)
+                   (equal (ellm-turn-role (car (last (ellm--parse-turns)))) "user"))
+        (ellm--insert-turn "user")))
+    (switch-to-buffer buf)
+    buf))
 
 ;;;; Rendering
 
@@ -408,7 +580,33 @@ ACP agent exposes a model config option, selected for the session."
              (ellm-acp--insert-tool-update update))
             ("plan"
              (ellm-acp--insert-plan update))
+            ("available_commands_update"
+             (setf (ellm-acp--connection-available-commands connection)
+                   (plist-get update :availableCommands)))
+            ("session_info_update"
+             (ellm-acp--handle-session-info-update connection update))
             (_ nil)))))))
+
+(defun ellm-acp--handle-session-info-update (connection update)
+  "Persist ACP session metadata UPDATE for CONNECTION."
+  (when-let* ((buffer (ellm-acp--connection-buffer connection)))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (when (plist-member update :title)
+          (ellm--set-frontmatter-value '(acp title) (plist-get update :title)))
+        (when (plist-member update :updatedAt)
+          (ellm--set-frontmatter-value '(acp updated-at)
+                                      (plist-get update :updatedAt)))))))
+
+(defun ellm-acp--slash-command-candidate (command)
+  "Return completion candidate for ACP slash COMMAND."
+  (let* ((name (plist-get command :name))
+         (desc (plist-get command :description))
+         (input (plist-get command :input))
+         (hint (plist-get input :hint)))
+    (append (list (concat "/" name))
+            (append (when hint (list :ann hint))
+                    (when desc (list :desc desc))))))
 
 (defun ellm-acp--insert-content (role content)
   "Insert ACP CONTENT as ROLE."
@@ -443,10 +641,23 @@ ACP agent exposes a model config option, selected for the session."
 (defun ellm-acp--insert-tool-call (update)
   "Insert ACP tool call UPDATE."
   (goto-char (point-max))
-  (ellm--insert-turn "tool-call"
-                     :pipe-arg (or (plist-get update :title) "ACP tool")
-                     :id (plist-get update :toolCallId))
-  (insert (ellm-acp--tool-update-text update)))
+  (let ((params (ellm-acp--raw-input-params (plist-get update :rawInput))))
+    (ellm--insert-tool-call-with-params
+     (or (plist-get update :title) "ACP tool")
+     (plist-get update :toolCallId)
+     params)
+    (unless params
+      (insert (ellm-acp--tool-update-text update)))))
+
+(defun ellm-acp--raw-input-params (raw-input)
+  "Return RAW-INPUT as an alist suitable for `tool-param' turns."
+  (cond
+   ((null raw-input) nil)
+   ((and (listp raw-input) (keywordp (car raw-input)))
+    (cl-loop for (key value) on raw-input by #'cddr
+             collect (cons (substring (symbol-name key) 1) value)))
+   ((listp raw-input) raw-input)
+   (t `((input . ,raw-input)))))
 
 (defun ellm-acp--insert-tool-update (update)
   "Insert ACP tool call UPDATE as a result block when it carries content."
