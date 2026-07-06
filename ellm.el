@@ -44,6 +44,7 @@
 
 (require 'cl-lib)
 (require 'color)
+(require 'json)
 (require 'outline)
 (require 'yaml)
 
@@ -347,6 +348,21 @@ KEYS may be a single key or a list of keys."
             (ellm--alist-set-nested (alist-get (car keys) alist)
                                     (cdr keys) value))))
   alist)
+
+(defun ellm--alist-get-nested (alist keys)
+  "Return nested value from ALIST at KEYS.
+KEYS may be a single key or a list of keys.  String and symbol keys are
+treated interchangeably to match YAML parser output and caller input."
+  (let ((keys (if (listp keys) keys (list keys)))
+        (value alist))
+    (while (and keys (listp value))
+      (let* ((key (car keys))
+             (sym (if (stringp key) (intern key) key))
+             (str (if (symbolp key) (symbol-name key) key)))
+        (setq value (or (alist-get sym value)
+                        (and str (alist-get str value nil nil #'equal)))
+              keys (cdr keys))))
+    (and (null keys) value)))
 
 ;;;; Faces
 ;;;;; Utilities
@@ -1284,7 +1300,8 @@ delimiter line (i.e. the end of the match against
   "Return alist parsed from the buffer's YAML frontmatter, or nil.
 Keys are symbols.  Returns nil when there is no frontmatter or when
 parsing fails (a `lwarn' is issued in the latter case)."
-  (pcase-let* ((`(_ _ _ _ ,body) (ellm--frontmatter-bounds)))
+  (when-let* ((bounds (ellm--frontmatter-bounds))
+              (body (nth 4 bounds)))
     (condition-case err
         (yaml-parse-string body
                            :object-type 'alist
@@ -1294,6 +1311,11 @@ parsing fails (a `lwarn' is issued in the latter case)."
       (error
        (lwarn 'ellm :warning "Failed to parse frontmatter: %S" err)
        nil))))
+
+(defun ellm--frontmatter-value (key)
+  "Return frontmatter KEY from the current buffer.
+KEY may be a symbol/string or a list naming a nested path."
+  (ellm--alist-get-nested (ellm--parse-frontmatter) key))
 
 (defun ellm--set-frontmatter-value (key &optional value)
   "Set scalar frontmatter KEY to VALUE in the current buffer.
@@ -1306,7 +1328,7 @@ written as a YAML scalar string.  Nil VALUE deletes KEY."
      (lambda ()
        (concat (unless beg "---\n")
                (yaml-encode (ellm--alist-set-nested fm key value))
-               (unless beg "\n---\n"))))))
+               (unless beg "\n---\n\n"))))))
 
 ;;;;; Provider resolution
 
@@ -1733,6 +1755,34 @@ Completes:
                                  (not (looking-at-p ":")))
                         (insert ": "))))))))))))
 
+(defun ellm--turn-at-point ()
+  "Return parsed turn containing point, or nil."
+  (let ((pos (point)))
+    (cl-find-if (lambda (turn)
+                  (and (>= pos (ellm-turn-beg turn))
+                       (<= pos (ellm-turn-end turn))))
+                (ellm--parse-turns))))
+
+(defun ellm--slash-command-capf ()
+  "Complete backend-provided slash commands in user turns."
+  (when-let* ((turn (ellm--turn-at-point))
+              ((equal (ellm-turn-role turn) "user")))
+    (save-excursion
+      (let ((orig (point)))
+        (beginning-of-line)
+        (when (looking-at "[ \t]*\\(/[^ \t\n]*\\)")
+          (let ((beg (match-beginning 1))
+                (end (match-end 1)))
+            (when (and (>= orig beg) (<= orig end))
+              (let* ((fm (ellm--parse-frontmatter))
+                     (provider (ignore-errors (ellm--resolve-provider fm)))
+                     (commands (and provider
+                                    (ellm-provider-slash-command-candidates
+                                     provider (current-buffer)))))
+                (when commands
+                  (ellm--frontmatter-capf--make-result
+                   beg end commands "command"))))))))))
+
 ;;;;;; Insertion
 
 (defun ellm-new-buffer ()
@@ -1823,6 +1873,23 @@ pairs, e.g. `:ts 2025-01-01T00:00:00 :id call_1'."
       (insert (apply #'ellm--get-turn role attrs) "\n")
       (ellm--flush-pending-fold depth)
       (ellm--mark-pending-fold beg role depth))))
+
+(defun ellm--format-tool-param-value (value)
+  "Return a stable buffer representation for tool parameter VALUE."
+  (cond
+   ((null value) "")
+   ((stringp value) value)
+   (t (json-serialize value :false-object :json-false :null-object nil))))
+
+(defun ellm--insert-tool-call-with-params (name id params)
+  "Insert a `tool-call' turn for NAME and ID with PARAMS.
+PARAMS is an alist of (PARAM-NAME . VALUE).  Each parameter is inserted
+as a nested `tool-param' turn so values remain visible and parseable."
+  (ellm--insert-turn "tool-call" :pipe-arg name :id id)
+  (dolist (param params)
+    (ellm--insert-turn "tool-param" :pipe-arg (format "%s" (car param)))
+    (insert (ellm--ensure-newline
+             (ellm--format-tool-param-value (cdr param))))))
 
 ;;;;;; Outline / folding
 
@@ -2156,6 +2223,19 @@ Errors during streaming are signalled normally."
     (setq ellm--active-request nil)
     (message "ellm: request cancelled")))
 
+(defun ellm-load-session ()
+  "Select a backend session with completion and open it in a new buffer."
+  (interactive)
+  (let* ((fm (if (derived-mode-p 'ellm-mode)
+                 (ellm--parse-frontmatter)
+               nil))
+         (provider (if (or fm ellm-provider)
+                       (ellm--resolve-provider fm)
+                     (ellm--provider-entry-provider (cdar ellm-provider-alist)))))
+    (unless provider
+      (user-error "ellm: no provider configured"))
+    (ellm-provider-load-session provider fm)))
+
 ;;;; Backend interface
 
 (cl-defgeneric ellm-provider-current-model (provider)
@@ -2179,6 +2259,21 @@ Errors during streaming are signalled normally."
   "Default model setter for unknown PROVIDER types."
   provider)
 
+(cl-defgeneric ellm-provider-slash-command-candidates (provider buffer)
+  "Return slash command completion candidates for PROVIDER and BUFFER.
+Candidates may be strings or `(STRING :ann ANN :desc DESC)' entries.")
+
+(cl-defmethod ellm-provider-slash-command-candidates (_provider _buffer)
+  "Default slash command candidates for providers without command support."
+  nil)
+
+(cl-defgeneric ellm-provider-load-session (provider frontmatter)
+  "Interactively select and load a PROVIDER session using FRONTMATTER context.")
+
+(cl-defmethod ellm-provider-load-session (_provider _frontmatter)
+  "Default session loading implementation for providers without sessions."
+  (user-error "ellm: provider does not support session listing/loading"))
+
 (cl-defgeneric ellm-backend-send (provider frontmatter buffer)
   "Send BUFFER's trailing user turn through PROVIDER.
 FRONTMATTER is the parsed YAML frontmatter alist for BUFFER.
@@ -2195,6 +2290,7 @@ Implementations should stream into the assistant turn already appended by
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c C-c")   #'ellm-send)
     (define-key map (kbd "C-c C-k")   #'ellm-cancel)
+    (define-key map (kbd "C-c C-l")   #'ellm-load-session)
     map)
   "Keymap for `ellm-mode'.")
 
@@ -2211,6 +2307,7 @@ Implementations should stream into the assistant turn already appended by
   (add-hook 'window-size-change-functions #'ellm--update-rules nil t)
   (add-hook 'post-command-hook #'ellm--reveal-separator-at-point nil t)
   (add-hook 'completion-at-point-functions #'ellm--frontmatter-capf nil t)
+  (add-hook 'completion-at-point-functions #'ellm--slash-command-capf nil t)
   (setq-local outline-regexp (ellm--outline-regexp))
   (setq-local outline-search-function #'ellm--outline-search-function)
   (setq-local outline-level #'ellm--outline-level)

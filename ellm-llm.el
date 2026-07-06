@@ -208,22 +208,10 @@ turns across re-parses."
 (defun ellm-llm--insert-tool-call (id tool-use)
   "Insert a `tool-call' turn for TOOL-USE plist with synthetic ID.
 TOOL-USE is `(:name NAME :args ARGS)' as produced by `llm.el' multi-
-output.  ARGS is an alist of (ARG-SYM . VALUE).  With one arg, the
-value is dumped as the call body; with multiple args, each is emitted
-as a `tool-param' sub-turn."
+output.  ARGS is an alist of (ARG-SYM . VALUE)."
   (let* ((name (plist-get tool-use :name))
-         (args (plist-get tool-use :args)))
-    (cond
-     ((null args)
-      (ellm--insert-turn "tool-call" :pipe-arg name :id id))
-     ((= (length args) 1)
-      (ellm--insert-turn "tool-call" :pipe-arg name :id id)
-      (insert (format "%s\n" (cdar args))))
-     (t
-      (ellm--insert-turn "tool-call" :pipe-arg name :id id)
-      (dolist (a args)
-        (ellm--insert-turn "tool-param" :pipe-arg (format "%s" (car a)))
-        (insert (format "%s\n" (cdr a))))))))
+          (args (plist-get tool-use :args)))
+    (ellm--insert-tool-call-with-params name id args)))
 
 (defun ellm-llm--insert-tool-result (id name result)
   "Insert a `tool-result' turn for NAME pairing call ID with RESULT body."
