@@ -82,12 +82,15 @@ an optional list of model candidates used for frontmatter completion."
    (input
     :initform ""
     :accessor ellm-acp--connection-input)
-   (session-id
-    :initform nil
-    :accessor ellm-acp--connection-session-id)
-   (initialized
-    :initform nil
-    :accessor ellm-acp--connection-initialized)
+    (session-id
+     :initform nil
+     :accessor ellm-acp--connection-session-id)
+    (prompt-request-id
+     :initform nil
+     :accessor ellm-acp--connection-prompt-request-id)
+    (initialized
+     :initform nil
+     :accessor ellm-acp--connection-initialized)
     (agent-capabilities
      :initform nil
      :accessor ellm-acp--connection-agent-capabilities)
@@ -190,6 +193,9 @@ an optional list of model candidates used for frontmatter completion."
                                        error
                                        &allow-other-keys)
   "Send ARGS to ACP CONNECTION as one newline-delimited JSON-RPC message."
+  (when (and id method
+             (equal (ellm-acp--method-name method) "session/prompt"))
+    (setf (ellm-acp--connection-prompt-request-id connection) id))
   (when method
     (setq args (plist-put args :method (ellm-acp--method-name method))))
   (let* ((kind (cond ((or result-supplied-p error) 'reply)
@@ -265,15 +271,26 @@ an optional list of model candidates used for frontmatter completion."
           (ellm-acp--log-wire connection "<--" line)
           (condition-case err
               (let ((message (json-parse-string line
-                                                :object-type 'plist
-                                                :array-type 'list
-                                                :null-object nil
-                                                :false-object :json-false)))
+                                                 :object-type 'plist
+                                                 :array-type 'list
+                                                 :null-object nil
+                                                 :false-object :json-false)))
                 (setq message (plist-put message :jsonrpc-json line))
+                (ellm-acp--maybe-finish-prompt-reply connection message)
                 (jsonrpc-connection-receive connection message))
             (error
              (message "ellm ACP: failed to handle message: %S" err)))))
       (setf (ellm-acp--connection-input connection) input))))
+
+(defun ellm-acp--maybe-finish-prompt-reply (connection message)
+  "Finish prompt if MESSAGE is the final reply for CONNECTION's prompt."
+  (let ((prompt-id (ellm-acp--connection-prompt-request-id connection)))
+    (when (and prompt-id
+               (equal (plist-get message :id) prompt-id)
+               (plist-get (plist-get message :result) :stopReason))
+      (setf (ellm-acp--connection-prompt-request-id connection) nil)
+      (when-let* ((buffer (ellm-acp--connection-buffer connection)))
+        (ellm-acp--finish-prompt buffer)))))
 
 (defun ellm-acp--log-wire (connection direction line)
   "Log raw ACP JSON LINE for CONNECTION with DIRECTION when enabled."
@@ -788,7 +805,10 @@ an optional list of model candidates used for frontmatter completion."
     (with-current-buffer buffer
       (setq ellm--active-request nil)
       (goto-char (point-max))
-      (ellm--insert-turn "user"))))
+      (unless (and-let* ((turns (ellm--parse-turns))
+                         (last-turn (car (last turns))))
+                (equal (ellm-turn-role last-turn) "user"))
+        (ellm--insert-turn "user")))))
 
 (defun ellm-acp--finish-with-error (buffer error-object)
   "Finish ACP request in BUFFER by signalling ERROR-OBJECT."

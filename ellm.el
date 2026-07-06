@@ -2188,6 +2188,9 @@ one, then narrows to its outline subtree."
 Set by `ellm-send' to the object returned by `ellm-backend-send'.
 Cleared on completion, error, or cancellation.")
 
+(defconst ellm--request-starting :ellm-request-starting
+  "Internal sentinel used while `ellm-send' starts a backend request.")
+
 (defun ellm--ensure-trailing-user-turn ()
   "Signal `user-error' unless the buffer ends with a `user' turn."
   (let* ((turns (ellm--parse-turns))
@@ -2212,9 +2215,16 @@ Errors during streaming are signalled normally."
   (ellm--ensure-trailing-user-turn)
   (let* ((fm       (ellm--parse-frontmatter))
          (provider (ellm--resolve-provider fm))
-         (buf      (current-buffer)))
+         (buf      (current-buffer))
+         request)
     (ellm--insert-turn "assistant")
-    (setq ellm--active-request (ellm-backend-send provider fm buf))))
+    (setq ellm--active-request ellm--request-starting)
+    (setq request (ellm-backend-send provider fm buf))
+    ;; Some backends can complete synchronously while `ellm-backend-send' is
+    ;; still on the stack.  In that case completion already cleared
+    ;; `ellm--active-request'; do not resurrect a stale request handle here.
+    (when (eq ellm--active-request ellm--request-starting)
+      (setq ellm--active-request request))))
 
 (defun ellm-cancel ()
   "Cancel the in-flight LLM request for this buffer, if any."
