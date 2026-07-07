@@ -312,10 +312,10 @@ Group 1: the leading hash characters indicating the heading level.")
   '((user        :face ellm-role-user      :glyph "❯ USER")
     (assistant   :face ellm-role-assistant :glyph "❮ ASSISTANT")
     (system      :face ellm-role-system    :glyph "❯ SYSTEM")
-    (tool-call   :face ellm-role-tool      :glyph "❮ CALL"     :tool t :shade ellm-block)
-    (tool-result :face ellm-role-tool      :glyph "❯ RESULT"   :tool t :shade ellm-block)
-    (tool-param  :face ellm-role-tool      :glyph "  ↳ PARAM"  :tool t :shade ellm-block)
-    (reasoning   :face ellm-role-assistant :glyph "❮ REASONING"        :shade ellm-reasoning))
+    (tool-call   :face ellm-role-tool      :glyph "❮❮ CALL"     :tool t :shade ellm-block)
+    (tool-result :face ellm-role-tool      :glyph "❯❯ RESULT"   :tool t :shade ellm-block)
+    (tool-param  :face ellm-role-tool      :glyph "  ↳ PARAM"   :tool t :shade ellm-block)
+    (reasoning   :face ellm-role-reasoning :glyph "❮❮ REASONING"        :shade ellm-reasoning))
   "Single source of truth for role metadata.
 Each entry is `(ROLE-SYM . PLIST)' where PLIST may include:
   :face   FACE-SYMBOL  Face used for the role's keyword on the delimiter line.
@@ -433,13 +433,18 @@ and `set-face-attribute' calls safe in non-graphical contexts."
   "Face for assistant role."
   :group 'ellm)
 
+(defface ellm-role-reasoning
+  '((t :inherit font-lock-regexp-face :weight bold :height 0.85))
+  "Face for assistant role."
+  :group 'ellm)
+
 (defface ellm-role-system
   '((t :inherit font-lock-warning-face :weight bold))
   "Face for system role."
   :group 'ellm)
 
 (defface ellm-role-tool
-  '((t :inherit font-lock-constant-face :weight bold))
+  '((t :inherit font-lock-constant-face :weight bold :height 0.85))
   "Face for tool-call and tool-result roles."
   :group 'ellm)
 
