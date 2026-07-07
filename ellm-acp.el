@@ -1062,6 +1062,8 @@ being merged into the same ellm turn."
 
 (defun ellm-acp--insert-tool-update (update)
   "Insert ACP tool call UPDATE as a `tool-result' turn."
+  (when-let* ((id (plist-get update :toolCallId)))
+    (ellm-acp--delete-marked-turn "tool-result" "id" id))
   (goto-char (point-max))
   (apply #'ellm--insert-turn "tool-result" (ellm-acp--tool-turn-attrs update))
   (insert (ellm-acp--tool-update-text update)))
@@ -1159,19 +1161,29 @@ nested `tool-param' turns."
   (force-mode-line-update))
 
 (defun ellm-acp--delete-marked-turn (role attr value)
-  "Delete the last ROLE turn whose ATTR equals VALUE."
-  (when-let* ((turn (cl-find-if
-                     (lambda (turn)
-                       (and (equal (ellm-turn-role turn) role)
-                            (equal (alist-get attr (ellm-turn-attrs turn)
-                                              nil nil #'equal)
-                                   value)))
-                     (reverse (ellm--parse-turns)))))
-    (let ((beg (save-excursion
-                 (goto-char (ellm-turn-beg turn))
-                 (forward-line -1)
-                 (point))))
-      (delete-region beg (ellm-turn-end turn)))))
+  "Delete the last ROLE turn whose ATTR equals VALUE.
+If the matched turn has nested child turns, delete those children too."
+  (let* ((turns (ellm--parse-turns))
+         (pos (cl-position-if
+               (lambda (turn)
+                 (and (equal (ellm-turn-role turn) role)
+                      (equal (alist-get attr (ellm-turn-attrs turn)
+                                        nil nil #'equal)
+                             value)))
+               turns :from-end t)))
+    (when pos
+      (let* ((turn (nth pos turns))
+             (depth (or (ellm-turn-depth turn) 1))
+             (end (ellm-turn-end turn))
+             (rest (nthcdr (1+ pos) turns))
+             (beg (save-excursion
+                    (goto-char (ellm-turn-beg turn))
+                    (forward-line -1)
+                    (point))))
+        (while (and rest (> (or (ellm-turn-depth (car rest)) 1) depth))
+          (setq end (ellm-turn-end (car rest))
+                rest (cdr rest)))
+        (delete-region beg end)))))
 
 (defun ellm-acp--finish-prompt (buffer)
   "Finish ACP prompt in BUFFER."
