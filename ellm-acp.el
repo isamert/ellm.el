@@ -943,7 +943,7 @@ When SELECT is non-nil, choose a session from `session/list'."
               connection (plist-get update :configOptions)))
             ("usage_update"
              (setf (ellm-acp--connection-last-message-key connection) nil)
-             (ellm-acp--insert-usage update))
+             (ellm-acp--update-usage update))
             (_ nil)))))))
 
 (defun ellm-acp--handle-session-info-update (connection update)
@@ -1141,18 +1141,22 @@ nested `tool-param' turns."
                     (plist-get entry :priority)
                     (plist-get entry :content)))))
 
-(defun ellm-acp--insert-usage (update)
-  "Insert ACP usage UPDATE as the current usage reasoning block."
-  (ellm-acp--delete-marked-turn "reasoning" "acp" "usage")
-  (goto-char (point-max))
-  (ellm--insert-turn "reasoning" :continuation t :acp "usage")
-  (insert (format "ACP Usage:\n- used: %s\n- size: %s\n"
-                  (plist-get update :used)
-                  (plist-get update :size)))
-  (when-let* ((cost (plist-get update :cost)))
-    (insert (format "- cost: %s %s\n"
-                    (plist-get cost :amount)
-                    (plist-get cost :currency)))))
+(defun ellm-acp--update-usage (update)
+  "Store ACP usage UPDATE in `ellm-buffer-state' for header-line display."
+  (setf (ellm-buffer-state-context-usage ellm-buffer-state)
+        (plist-get update :used))
+  (setf (ellm-buffer-state-context-size ellm-buffer-state)
+        (plist-get update :size))
+  (when (plist-member update :cost)
+    (if-let* ((cost (plist-get update :cost)))
+        (progn
+          (setf (ellm-buffer-state-cost-amount ellm-buffer-state)
+                (plist-get cost :amount))
+          (setf (ellm-buffer-state-cost-currency ellm-buffer-state)
+                (plist-get cost :currency)))
+      (setf (ellm-buffer-state-cost-amount ellm-buffer-state) nil)
+      (setf (ellm-buffer-state-cost-currency ellm-buffer-state) nil)))
+  (force-mode-line-update))
 
 (defun ellm-acp--delete-marked-turn (role attr value)
   "Delete the last ROLE turn whose ATTR equals VALUE."

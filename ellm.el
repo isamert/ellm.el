@@ -2490,8 +2490,95 @@ Implementations should stream into the assistant turn already appended by
 
 ;;;; Major mode
 
+;;;;; State
+
+(cl-defstruct (ellm-buffer-state (:constructor ellm--make-buffer-state))
+  "Buffer stats."
+  context-size context-usage
+  cost-amount cost-currency)
+
+(defvar-local ellm-buffer-state (ellm--make-buffer-state)
+  "Buffer stats.")
+
+;;;;; Header line
+
+(defconst ellm--currency-symbols
+  '(("USD" . "$")
+    ("EUR" . "€")
+    ("GBP" . "£")
+    ("JPY" . "¥")
+    ("CNY" . "¥")
+    ("KRW" . "₩")
+    ("INR" . "₹")
+    ("TRY" . "₺")
+    ("RUB" . "₽")
+    ("BTC" . "₿"))
+  "Currency symbols used in `ellm-mode' header-line status.")
+
+(defun ellm--format-compact-number (number)
+  "Return NUMBER in a compact human-readable form."
+  (when (numberp number)
+    (let* ((abs-number (abs (float number)))
+           (formatted
+            (cond
+             ((< abs-number 1000)
+              (format "%.0f" number))
+             ((< abs-number 1000000)
+              (format "%.1fK" (/ number 1000.0)))
+             ((< abs-number 1000000000)
+              (format "%.1fM" (/ number 1000000.0)))
+             (t
+              (format "%.1fB" (/ number 1000000000.0))))))
+      (replace-regexp-in-string "\\.0\\([KMB]\\)\\'" "\\1" formatted))))
+
+(defun ellm--format-context-usage (used size)
+  "Return a compact context usage string for USED and SIZE tokens."
+  (cond
+   ((and (numberp used) (numberp size) (> size 0))
+    (format "%s/%s (%.1f%%)"
+            (ellm--format-compact-number used)
+            (ellm--format-compact-number size)
+            (* (/ (float used) size) 100)))
+   ((numberp used)
+    (format "%s used" (ellm--format-compact-number used)))))
+
+(defun ellm--currency-symbol (currency)
+  "Return display symbol for CURRENCY code, or nil when unknown."
+  (and currency
+       (cdr (assoc (upcase (format "%s" currency)) ellm--currency-symbols))))
+
+(defun ellm--format-cost (amount currency)
+  "Return a compact cost string for AMOUNT and CURRENCY."
+  (when (numberp amount)
+    (if-let* ((symbol (ellm--currency-symbol currency)))
+        (format "%s%.2f" symbol amount)
+      (string-join (delq nil (list (format "%.2f" amount)
+                                   (and currency (format "%s" currency))))
+                   " "))))
+
+(defun ellm--header-line-status ()
+  "Return `ellm-mode' header-line status text."
+  (let* ((usage (ellm--format-context-usage
+                 (ellm-buffer-state-context-usage ellm-buffer-state)
+                 (ellm-buffer-state-context-size ellm-buffer-state)))
+         (cost (ellm--format-cost
+                (ellm-buffer-state-cost-amount ellm-buffer-state)
+                (ellm-buffer-state-cost-currency ellm-buffer-state)))
+         (rhs (string-join (delq nil (list usage cost)) " ")))
+    (when (and rhs (not (string-empty-p rhs)))
+      (concat
+       (propertize " " 'display
+                   (if (and (fboundp 'string-pixel-width)
+                            (display-graphic-p))
+                       `(space :align-to (- right (,(string-pixel-width rhs))))
+                     `(space :align-to (- right ,(+ 1 (string-width rhs))))))
+       rhs))))
+
+;;;;; Major mode
+
 (defvar ellm-mode-map
   (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "<backtab>") #'outline-cycle-buffer)
     (define-key map (kbd "C-c C-c")   #'ellm-send)
     (define-key map (kbd "C-c C-k")   #'ellm-cancel)
     (define-key map (kbd "C-c C-l")   #'ellm-load-session)
@@ -2501,11 +2588,13 @@ Implementations should stream into the assistant turn already appended by
 ;;;###autoload
 (define-derived-mode ellm-mode text-mode "eLLM"
   "Major mode for LLM interaction buffers."
+  (setq-local ellm-buffer-state (ellm--make-buffer-state))
   (setq-local font-lock-defaults '(ellm-font-lock-keywords t))
   (setq-local font-lock-multiline t)
   (setq-local font-lock-fontify-region-function #'ellm--fontify-region)
   (setq-local font-lock-extend-after-change-region-function
               #'ellm--extend-after-change-region)
+  (setq-local header-line-format '((:eval (ellm--header-line-status))))
   (add-hook 'before-change-functions #'ellm--before-change-function nil t)
   (add-hook 'after-change-functions #'ellm--after-change-function nil t)
   (add-hook 'window-size-change-functions #'ellm--update-rules nil t)
@@ -2527,6 +2616,7 @@ Implementations should stream into the assistant turn already appended by
   ;; `backward-page' navigate turn-by-turn.
   (setq-local page-delimiter ellm-page-delimiter-regexp)
   (outline-minor-mode 1)
+  ;; Cache
   (ellm--rebuild-fence-cache)
   ;; Collapse configured turns (tool calls / reasoning) in loaded
   ;; conversations.  Safe here because every turn is already complete.
