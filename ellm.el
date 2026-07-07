@@ -2222,19 +2222,15 @@ Empty or whitespace-only bodies are not folded."
         (when (save-excursion
                 (goto-char (min body-beg subtree-end))
                 (re-search-forward "[^[:space:]]" subtree-end t))
-          (when (and (= subtree-end (point-max))
-                     (> subtree-end heading-end)
+          (when (and (> subtree-end heading-end)
                      (eq (char-before subtree-end) ?\n))
             (setq subtree-end (1- subtree-end)))
           (when (> subtree-end heading-end)
-            (outline-flag-region heading-end subtree-end t)
-            ;; The hidden region starts at the heading newline so child
-            ;; headings remain hidden in parent folds.  Re-emit one visible
-            ;; newline after the ellipsis so consecutive folded turns do not
-            ;; render on the same screen line.
-            (dolist (ov (overlays-in heading-end subtree-end))
-              (when (eq (overlay-get ov 'invisible) 'outline)
-                (overlay-put ov 'after-string "\n")))))))))
+            ;; Start at the heading newline so child headings stay hidden,
+            ;; but leave the final newline visible.  Hiding that separator
+            ;; newline can leave a one-character outline ellipsis overlay
+            ;; behind after unfolding.
+            (outline-flag-region heading-end subtree-end t)))))))
 
 (defun ellm--fold-subtree-at (pos)
   "Collapse the outline subtree of the heading containing POS."
@@ -2275,11 +2271,12 @@ according to `ellm-fold-tool-calls' / `ellm-fold-reasoning-blocks'."
                    (not (equal role "tool-param")))
           (let ((subtree-end
                  (or (cl-loop for next in (cdr rest)
-                              when (<= (ellm-turn-depth next) depth)
-                              return (save-excursion
-                                       (goto-char (ellm-turn-beg next))
-                                       (line-beginning-position)))
-                     (point-max))))
+                               when (<= (ellm-turn-depth next) depth)
+                               return (save-excursion
+                                        (goto-char (ellm-turn-beg next))
+                                        (forward-line -1)
+                                        (line-beginning-position)))
+                      (point-max))))
             (ellm--fold-region-at (ellm-turn-beg turn) subtree-end)))))))
 
 ;;;; Narrowing
