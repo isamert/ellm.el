@@ -82,30 +82,33 @@ an optional list of model candidates used for frontmatter completion."
    (input
     :initform ""
     :accessor ellm-acp--connection-input)
-    (session-id
-     :initform nil
-     :accessor ellm-acp--connection-session-id)
-    (prompt-request-id
-     :initform nil
-     :accessor ellm-acp--connection-prompt-request-id)
-    (initialized
-     :initform nil
-     :accessor ellm-acp--connection-initialized)
-    (agent-capabilities
-     :initform nil
-     :accessor ellm-acp--connection-agent-capabilities)
-    (available-commands
-     :initform nil
-     :accessor ellm-acp--connection-available-commands)
-    (model-candidates
-     :initform nil
-     :accessor ellm-acp--connection-model-candidates)
-    (model-config-id
-     :initform nil
-     :accessor ellm-acp--connection-model-config-id)
-    (current-model
-     :initform nil
-     :accessor ellm-acp--connection-current-model)
+   (session-id
+    :initform nil
+    :accessor ellm-acp--connection-session-id)
+   (prompt-request-id
+    :initform nil
+    :accessor ellm-acp--connection-prompt-request-id)
+   (initialized
+    :initform nil
+    :accessor ellm-acp--connection-initialized)
+   (agent-capabilities
+    :initform nil
+    :accessor ellm-acp--connection-agent-capabilities)
+   (available-commands
+    :initform nil
+    :accessor ellm-acp--connection-available-commands)
+   (model-candidates
+    :initform nil
+    :accessor ellm-acp--connection-model-candidates)
+   (model-config-id
+    :initform nil
+    :accessor ellm-acp--connection-model-config-id)
+   (current-model
+    :initform nil
+    :accessor ellm-acp--connection-current-model)
+   (last-message-key
+    :initform nil
+    :accessor ellm-acp--connection-last-message-key)
    (log-buffer
     :initform nil
     :accessor ellm-acp--connection-log-buffer))
@@ -158,20 +161,30 @@ an optional list of model candidates used for frontmatter completion."
   "Select and load an ACP session for PROVIDER."
   (ellm-acp-load-session provider frontmatter))
 
+(cl-defmethod ellm-provider-close-session ((provider ellm-acp-provider) frontmatter buffer)
+  "Close BUFFER's active ACP session for PROVIDER."
+  (ellm-acp-close-session provider frontmatter buffer))
+
+(cl-defmethod ellm-provider-delete-session ((provider ellm-acp-provider) frontmatter buffer
+                                            &optional select)
+  "Delete an ACP session for PROVIDER."
+  (ellm-acp-delete-session provider frontmatter buffer select))
+
 (cl-defmethod ellm-backend-send ((provider ellm-acp-provider) frontmatter buffer)
   "Send BUFFER's trailing user turn through ACP PROVIDER."
   (with-current-buffer buffer
     (let* ((connection (ellm-acp--ensure-connection provider buffer))
+           (prompt-text (ellm-acp--last-user-content))
            (request (ellm-acp--make-request :connection connection)))
       (ellm-acp--ensure-session
        connection provider frontmatter
        (lambda ()
-          (ellm-acp--ensure-frontmatter-model
-           connection frontmatter
-           (lambda ()
-             (ellm-acp--send-prompt connection buffer))
-           (lambda (error-object)
-             (ellm-acp--finish-with-error buffer error-object))))
+         (ellm-acp--ensure-frontmatter-model
+          connection frontmatter
+          (lambda ()
+            (ellm-acp--send-prompt connection buffer prompt-text))
+          (lambda (error-object)
+            (ellm-acp--finish-with-error buffer error-object))))
        (lambda (error-object)
          (ellm-acp--finish-with-error buffer error-object)))
       request)))
@@ -271,10 +284,10 @@ an optional list of model candidates used for frontmatter completion."
           (ellm-acp--log-wire connection "<--" line)
           (condition-case err
               (let ((message (json-parse-string line
-                                                 :object-type 'plist
-                                                 :array-type 'list
-                                                 :null-object nil
-                                                 :false-object :json-false)))
+                                                :object-type 'plist
+                                                :array-type 'list
+                                                :null-object nil
+                                                :false-object :json-false)))
                 (setq message (plist-put message :jsonrpc-json line))
                 (ellm-acp--maybe-finish-prompt-reply connection message)
                 (jsonrpc-connection-receive connection message))
@@ -358,7 +371,7 @@ an optional list of model candidates used for frontmatter completion."
                    connection :initialize
                    '(:protocolVersion 1
                      :clientCapabilities (:fs (:readTextFile :json-false
-                                          :writeTextFile :json-false)
+                                               :writeTextFile :json-false)
                                           :terminal :json-false)
                      :clientInfo (:name "ellm" :title "ellm" :version "0.0.1")))))
       (setf (ellm-acp--connection-agent-capabilities connection)
@@ -377,7 +390,7 @@ an optional list of model candidates used for frontmatter completion."
         (setq present (plist-member value key)
               value (plist-get value key)
               path (cdr path))))
-    present))
+    (and present (not (eq value :json-false)))))
 
 (defun ellm-acp--provider-cwd (provider frontmatter)
   "Return absolute ACP cwd for PROVIDER and FRONTMATTER."
@@ -386,6 +399,155 @@ an optional list of model candidates used for frontmatter completion."
     (or (ellm-acp-provider-cwd provider)
         (alist-get 'cwd frontmatter)
         default-directory))))
+
+(defun ellm-acp--resolve-value (value)
+  "Resolve VALUE when it follows mcp.el's dynamic value convention."
+  (cond
+   ((functionp value) (funcall value))
+   ((and (symbolp value) (boundp value)) (symbol-value value))
+   (t value)))
+
+(defun ellm-acp--sequence-vector (value)
+  "Return VALUE as a vector suitable for JSON arrays."
+  (cond
+   ((null value) [])
+   ((vectorp value) value)
+   ((listp value) (vconcat value))
+   (t (vector value))))
+
+(defun ellm-acp--env-vector (env)
+  "Return ACP EnvVariable vector for mcp.el-style ENV."
+  (cond
+   ((null env) [])
+   ((vectorp env) env)
+   ((and (listp env) (keywordp (car env)))
+    (vconcat
+     (cl-loop for (key value) on env by #'cddr
+              collect `(:name ,(substring (symbol-name key) 1)
+                        :value ,(format "%s" (ellm-acp--resolve-value value))))))
+   ((and (listp env) (listp (car env))
+         (or (ellm--plistish-get (car env) 'name)
+             (ellm--plistish-get (car env) 'value)))
+    (vconcat (mapcar #'ellm-acp--name-value-map env)))
+   ((listp env)
+    (vconcat
+     (mapcar (lambda (cell)
+               (let ((key (car cell))
+                     (value (if (consp (cdr cell))
+                                (cadr cell)
+                              (cdr cell))))
+                 `(:name ,(ellm-acp--env-name key)
+                   :value ,(format "%s" (ellm-acp--resolve-value value)))))
+             env)))
+   (t [])))
+
+(defun ellm-acp--env-name (key)
+  "Return KEY as an environment/header name string."
+  (cond
+   ((keywordp key) (substring (symbol-name key) 1))
+   ((symbolp key) (symbol-name key))
+   (t (format "%s" key))))
+
+(defun ellm-acp--name-value-map (item)
+  "Return ACP name/value object for plistish ITEM."
+  `(:name ,(format "%s" (ellm--plistish-get item 'name))
+    :value ,(format "%s"
+                    (ellm-acp--resolve-value
+                     (ellm--plistish-get item 'value)))))
+
+(defun ellm-acp--headers-vector (config)
+  "Return ACP HTTP header vector for MCP CONFIG."
+  (let ((headers (ellm--plistish-get config 'headers))
+        (token (ellm-acp--resolve-value (ellm--plistish-get config 'token)))
+        result)
+    (cond
+     ((vectorp headers)
+      (setq result (append headers nil)))
+     ((and (listp headers) (listp (car headers))
+           (or (ellm--plistish-get (car headers) 'name)
+               (ellm--plistish-get (car headers) 'value)))
+      (setq result (mapcar #'ellm-acp--name-value-map headers)))
+     ((listp headers)
+      (setq result
+            (mapcar (lambda (cell)
+                      (let ((key (car cell))
+                            (value (if (consp (cdr cell))
+                                       (cadr cell)
+                                     (cdr cell))))
+                        `(:name ,(ellm-acp--env-name key)
+                          :value ,(format "%s" (ellm-acp--resolve-value value)))))
+                    headers))))
+    (when token
+      (setq result (append result
+                           (list `(:name "Authorization"
+                                   :value ,(concat "Bearer " token))))))
+    (vconcat result)))
+
+(defun ellm-acp--mcp-command (command)
+  "Return COMMAND as an ACP stdio MCP command."
+  (or (and command (executable-find command)) command))
+
+(defun ellm-acp--mcp-server (connection server)
+  "Return ACP MCP server object for resolved SERVER."
+  (let* ((name (ellm--mcp-server-name (car server)))
+         (config (cdr server))
+         (command (ellm--plistish-get config 'command))
+         (url (ellm--plistish-get config 'url))
+         (type (ellm--plistish-get config 'type)))
+    (cond
+     (command
+      `(:name ,name
+        :command ,(ellm-acp--mcp-command command)
+        :args ,(ellm-acp--sequence-vector (ellm--plistish-get config 'args))
+        :env ,(ellm-acp--env-vector (ellm--plistish-get config 'env))))
+     (url
+      (let ((transport (format "%s" (or type "http"))))
+        (unless (ellm-acp--capability connection `(mcpCapabilities ,(intern transport)))
+          (user-error "ellm ACP: agent does not support MCP %s transport" transport))
+        `(:type ,transport
+          :name ,name
+          :url ,url
+          :headers ,(ellm-acp--headers-vector config))))
+     (t
+      (user-error "ellm ACP: MCP server `%s' must define :command or :url" name)))))
+
+(defun ellm-acp--mcp-servers (connection frontmatter)
+  "Return ACP mcpServers vector for CONNECTION and FRONTMATTER."
+  (vconcat
+   (mapcar (lambda (server) (ellm-acp--mcp-server connection server))
+           (ellm--resolve-mcp-servers frontmatter))))
+
+(defun ellm-acp--additional-directories (frontmatter &optional override)
+  "Return ACP additionalDirectories from FRONTMATTER or OVERRIDE."
+  (let ((dirs (or override
+                  (ellm--alist-get-nested frontmatter '(acp additional-directories)))))
+    (cond
+     ((null dirs) nil)
+     ((stringp dirs) (vector (expand-file-name dirs)))
+     ((vectorp dirs) (vconcat (mapcar #'expand-file-name dirs)))
+     ((listp dirs) (vconcat (mapcar #'expand-file-name dirs)))
+     (t nil))))
+
+(defun ellm-acp--session-lifecycle-params (connection provider frontmatter
+                                                  &optional session-id additional-directories)
+  "Return common ACP session lifecycle params.
+SESSION-ID, when non-nil, is included for load/resume requests."
+  (let* ((params (append (when session-id (list :sessionId session-id))
+                         (list :cwd (ellm-acp--provider-cwd provider frontmatter)
+                               :mcpServers (ellm-acp--mcp-servers connection frontmatter))))
+         (dirs (ellm-acp--additional-directories frontmatter additional-directories)))
+    (when (and dirs (ellm-acp--capability connection '(sessionCapabilities additionalDirectories)))
+      (setq params (append params (list :additionalDirectories dirs))))
+    params))
+
+(defun ellm-acp--with-lifecycle-params (connection provider frontmatter session-id
+                                               additional-directories on-error fn)
+  "Call FN with lifecycle params, routing validation errors to ON-ERROR."
+  (condition-case err
+      (funcall fn (ellm-acp--session-lifecycle-params
+                   connection provider frontmatter session-id additional-directories))
+    (error
+     (funcall on-error `(:message ,(error-message-string err))))))
 
 (defun ellm-acp--provider-name (provider)
   "Return frontmatter provider name for ACP PROVIDER, or nil."
@@ -412,10 +574,9 @@ an optional list of model candidates used for frontmatter completion."
    ((ellm-acp--connection-session-id connection)
     (funcall on-ready))
    ((ellm-acp--connection-initialized connection)
-    (if-let* ((session-id (let-alist frontmatter .acp.session-id)))
-        (progn
-          (setf (ellm-acp--connection-session-id connection) session-id)
-          (funcall on-ready))
+    (if-let* ((session-id (ellm--alist-get-nested frontmatter '(acp session-id))))
+        (ellm-acp--restore-session connection provider frontmatter session-id
+                                   on-ready on-error)
       (ellm-acp--new-session connection provider frontmatter on-ready on-error)))
    (t
     (ellm-acp--initialize
@@ -432,7 +593,7 @@ an optional list of model candidates used for frontmatter completion."
    connection :initialize
    '(:protocolVersion 1
      :clientCapabilities (:fs (:readTextFile :json-false
-                          :writeTextFile :json-false)
+                               :writeTextFile :json-false)
                           :terminal :json-false)
      :clientInfo (:name "ellm" :title "ellm" :version "0.0.1"))
    :success-fn (lambda (result)
@@ -443,15 +604,16 @@ an optional list of model candidates used for frontmatter completion."
 
 (defun ellm-acp--new-session (connection provider frontmatter on-ready on-error)
   "Create a new ACP session for CONNECTION."
-  (let ((cwd (ellm-acp--provider-cwd provider frontmatter)))
-    (jsonrpc-async-request
-     connection :session/new
-     `(:cwd ,cwd :mcpServers [])
+  (ellm-acp--with-lifecycle-params
+   connection provider frontmatter nil nil on-error
+   (lambda (params)
+     (jsonrpc-async-request
+      connection :session/new params
       :success-fn
       (lambda (result)
         (let ((session-id (plist-get result :sessionId)))
           (setf (ellm-acp--connection-session-id connection) session-id)
-         (when session-id
+          (when session-id
             (ellm-acp--persist-session-id connection session-id)))
         (ellm-acp--update-model-candidates
          connection (plist-get result :configOptions))
@@ -461,7 +623,50 @@ an optional list of model candidates used for frontmatter completion."
              (ellm-acp-provider-model provider))
          on-ready
          on-error))
-      :error-fn on-error)))
+      :error-fn on-error))))
+
+(defun ellm-acp--restore-session (connection provider frontmatter session-id on-ready on-error)
+  "Restore SESSION-ID for a fresh ACP CONNECTION."
+  (cond
+   ((ellm-acp--capability connection '(sessionCapabilities resume))
+    (ellm-acp--resume-session connection provider frontmatter session-id
+                              on-ready on-error))
+   ((ellm-acp--capability connection '(loadSession))
+    (ellm-acp--load-existing-session connection provider frontmatter session-id nil
+                                     on-ready on-error))
+   (t
+    (funcall on-error
+             `(:message ,(format "agent does not support session/resume or session/load for saved session `%s'"
+                                 session-id))))))
+
+(defun ellm-acp--resume-session (connection provider frontmatter session-id on-ready on-error)
+  "Resume ACP SESSION-ID without replaying history."
+  (setf (ellm-acp--connection-session-id connection) session-id)
+  (ellm-acp--with-lifecycle-params
+   connection provider frontmatter session-id nil on-error
+   (lambda (params)
+     (jsonrpc-async-request
+      connection :session/resume params
+      :success-fn (lambda (result)
+                    (ellm-acp--update-model-candidates
+                     connection (plist-get result :configOptions))
+                    (funcall on-ready))
+      :error-fn on-error))))
+
+(defun ellm-acp--load-existing-session (connection provider frontmatter session-id
+                                               additional-directories on-ready on-error)
+  "Load ACP SESSION-ID and replay history into CONNECTION's buffer."
+  (setf (ellm-acp--connection-session-id connection) session-id)
+  (ellm-acp--with-lifecycle-params
+   connection provider frontmatter session-id additional-directories on-error
+   (lambda (params)
+     (jsonrpc-async-request
+      connection :session/load params
+      :success-fn (lambda (result)
+                    (ellm-acp--update-model-candidates
+                     connection (plist-get result :configOptions))
+                    (funcall on-ready))
+      :error-fn on-error))))
 
 (defun ellm-acp--persist-session-id (connection session-id)
   "Persist ACP SESSION-ID in CONNECTION's conversation frontmatter."
@@ -511,8 +716,8 @@ an optional list of model candidates used for frontmatter completion."
   (cl-find-if
    (lambda (option)
      (or (equal (plist-get option :category) "model")
-          (equal (plist-get option :id) "model")))
-    config-options))
+         (equal (plist-get option :id) "model")))
+   config-options))
 
 (defun ellm-acp--update-model-candidates (connection config-options)
   "Store model candidates from ACP CONFIG-OPTIONS on CONNECTION."
@@ -543,12 +748,10 @@ an optional list of model candidates used for frontmatter completion."
             (append (when name (list :ann name))
                     (when desc (list :desc desc))))))
 
-(defun ellm-acp--send-prompt (connection buffer)
-  "Send BUFFER's last user turn through CONNECTION."
-  (let* ((text (with-current-buffer buffer
-                 (ellm-acp--last-user-content)))
-         (params `(:sessionId ,(ellm-acp--connection-session-id connection)
-                   :prompt [(:type "text" :text ,(or text ""))])))
+(defun ellm-acp--send-prompt (connection buffer text)
+  "Send TEXT as BUFFER's pending user prompt through CONNECTION."
+  (let ((params `(:sessionId ,(ellm-acp--connection-session-id connection)
+                  :prompt [(:type "text" :text ,(or text ""))])))
     (jsonrpc-async-request
      connection :session/prompt params
      :success-fn (lambda (_result)
@@ -560,7 +763,7 @@ an optional list of model candidates used for frontmatter completion."
   "Return the content of the most recent user turn in the current buffer."
   (when-let* ((turn (cl-find-if (lambda (turn)
                                   (equal (ellm-turn-role turn) "user"))
-                                 (reverse (ellm--parse-turns)))))
+                                (reverse (ellm--parse-turns)))))
     (ellm-turn-content turn)))
 
 ;;;; Session listing/loading
@@ -617,6 +820,51 @@ an optional list of model candidates used for frontmatter completion."
       (when (buffer-live-p list-buffer)
         (kill-buffer list-buffer)))))
 
+(defun ellm-acp--current-session-id (connection frontmatter)
+  "Return current ACP session id from CONNECTION or FRONTMATTER."
+  (or (and connection (ellm-acp--connection-session-id connection))
+      (ellm--alist-get-nested frontmatter '(acp session-id))))
+
+(defun ellm-acp-close-session (provider frontmatter buffer)
+  "Close BUFFER's active ACP session for PROVIDER."
+  (unless (buffer-live-p buffer)
+    (user-error "ellm ACP: buffer is not live"))
+  (with-current-buffer buffer
+    (let* ((connection (ellm-acp--ensure-connection provider buffer))
+           (session-id (ellm-acp--current-session-id connection frontmatter)))
+      (unless session-id
+        (user-error "ellm ACP: no session id to close"))
+      (ellm-acp--initialize-sync connection)
+      (unless (ellm-acp--capability connection '(sessionCapabilities close))
+        (user-error "ellm ACP: agent does not support session/close"))
+      (ellm-acp--request-sync connection :session/close `(:sessionId ,session-id))
+      (setf (ellm-acp--connection-session-id connection) nil)
+      (message "ellm ACP: closed session %s" session-id))))
+
+(defun ellm-acp-delete-session (provider frontmatter buffer &optional select)
+  "Delete an ACP session for PROVIDER.
+When SELECT is non-nil, choose a session from `session/list'."
+  (unless (buffer-live-p buffer)
+    (user-error "ellm ACP: buffer is not live"))
+  (with-current-buffer buffer
+    (let* ((connection (ellm-acp--ensure-connection provider buffer))
+           (session-id (unless select
+                         (ellm-acp--current-session-id connection frontmatter))))
+      (ellm-acp--initialize-sync connection)
+      (unless (ellm-acp--capability connection '(sessionCapabilities delete))
+        (user-error "ellm ACP: agent does not support session/delete"))
+      (unless session-id
+        (let ((session (ellm-acp--session-choice
+                        (ellm-acp--list-sessions connection provider frontmatter))))
+          (setq session-id (plist-get session :sessionId))))
+      (unless session-id
+        (user-error "ellm ACP: no session selected"))
+      (ellm-acp--request-sync connection :session/delete `(:sessionId ,session-id))
+      (when (equal session-id (ellm-acp--current-session-id connection frontmatter))
+        (setf (ellm-acp--connection-session-id connection) nil)
+        (ellm--set-frontmatter-value '(acp session-id) nil))
+      (message "ellm ACP: deleted session %s" session-id))))
+
 (defun ellm-acp--load-session-into-new-buffer (provider frontmatter session)
   "Load ACP SESSION for PROVIDER into a new ellm buffer."
   (let* ((session-id (plist-get session :sessionId))
@@ -644,10 +892,9 @@ an optional list of model candidates used for frontmatter completion."
        (plist-get
         (ellm-acp--request-sync
          connection :session/load
-         `(:sessionId ,session-id
-           :cwd ,cwd
-           :mcpServers []
-           :additionalDirectories ,(or (plist-get session :additionalDirectories) [])))
+         (ellm-acp--session-lifecycle-params
+          connection provider frontmatter session-id
+          (or (plist-get session :additionalDirectories) [])))
         :configOptions))
       (goto-char (point-max))
       (unless (and (ellm--parse-turns)
@@ -665,23 +912,38 @@ an optional list of model candidates used for frontmatter completion."
       (with-current-buffer buffer
         (let ((update (plist-get params :update)))
           (pcase (plist-get update :sessionUpdate)
+            ("user_message_chunk"
+             (ellm-acp--insert-content connection "user"
+                                       (plist-get update :content)
+                                       (plist-get update :messageId)))
             ("agent_message_chunk"
-             (ellm-acp--insert-content "assistant"
-                                       (plist-get update :content)))
+             (ellm-acp--insert-content connection "assistant"
+                                       (plist-get update :content)
+                                       (plist-get update :messageId)))
             ("agent_thought_chunk"
-             (ellm-acp--insert-content "reasoning"
-                                       (plist-get update :content)))
+             (ellm-acp--insert-content connection "reasoning"
+                                       (plist-get update :content)
+                                       (plist-get update :messageId)))
             ("tool_call"
+             (setf (ellm-acp--connection-last-message-key connection) nil)
              (ellm-acp--insert-tool-call update))
             ("tool_call_update"
+             (setf (ellm-acp--connection-last-message-key connection) nil)
              (ellm-acp--insert-tool-update update))
             ("plan"
+             (setf (ellm-acp--connection-last-message-key connection) nil)
              (ellm-acp--insert-plan update))
             ("available_commands_update"
              (setf (ellm-acp--connection-available-commands connection)
                    (plist-get update :availableCommands)))
             ("session_info_update"
              (ellm-acp--handle-session-info-update connection update))
+            ("config_option_update"
+             (ellm-acp--update-model-candidates
+              connection (plist-get update :configOptions)))
+            ("usage_update"
+             (setf (ellm-acp--connection-last-message-key connection) nil)
+             (ellm-acp--insert-usage update))
             (_ nil)))))))
 
 (defun ellm-acp--handle-session-info-update (connection update)
@@ -693,7 +955,7 @@ an optional list of model candidates used for frontmatter completion."
           (ellm--set-frontmatter-value '(acp title) (plist-get update :title)))
         (when (plist-member update :updatedAt)
           (ellm--set-frontmatter-value '(acp updated-at)
-                                      (plist-get update :updatedAt)))))))
+                                       (plist-get update :updatedAt)))))))
 
 (defun ellm-acp--slash-command-candidate (command)
   "Return completion candidate for ACP slash COMMAND."
@@ -705,14 +967,46 @@ an optional list of model candidates used for frontmatter completion."
             (append (when hint (list :ann hint))
                     (when desc (list :desc desc))))))
 
-(defun ellm-acp--insert-content (role content)
-  "Insert ACP CONTENT as ROLE."
+(defun ellm-acp--insert-content (connection role content &optional message-id)
+  "Insert ACP CONTENT as ROLE for CONNECTION.
+MESSAGE-ID, when present, prevents chunks from distinct ACP messages from
+being merged into the same ellm turn."
   (let ((text (ellm-acp--content-text content)))
     (when (and text (not (string-empty-p text)))
       (goto-char (point-max))
-      (unless (ellm-acp--inside-open-role-p role)
-        (ellm--insert-turn role :continuation t))
+      (unless (ellm-acp--inside-open-message-p connection role message-id)
+        (apply #'ellm--insert-turn
+               role
+               (append (when (ellm-acp--content-continuation-p role)
+                         (list :continuation t))
+                       (when message-id
+                         (list :message-id message-id)))))
+      (setf (ellm-acp--connection-last-message-key connection)
+            (cons role message-id))
       (insert text))))
+
+(defun ellm-acp--inside-open-message-p (connection role message-id)
+  "Return non-nil when point is in ROLE's current ACP message."
+  (and (ellm-acp--inside-open-role-p role)
+       (let* ((turn (car (last (ellm--parse-turns))))
+              (last-key (ellm-acp--connection-last-message-key connection)))
+         (cond
+          ((not message-id) t)
+          ((and last-key
+                (equal (car last-key) role)
+                (equal (cdr last-key) message-id))
+           t)
+          ((and (not last-key)
+                turn
+                (string-empty-p (ellm-turn-content turn)))
+           t)))))
+
+(defun ellm-acp--content-continuation-p (role)
+  "Return non-nil when a new content turn for ROLE should be nested."
+  (and (not (equal role "user"))
+       (not (and (equal role "assistant")
+                 (let ((last (car (last (ellm--parse-turns)))))
+                   (and last (equal (ellm-turn-role last) "user")))))))
 
 (defun ellm-acp--inside-open-role-p (role)
   "Return non-nil if point is currently in an open turn with ROLE."
@@ -739,12 +1033,22 @@ an optional list of model candidates used for frontmatter completion."
   "Insert ACP tool call UPDATE."
   (goto-char (point-max))
   (let ((params (ellm-acp--raw-input-params (plist-get update :rawInput))))
-    (ellm--insert-tool-call-with-params
-     (or (plist-get update :title) "ACP tool")
-     (plist-get update :toolCallId)
-     params)
-    (unless params
-      (insert (ellm-acp--tool-update-text update)))))
+    (apply #'ellm--insert-turn "tool-call" (ellm-acp--tool-turn-attrs update))
+    (insert (ellm-acp--tool-update-text update :skip-raw-input t))
+    (dolist (param params)
+      (ellm--insert-turn "tool-param" :pipe-arg (format "%s" (car param)))
+      (insert (ellm--ensure-newline
+               (ellm--format-tool-param-value (cdr param)))))))
+
+(defun ellm-acp--tool-turn-attrs (update)
+  "Return ellm turn attrs for ACP tool UPDATE."
+  (append (list :pipe-arg (or (plist-get update :title) "ACP tool"))
+          (when-let* ((id (plist-get update :toolCallId)))
+            (list :id id))
+          (when-let* ((kind (plist-get update :kind)))
+            (list :kind kind))
+          (when-let* ((status (plist-get update :status)))
+            (list :status status))))
 
 (defun ellm-acp--raw-input-params (raw-input)
   "Return RAW-INPUT as an alist suitable for `tool-param' turns."
@@ -757,47 +1061,113 @@ an optional list of model candidates used for frontmatter completion."
    (t `((input . ,raw-input)))))
 
 (defun ellm-acp--insert-tool-update (update)
-  "Insert ACP tool call UPDATE as a result block when it carries content."
-  (when (or (plist-get update :content)
-            (member (plist-get update :status) '("completed" "failed")))
-    (goto-char (point-max))
-    (ellm--insert-turn "tool-result"
-                       :pipe-arg (or (plist-get update :title) "ACP tool")
-                       :id (plist-get update :toolCallId))
-    (insert (ellm-acp--tool-update-text update))))
+  "Insert ACP tool call UPDATE as a `tool-result' turn."
+  (goto-char (point-max))
+  (apply #'ellm--insert-turn "tool-result" (ellm-acp--tool-turn-attrs update))
+  (insert (ellm-acp--tool-update-text update)))
 
-(defun ellm-acp--tool-update-text (update)
-  "Return Markdown text for ACP tool UPDATE."
+(cl-defun ellm-acp--tool-update-text (update &key skip-raw-input)
+  "Return Markdown text for ACP tool UPDATE.
+When SKIP-RAW-INPUT is non-nil, omit `rawInput' because it is rendered as
+nested `tool-param' turns."
   (let ((parts nil))
     (when-let* ((status (plist-get update :status)))
       (push (format "Status: %s\n" status) parts))
+    (when-let* ((kind (plist-get update :kind)))
+      (push (format "Kind: %s\n" kind) parts))
+    (when-let* ((locations (plist-get update :locations)))
+      (push (ellm-acp--locations-text locations) parts))
     (when-let* ((content (plist-get update :content)))
       (dolist (item content)
         (push (ellm-acp--tool-content-text item) parts)))
+    (unless skip-raw-input
+      (when (plist-member update :rawInput)
+        (push (ellm-acp--json-section "Raw input" (plist-get update :rawInput))
+              parts)))
+    (when (plist-member update :rawOutput)
+      (push (ellm-acp--json-section "Raw output" (plist-get update :rawOutput))
+            parts))
     (ellm--ensure-newline (string-join (nreverse (delq nil parts)) "\n"))))
+
+(defun ellm-acp--sequence-list (value)
+  "Return VALUE as a list."
+  (cond ((null value) nil)
+        ((vectorp value) (append value nil))
+        ((listp value) value)
+        (t (list value))))
+
+(defun ellm-acp--locations-text (locations)
+  "Return Markdown text for ACP tool LOCATIONS."
+  (let ((lines nil))
+    (dolist (location (ellm-acp--sequence-list locations))
+      (when-let* ((path (plist-get location :path)))
+        (push (if-let* ((line (plist-get location :line)))
+                  (format "- %s:%s" path line)
+                (format "- %s" path))
+              lines)))
+    (when lines
+      (concat "Locations:\n" (string-join (nreverse lines) "\n") "\n"))))
+
+(defun ellm-acp--json-section (title value)
+  "Return a fenced JSON section named TITLE for VALUE."
+  (format "%s:\n```json\n%s\n```\n"
+          title
+          (json-serialize value :false-object :json-false :null-object nil)))
 
 (defun ellm-acp--tool-content-text (item)
   "Return Markdown text for ACP tool content ITEM."
   (pcase (plist-get item :type)
     ("content" (ellm-acp--content-text (plist-get item :content)))
     ("diff"
-     (format "Diff: %s\n```diff\n--- old\n+++ new\n%s\n```\n"
+     (format "Diff: %s\nOld:\n```text\n%s\n```\nNew:\n```text\n%s\n```\n"
              (plist-get item :path)
+             (if (plist-member item :oldText)
+                 (or (plist-get item :oldText) "")
+               "<new file>")
              (or (plist-get item :newText) "")))
     ("terminal"
      (format "Terminal: %s\n" (plist-get item :terminalId)))
     (_ nil)))
 
 (defun ellm-acp--insert-plan (update)
-  "Insert ACP plan UPDATE as a reasoning block."
+  "Insert ACP plan UPDATE as the current plan reasoning block."
+  (ellm-acp--delete-marked-turn "reasoning" "acp" "plan")
   (goto-char (point-max))
-  (ellm--insert-turn "reasoning" :continuation t)
-  (insert "Plan:\n")
+  (ellm--insert-turn "reasoning" :continuation t :acp "plan")
+  (insert "Current ACP Plan:\n")
   (dolist (entry (plist-get update :entries))
     (insert (format "- [%s/%s] %s\n"
                     (plist-get entry :status)
                     (plist-get entry :priority)
                     (plist-get entry :content)))))
+
+(defun ellm-acp--insert-usage (update)
+  "Insert ACP usage UPDATE as the current usage reasoning block."
+  (ellm-acp--delete-marked-turn "reasoning" "acp" "usage")
+  (goto-char (point-max))
+  (ellm--insert-turn "reasoning" :continuation t :acp "usage")
+  (insert (format "ACP Usage:\n- used: %s\n- size: %s\n"
+                  (plist-get update :used)
+                  (plist-get update :size)))
+  (when-let* ((cost (plist-get update :cost)))
+    (insert (format "- cost: %s %s\n"
+                    (plist-get cost :amount)
+                    (plist-get cost :currency)))))
+
+(defun ellm-acp--delete-marked-turn (role attr value)
+  "Delete the last ROLE turn whose ATTR equals VALUE."
+  (when-let* ((turn (cl-find-if
+                     (lambda (turn)
+                       (and (equal (ellm-turn-role turn) role)
+                            (equal (alist-get attr (ellm-turn-attrs turn)
+                                              nil nil #'equal)
+                                   value)))
+                     (reverse (ellm--parse-turns)))))
+    (let ((beg (save-excursion
+                 (goto-char (ellm-turn-beg turn))
+                 (forward-line -1)
+                 (point))))
+      (delete-region beg (ellm-turn-end turn)))))
 
 (defun ellm-acp--finish-prompt (buffer)
   "Finish ACP prompt in BUFFER."

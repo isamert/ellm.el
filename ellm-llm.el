@@ -47,15 +47,15 @@
 ;;;; Interface implementation
 
 (cl-defmethod ellm-backend-send ((provider llm-standard-chat-provider)
-                                 _frontmatter buffer)
+                                 frontmatter buffer)
   "Send BUFFER through a standard `llm.el' chat PROVIDER."
-  (ellm-llm--backend-send provider buffer))
+  (ellm-llm--backend-send provider frontmatter buffer))
 
-(cl-defmethod ellm-backend-send (provider _frontmatter buffer)
+(cl-defmethod ellm-backend-send (provider frontmatter buffer)
   "Compatibility fallback for direct `llm.el' PROVIDER objects.
 Backend-specific provider types should define a more specific
 `ellm-backend-send' method, as `ellm-acp-provider' does."
-  (ellm-llm--backend-send provider buffer))
+  (ellm-llm--backend-send provider frontmatter buffer))
 
 (cl-defmethod ellm-backend-cancel ((request ellm-llm-request))
   "Cancel an active `llm.el' REQUEST."
@@ -359,9 +359,25 @@ is text-only, a fresh trailing `user' turn is appended."
                      'multi-output))
       (setq ellm--active-request (ellm-llm--make-request :raw request)))))
 
-(defun ellm-llm--backend-send (provider buffer)
+(defun ellm-llm--frontmatter-cwd (frontmatter)
+  "Return FRONTMATTER's `cwd' as an absolute directory, or nil."
+  (when-let* ((cwd (alist-get 'cwd frontmatter)))
+    (file-name-as-directory (expand-file-name cwd))))
+
+(defun ellm-llm--apply-cwd (frontmatter)
+  "Apply FRONTMATTER `cwd:' to the current ellm buffer.
+This sets buffer-local `default-directory' instead of dynamically binding
+it so async callbacks and llm.el tool execution keep using the same cwd
+when they later re-enter the buffer."
+  (when-let* ((cwd (ellm-llm--frontmatter-cwd frontmatter)))
+    (unless (file-directory-p cwd)
+      (user-error "ellm: cwd does not exist: %s" cwd))
+    (setq-local default-directory cwd)))
+
+(defun ellm-llm--backend-send (provider frontmatter buffer)
   "Send BUFFER through a normal `llm.el' PROVIDER."
   (with-current-buffer buffer
+    (ellm-llm--apply-cwd frontmatter)
     (let ((prompt (ellm-llm--parse-buffer-as-chat provider)))
       (ellm-llm--send-once provider prompt buffer))))
 

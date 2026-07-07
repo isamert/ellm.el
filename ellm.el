@@ -133,6 +133,39 @@ a whole category with `tools: [\"@shell\"]'."
   :type '(repeat (restricted-sexp :match-alternatives (ellm-tool-p)))
   :group 'ellm)
 
+(defcustom ellm-mcp-servers nil
+  "Alist of MCP server configurations available to ellm buffers.
+
+The shape intentionally follows `mcp-hub-servers' from mcp.el: each
+entry is (NAME . PLIST), where NAME is a string or symbol and PLIST may
+contain `:command' plus `:args' for stdio servers, or `:url' for remote
+servers.  `:env', `:headers', `:token', `:roots', and `:timeout' are kept
+compatible with mcp.el where possible.  ellm also recognizes optional
+`:category' for frontmatter category references.
+
+Buffers select servers through top-level YAML frontmatter `mcp:'.  The
+value may be:
+
+  true             enable all configured MCP servers
+  SERVER          enable a named server
+  [SERVER, ...]   enable several named servers
+  [\"@CAT\", ...]  enable servers with `:category' CAT
+  [{name: ..., command: ...}, ...]
+                   define inline server configurations"
+  :type '(alist :key-type (choice string symbol)
+                :value-type
+                (plist :options ((:command string)
+                                  (:args (repeat string))
+                                  (:url string)
+                                  (:type string)
+                                  (:env sexp)
+                                  (:headers sexp)
+                                  (:token sexp)
+                                  (:roots sexp)
+                                  (:timeout integer)
+                                  (:category string))))
+  :group 'ellm)
+
 (defconst ellm--heading-specs
   '((ellm-heading-1 1.6 outline-1)
     (ellm-heading-2 1.4 outline-2)
@@ -1410,10 +1443,107 @@ can be a tool name like \"a_tool_name\"."
      ;; name ref
      (t
        (let ((tool (cl-find spec ellm-tools-list
-                            :key #'ellm-tool-name
-                           :test #'equal)))
-        (if tool (list tool)
-          (warn "ellm: tool `%s' not found in `ellm-tools-list'" spec)))))))
+                             :key #'ellm-tool-name
+                            :test #'equal)))
+         (if tool (list tool)
+           (warn "ellm: tool `%s' not found in `ellm-tools-list'" spec)))))))
+
+;;;;; MCP server resolution
+
+(defun ellm--plistish-get (object key)
+  "Return KEY from OBJECT, which may be a plist or YAML-style alist.
+KEY may be a keyword, symbol, or string.  This keeps Elisp configuration
+plists and parsed YAML maps on the same path."
+  (let* ((name (cond ((keywordp key) (substring (symbol-name key) 1))
+                     ((symbolp key) (symbol-name key))
+                     (t key)))
+         (sym (intern name))
+         (kw (intern (concat ":" name))))
+    (cond
+     ((and (listp object) (keywordp (car object)))
+      (plist-get object kw))
+     ((listp object)
+      (or (alist-get sym object nil nil #'eq)
+          (alist-get name object nil nil #'equal)
+          (alist-get kw object nil nil #'eq))))))
+
+(defun ellm--mcp-server-name (name)
+  "Return NAME as a stable MCP server name string."
+  (cond ((stringp name) name)
+        ((symbolp name) (symbol-name name))
+        (t (format "%s" name))))
+
+(defun ellm--mcp-inline-server-p (entry)
+  "Return non-nil if ENTRY looks like an inline MCP server config."
+  (and (listp entry)
+       (ellm--plistish-get entry 'name)
+       (or (ellm--plistish-get entry 'command)
+           (ellm--plistish-get entry 'url))))
+
+(defun ellm--resolve-mcp-servers (frontmatter)
+  "Return MCP servers enabled by FRONTMATTER.
+
+Servers come from top-level `mcp:' frontmatter and are resolved against
+`ellm-mcp-servers'.  The accepted syntax mirrors `tools:': true enables
+all configured servers, strings name servers, and strings beginning with
+@ expand categories.  Unlike `tools:', inline server maps are also
+accepted."
+  (let ((entries (alist-get 'mcp frontmatter))
+        resolved)
+    (cond
+     ((null entries)
+      nil)
+     ((eq entries t)
+      (dolist (server ellm-mcp-servers)
+        (push server resolved)))
+     ((or (stringp entries) (symbolp entries) (ellm--mcp-inline-server-p entries))
+      (dolist (server (ellm--resolve-mcp-server entries))
+        (push server resolved)))
+     ((listp entries)
+      (dolist (entry entries)
+        (dolist (server (ellm--resolve-mcp-server entry))
+          (unless (cl-find (car server) resolved :key #'car :test #'equal)
+            (push server resolved))))))
+    (nreverse resolved)))
+
+(defun ellm--resolve-mcp-server (entry)
+  "Resolve MCP server ENTRY to a list of (NAME . CONFIG) conses."
+  (cond
+   ((ellm--mcp-inline-server-p entry)
+    (list (cons (ellm--mcp-server-name (ellm--plistish-get entry 'name))
+                entry)))
+   ((or (stringp entry) (symbolp entry))
+    (let ((spec (ellm--mcp-server-name entry)))
+      (if (and (> (length spec) 1) (eq (aref spec 0) ?@))
+          (let* ((category (substring spec 1))
+                 (matches
+                  (cl-loop for server in ellm-mcp-servers
+                           when (equal (ellm--plistish-get (cdr server) 'category)
+                                       category)
+                           collect server)))
+            (unless matches
+              (warn "ellm: no MCP servers in `ellm-mcp-servers' have category `%s'"
+                    category))
+            matches)
+        (let ((server (cl-find spec ellm-mcp-servers
+                               :key (lambda (server)
+                                      (ellm--mcp-server-name (car server)))
+                               :test #'equal)))
+          (unless server
+            (warn "ellm: MCP server `%s' not found in `ellm-mcp-servers'"
+                  spec))
+          (and server (list server))))))))
+
+(defun ellm--capf-mcp-candidates ()
+  "Return completion strings for `mcp:' frontmatter entries."
+  (append
+   (mapcar (lambda (server) (ellm--mcp-server-name (car server)))
+           ellm-mcp-servers)
+   (mapcar (lambda (cat) (concat "@" cat))
+           (delete-dups
+            (delq nil (mapcar (lambda (server)
+                                (ellm--plistish-get (cdr server) 'category))
+                              ellm-mcp-servers))))))
 
 ;;;;; Frontmatter completion
 
@@ -1439,10 +1569,16 @@ can be a tool name like \"a_tool_name\"."
     ("tools"       :ann "list"
      :desc "Tools enabled for this buffer; names from `ellm-tools-list' or `@CATEGORY'."
      :items ellm--capf-tool-candidates)
+    ("mcp"         :ann "list|true"
+     :desc "MCP servers enabled for this buffer; true means all, names come from `ellm-mcp-servers', and `@CATEGORY' expands categories."
+     :values (("true" :desc "Enable every MCP server in `ellm-mcp-servers'."))
+     :items ellm--capf-mcp-candidates)
     ("acp" :ann "acp"
      :desc "ACP related configurations."
      :children (("session-id" :ann "string"
-                 :desc "ACP session id used to continue an existing session."))))
+                 :desc "ACP session id used to continue an existing session.")
+                ("additional-directories" :ann "list"
+                 :desc "Additional ACP workspace roots sent on session lifecycle requests."))))
   "Alist of (KEY . SPEC) for known YAML frontmatter keys.
 SPEC is a plist with:
   :ann     Short annotation string, shown inline next to the candidate
@@ -2235,18 +2371,45 @@ Errors during streaming are signalled normally."
     (setq ellm--active-request nil)
     (message "ellm: request cancelled")))
 
+(defun ellm--command-frontmatter ()
+  "Return frontmatter for the current command context, if available."
+  (if (derived-mode-p 'ellm-mode)
+      (ellm--parse-frontmatter)
+    nil))
+
+(defun ellm--command-provider (frontmatter)
+  "Return provider for command FRONTMATTER context."
+  (let ((provider (if (or frontmatter ellm-provider)
+                      (ellm--resolve-provider frontmatter)
+                    (and ellm-provider-alist
+                         (ellm--provider-entry-provider
+                          (cdar ellm-provider-alist))))))
+    (unless provider
+      (user-error "ellm: no provider configured"))
+    provider))
+
 (defun ellm-load-session ()
   "Select a backend session with completion and open it in a new buffer."
   (interactive)
-  (let* ((fm (if (derived-mode-p 'ellm-mode)
-                 (ellm--parse-frontmatter)
-               nil))
-         (provider (if (or fm ellm-provider)
-                       (ellm--resolve-provider fm)
-                     (ellm--provider-entry-provider (cdar ellm-provider-alist)))))
-    (unless provider
-      (user-error "ellm: no provider configured"))
+  (let* ((fm (ellm--command-frontmatter))
+         (provider (ellm--command-provider fm)))
     (ellm-provider-load-session provider fm)))
+
+(defun ellm-close-session ()
+  "Close the backend session associated with the current ellm buffer."
+  (interactive)
+  (let* ((fm (ellm--command-frontmatter))
+         (provider (ellm--command-provider fm)))
+    (ellm-provider-close-session provider fm (current-buffer))))
+
+(defun ellm-delete-session (&optional select)
+  "Delete an ACP/backend session from session history.
+With prefix argument SELECT, choose a session from the backend when supported.
+Without SELECT, delete the current buffer's session when it has one."
+  (interactive "P")
+  (let* ((fm (ellm--command-frontmatter))
+         (provider (ellm--command-provider fm)))
+    (ellm-provider-delete-session provider fm (current-buffer) select)))
 
 ;;;; Backend interface
 
@@ -2294,6 +2457,21 @@ Candidates may be strings or `(STRING :ann ANN :desc DESC)' entries.")
 (cl-defmethod ellm-provider-load-session (_provider _frontmatter)
   "Default session loading implementation for providers without sessions."
   (user-error "ellm: provider does not support session listing/loading"))
+
+(cl-defgeneric ellm-provider-close-session (provider frontmatter buffer)
+  "Close PROVIDER's active session for BUFFER using FRONTMATTER context.")
+
+(cl-defmethod ellm-provider-close-session (_provider _frontmatter _buffer)
+  "Default session close implementation for providers without sessions."
+  (user-error "ellm: provider does not support session close"))
+
+(cl-defgeneric ellm-provider-delete-session (provider frontmatter buffer &optional select)
+  "Delete a PROVIDER session using FRONTMATTER and BUFFER context.
+When SELECT is non-nil, implementations may prompt for the session to delete.")
+
+(cl-defmethod ellm-provider-delete-session (_provider _frontmatter _buffer &optional _select)
+  "Default session delete implementation for providers without sessions."
+  (user-error "ellm: provider does not support session delete"))
 
 (cl-defgeneric ellm-backend-send (provider frontmatter buffer)
   "Send BUFFER's trailing user turn through PROVIDER.
