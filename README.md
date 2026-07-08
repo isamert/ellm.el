@@ -2,11 +2,229 @@
 
 Minimal coding agent with special conversation format based on Markdown. Intuitive to read/navigate/edit.
 
+## Usage
+
+`ellm` is a major mode for plain-text LLM conversations.  A buffer is a
+Markdown-like file with YAML frontmatter and turn delimiters.
+
+```markdown
+---
+provider: openai
+model: gpt-5.4-mini
+---
+
+>-| user
+Write a small Emacs Lisp function that returns today's date.
+```
+
+Useful commands:
+
+| Key       | Command               | What it does                                                     |
+|-----------|-----------------------|------------------------------------------------------------------|
+| `C-c C-c` | `ellm-send`           | Send the final `user` turn.                                      |
+| `C-c C-k` | `ellm-cancel`         | Cancel the active request.                                       |
+| `C-c C-l` | `ellm-load-session`   | Pick and load a backend session, when supported.                 |
+| none      | `ellm-close-session`  | Close the current backend session, when supported.               |
+| none      | `ellm-delete-session` | Delete the current backend session from history, when supported. |
+
+Create a new conversation with `M-x ellm-new-buffer`, edit the final
+`user` turn, then run `ellm-send`.
+
+### llm.el Backend
+
+Use this backend for direct LLM API calls through
+[llm.el](https://github.com/ahyatt/llm).  Any `llm.el` chat provider can
+be used.
+
+```elisp
+(require 'ellm)
+(require 'ellm-llm)
+(require 'llm-openai)
+
+(setq ellm-provider-alist
+      `((openai . ,(make-llm-openai
+                    :key (getenv "OPENAI_API_KEY")
+                    :chat-model "gpt-5.4-mini"))))
+```
+
+Conversation example:
+
+```markdown
+---
+provider: openai
+model: gpt-5.4-mini
+system: You are concise.
+temperature: 0.2
+max-tokens: 1000
+---
+
+>-| user
+Explain lexical binding in Emacs Lisp.
+```
+
+Enable built-in local tools:
+
+```elisp
+(require 'ellm-tools)
+```
+
+```markdown
+---
+provider: openai
+tools: ["@files"]
+---
+
+>-| user
+Read this project and summarize the main package entry point.
+```
+
+Supported by the `llm.el` backend:
+
+| Feature | Status |
+| --- | --- |
+| Editable full conversation history | yes |
+| `system`, `model`, `temperature`, `max-tokens`, `reasoning` frontmatter | yes |
+| `cwd:` as the buffer-local `default-directory` for requests and tools | yes |
+| Local `tools:` selection | yes |
+| Tool call/result serialization in the buffer | yes |
+| Streaming text and reasoning | yes, when provider supports it |
+| ACP sessions, permissions, slash commands, plans | no |
+| `mcp:` servers | parsed by ellm, not used by this backend yet |
+
+### ACP Backend
+
+Use this backend for agents that speak the Agent Client Protocol over
+stdio, such as `opencode --acp`.
+
+```elisp
+(require 'ellm)
+(require 'ellm-acp)
+
+(setq ellm-provider-alist
+      `((opencode . ,(ellm-make-acp-provider
+                      :command "opencode"
+                      :args '("--acp")
+                      :model "openai/gpt-5.4"))))
+```
+
+Conversation example:
+
+```markdown
+---
+provider: opencode
+model: openai/gpt-5.4
+cwd: /home/me/project
+---
+
+>-| user
+Find one simple refactor in this repository and explain it first.
+```
+
+`ellm` persists the ACP session id in frontmatter:
+
+```markdown
+---
+provider: opencode
+acp:
+  session-id: sess_abc123
+---
+```
+
+On a fresh connection, saved sessions are restored with `session/resume`
+when the agent supports it, otherwise `session/load` when available.
+
+Supported by the ACP backend:
+
+| Feature                                                         | Status                     |
+|-----------------------------------------------------------------|----------------------------|
+| stdio JSON-RPC transport                                        | yes                        |
+| `initialize`, `session/new`, `session/prompt`, `session/cancel` | yes                        |
+| Saved session restore with `session/resume` or `session/load`   | yes                        |
+| `session/list` through `ellm-load-session`                      | yes                        |
+| `session/close` through `ellm-close-session`                    | yes                        |
+| `session/delete` through `ellm-delete-session`                  | yes                        |
+| ACP text, thought, and replayed user message chunks             | yes                        |
+| Tool calls, tool updates, diffs, locations, raw input/output    | yes                        |
+| Plans and usage updates                                         | yes                        |
+| Slash command completion from the agent                         | yes                        |
+| Permission requests                                             | yes, via `completing-read` |
+| Model config option                                             | yes                        |
+| MCP servers from `mcp:`                                         | yes                        |
+| `acp.additional-directories`                                    | yes                        |
+| ACP auth/logout                                                 | no                         |
+| Client filesystem methods                                       | no, advertised unsupported |
+| Client terminal methods                                         | no, advertised unsupported |
+| Image/audio/resource prompt blocks                              | no, text prompts only      |
+| Deprecated ACP session modes                                    | no                         |
+| HTTP/WebSocket ACP transports                                   | no, stdio only             |
+
+### MCP Servers
+
+MCP server configuration follows the shape used by `mcp.el`'s
+`mcp-hub-servers`: each entry is a name and a plist with either
+`:command` plus `:args`, or `:url`.
+
+```elisp
+(setq ellm-mcp-servers
+      '(("filesystem" . (:command "npx"
+                         :args ("-y" "@modelcontextprotocol/server-filesystem"
+                                "/home/me/project")
+                         :category "local"))
+        ("docs" . (:url "https://example.com/mcp"
+                   :headers (("X-API-Key" . "secret"))
+                   :category "remote"))))
+```
+
+Enable all configured MCP servers:
+
+```yaml
+mcp: true
+```
+
+Enable named servers:
+
+```yaml
+mcp: [filesystem, docs]
+```
+
+Enable a category:
+
+```yaml
+mcp: ["@local"]
+```
+
+Define an inline server in a conversation:
+
+```yaml
+mcp:
+  - name: filesystem
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "/home/me/project"]
+```
+
+ACP agents always support stdio MCP servers.  URL-based MCP servers are
+sent only when the agent advertises the matching ACP MCP transport
+capability.
+
+### ACP Workspace Roots
+
+Set `cwd:` for the main project root.  Use `acp.additional-directories`
+when an ACP agent supports extra workspace roots.
+
+```yaml
+cwd: /home/me/project
+acp:
+  additional-directories:
+    - /home/me/shared-lib
+    - /home/me/docs
+```
+
 ## Rationale
 
 **TLDR**: This is a plain-text-first approach to LLM interaction that extends Markdown with a simple turn delimiter syntax (`>-| user`, `>-| assistant`, `>>-| tool-call`, etc.) to create self-contained, homoiconic conversation files. Conversations are regular text files you can edit, fork, and navigate with existing tooling—no special management software needed. A YAML frontmatter holds per-buffer configuration to make files self-contained, and the format is fully customizable.
 
 ---
+
 
 I like plain text. I don't like having separate definitions for serialized (like having a transcript of an LLM interaction) and *real* data. Just like Lisp being homoiconic, I want my LLM interactions to be homoiconic (yes, that's not what it exactly means but I hope you got where I'm heading to. I also want to sound cool.). Being able to edit conversations just like a regular old file opens the doors to different opportunities. First of all, your all *file editing and navigation* knowledge transfers here completely. You also get *forking conversations* feature for free, just copy the parts you want and continue your discussion in another buffer. This also relieves you from learning another management tool, you are just switching between buffers which you do all day. You also get this for free. Also, you are able to edit the conversations as you want, this gives you different powers like this[1:https://haskellforall.com/2026/01/prompting-101-show-dont-tell]. Using this approach, build conversations that you like, save them as a file and use them anytime you want, or just share them. I can go on much more but you got the point.
 
@@ -66,8 +284,3 @@ These lines can also carry custom data:
 >-| assistant | took: 10s, cost: 0.03$
 ...
 ```
-
-For LLM API interactions, *ellm* uses backend implementations behind a
-small generic dispatch surface.  The default backend is `ellm-llm.el`,
-which uses `llm.el` provider flow and tool handling, `llm.el` does the
-heavy-lifting for interacting with the providers APIs.
