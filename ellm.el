@@ -155,15 +155,15 @@ value may be:
   :type '(alist :key-type (choice string symbol)
                 :value-type
                 (plist :options ((:command string)
-                                  (:args (repeat string))
-                                  (:url string)
-                                  (:type string)
-                                  (:env sexp)
-                                  (:headers sexp)
-                                  (:token sexp)
-                                  (:roots sexp)
-                                  (:timeout integer)
-                                  (:category string))))
+                                 (:args (repeat string))
+                                 (:url string)
+                                 (:type string)
+                                 (:env sexp)
+                                 (:headers sexp)
+                                 (:token sexp)
+                                 (:roots sexp)
+                                 (:timeout integer)
+                                 (:category string))))
   :group 'ellm)
 
 (defconst ellm--heading-specs
@@ -396,6 +396,24 @@ treated interchangeably to match YAML parser output and caller input."
                         (and str (alist-get str value nil nil #'equal)))
               keys (cdr keys))))
     (and (null keys) value)))
+
+(defun ellm--alist-get-nested-cell (alist keys)
+  "Return cons cell for nested KEYS in ALIST, or nil when absent.
+KEYS may be a single key or a list of keys.  Unlike
+`ellm--alist-get-nested', this distinguishes an absent key from a present
+key whose value is nil."
+  (let ((keys (if (listp keys) keys (list keys)))
+        (value alist)
+        cell)
+    (while (and keys (listp value))
+      (let* ((key (car keys))
+             (sym (if (stringp key) (intern key) key))
+             (str (if (symbolp key) (symbol-name key) key)))
+        (setq cell (or (assq sym value)
+                       (and str (assoc str value)))
+              value (cdr cell)
+              keys (cdr keys))))
+    (and (null keys) cell)))
 
 ;;;; Faces
 ;;;;; Utilities
@@ -1447,11 +1465,11 @@ can be a tool name like \"a_tool_name\"."
           (warn "ellm: no tools in `ellm-tools-list' have category `%s'" cat))))
      ;; name ref
      (t
-       (let ((tool (cl-find spec ellm-tools-list
-                             :key #'ellm-tool-name
-                            :test #'equal)))
-         (if tool (list tool)
-           (warn "ellm: tool `%s' not found in `ellm-tools-list'" spec)))))))
+      (let ((tool (cl-find spec ellm-tools-list
+                           :key #'ellm-tool-name
+                           :test #'equal)))
+        (if tool (list tool)
+          (warn "ellm: tool `%s' not found in `ellm-tools-list'" spec)))))))
 
 ;;;;; MCP server resolution
 
@@ -1583,7 +1601,10 @@ accepted."
      :children (("session-id" :ann "string"
                  :desc "ACP session id used to continue an existing session.")
                 ("additional-directories" :ann "list"
-                 :desc "Additional ACP workspace roots sent on session lifecycle requests."))))
+                 :desc "Additional ACP workspace roots sent on session lifecycle requests.")
+                ("config" :ann "map"
+                 :desc "ACP session config options advertised by the active agent."
+                 :children ellm--capf-acp-config-entries))))
   "Alist of (KEY . SPEC) for known YAML frontmatter keys.
 SPEC is a plist with:
   :ann     Short annotation string, shown inline next to the candidate
@@ -1598,8 +1619,9 @@ SPEC is a plist with:
   :children Nested key entries with the same shape as this top-level alist.
 
 Candidate lists may contain plain strings or entries of the form
-`(STRING :ann ANN :desc DESC)'.  ANN and DESC are optional.
-Keys without `:values', `:items', or `:children' get only key-side completion.")
+  `(STRING :ann ANN :desc DESC)'.  ANN and DESC are optional.
+Keys without `:values', `:items', or `:children' get only key-side completion.
+`:children' may be a list or a function returning a list.")
 
 (defun ellm--in-frontmatter-p (&optional pos)
   "Return non-nil if POS (or point) is inside YAML frontmatter body.
@@ -1636,13 +1658,13 @@ MODELS is a list of model name strings.  SOURCE is one of:
          (entry (and sym (alist-get sym ellm-provider-alist)))
          (explicit (and entry (ellm--provider-entry-models entry)))
          (provider (and entry (ellm--provider-entry-provider entry)))
-          (models (and provider
-                       (ellm-provider-buffer-model-candidates
-                        provider (current-buffer)))))
+         (models (and provider
+                      (ellm-provider-buffer-model-candidates
+                       provider (current-buffer)))))
     (cond
-      (explicit (cons explicit 'explicit))
-      (models (cons models 'provider))
-      (t (cons nil nil)))))
+     (explicit (cons explicit 'explicit))
+     (models (cons models 'provider))
+     (t (cons nil nil)))))
 
 (defun ellm--capf-tool-candidates ()
   "Return list of completion strings for `tools:' frontmatter.
@@ -1653,6 +1675,38 @@ distinct `category' slot of `ellm-tool' entries."
    (mapcar (lambda (cat) (concat "@" cat))
            (delete-dups
             (delq nil (mapcar #'ellm-tool-category ellm-tools-list))))))
+
+(defun ellm--capf-frontmatter-provider-name ()
+  "Return `provider:' from frontmatter using a cheap line scan.
+This is used only for completion while the YAML body may be temporarily
+invalid, such as when completing a new key before typing `:'."
+  (pcase-let ((`(_ _ ,contents-beg ,contents-end _) (ellm--frontmatter-bounds)))
+    (save-excursion
+      (goto-char contents-beg)
+      (when (re-search-forward
+             "^[ \t]*provider:[ \t]*\\([^#\n]+\\)" contents-end t)
+        (string-trim (match-string-no-properties 1) "[ \t\"']+" "[ \t\"']+")))))
+
+(defun ellm--capf-current-provider ()
+  "Return the current frontmatter provider for completion, or nil."
+  (let ((named (ellm--capf-frontmatter-provider-name)))
+    (cond
+     (named
+      (let* ((sym (if (stringp named) (intern named) named))
+             (entry (alist-get sym ellm-provider-alist)))
+        (and entry (ellm--provider-entry-provider entry))))
+     (ellm-provider ellm-provider))))
+
+(defun ellm--capf-provider-frontmatter-entries (path)
+  "Return provider-supplied frontmatter key entries under PATH."
+  (let ((provider (ellm--capf-current-provider)))
+    (and provider
+         (ellm-provider-frontmatter-entries
+          provider path (current-buffer)))))
+
+(defun ellm--capf-acp-config-entries ()
+  "Return dynamic key entries for `acp.config' frontmatter."
+  (ellm--capf-provider-frontmatter-entries '(acp config)))
 
 (defun ellm--capf-resolve-values (values-spec)
   "Resolve VALUES-SPEC from a `ellm--frontmatter-keys' entry.
@@ -1708,9 +1762,12 @@ appended to the fallback annotation."
 
 (defun ellm--frontmatter-capf--key-entries (spec)
   "Return child key entries for SPEC, or top-level entries when SPEC is nil."
-  (if spec
-      (plist-get spec :children)
-    ellm--frontmatter-keys))
+  (let ((entries (if spec
+                     (plist-get spec :children)
+                   ellm--frontmatter-keys)))
+    (append (if (functionp entries) (funcall entries) entries)
+            (unless spec
+              (ellm--capf-provider-frontmatter-entries nil)))))
 
 (defun ellm--frontmatter-capf--lookup-key (key entries)
   "Return the spec for KEY in ENTRIES."
@@ -2271,12 +2328,12 @@ according to `ellm-fold-tool-calls' / `ellm-fold-reasoning-blocks'."
                    (not (equal role "tool-param")))
           (let ((subtree-end
                  (or (cl-loop for next in (cdr rest)
-                               when (<= (ellm-turn-depth next) depth)
-                               return (save-excursion
-                                        (goto-char (ellm-turn-beg next))
-                                        (forward-line -1)
-                                        (line-beginning-position)))
-                      (point-max))))
+                              when (<= (ellm-turn-depth next) depth)
+                              return (save-excursion
+                                       (goto-char (ellm-turn-beg next))
+                                       (forward-line -1)
+                                       (line-beginning-position)))
+                     (point-max))))
             (ellm--fold-region-at (ellm-turn-beg turn) subtree-end)))))))
 
 ;;;; Narrowing
@@ -2451,6 +2508,15 @@ Candidates may be strings or `(STRING :ann ANN :desc DESC)' entries.")
 
 (cl-defmethod ellm-provider-slash-command-candidates (_provider _buffer)
   "Default slash command candidates for providers without command support."
+  nil)
+
+(cl-defgeneric ellm-provider-frontmatter-entries (provider path buffer)
+  "Return dynamic frontmatter key entries for PROVIDER under PATH in BUFFER.
+PATH is nil for the top level, or a list of frontmatter keys naming a nested
+map.  Entries use the same shape as `ellm--frontmatter-keys'.")
+
+(cl-defmethod ellm-provider-frontmatter-entries (_provider _path _buffer)
+  "Default dynamic frontmatter entries for providers without extensions."
   nil)
 
 (cl-defgeneric ellm-provider-load-session (provider frontmatter)
