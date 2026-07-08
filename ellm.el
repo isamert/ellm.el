@@ -2532,7 +2532,7 @@ Implementations should stream into the assistant turn already appended by
   "Return a compact context usage string for USED and SIZE tokens."
   (cond
    ((and (numberp used) (numberp size) (> size 0))
-    (format "%s/%s (%.1f%%)"
+    (format "%s/%s (%.1f%%%%)"
             (ellm--format-compact-number used)
             (ellm--format-compact-number size)
             (* (/ (float used) size) 100)))

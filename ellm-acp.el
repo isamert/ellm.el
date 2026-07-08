@@ -109,10 +109,17 @@ an optional list of model candidates used for frontmatter completion."
    (last-message-key
     :initform nil
     :accessor ellm-acp--connection-last-message-key)
+   (rendered-tools
+    :initform (make-hash-table :test 'equal)
+    :accessor ellm-acp--connection-rendered-tools)
    (log-buffer
     :initform nil
     :accessor ellm-acp--connection-log-buffer))
   "ACP JSON-RPC connection using newline-delimited stdio.")
+
+(cl-defstruct (ellm-acp-rendered-tool (:constructor ellm-acp--make-rendered-tool))
+  "Marker state for one rendered ACP tool call/result pair."
+  id call-beg params-beg params-end result-beg result-body-beg result-end)
 
 (cl-defstruct (ellm-acp-request (:constructor ellm-acp--make-request))
   "Active request handle for the ACP backend."
@@ -529,7 +536,7 @@ an optional list of model candidates used for frontmatter completion."
      (t nil))))
 
 (defun ellm-acp--session-lifecycle-params (connection provider frontmatter
-                                                  &optional session-id additional-directories)
+                                                      &optional session-id additional-directories)
   "Return common ACP session lifecycle params.
 SESSION-ID, when non-nil, is included for load/resume requests."
   (let* ((params (append (when session-id (list :sessionId session-id))
@@ -541,7 +548,7 @@ SESSION-ID, when non-nil, is included for load/resume requests."
     params))
 
 (defun ellm-acp--with-lifecycle-params (connection provider frontmatter session-id
-                                               additional-directories on-error fn)
+                                                   additional-directories on-error fn)
   "Call FN with lifecycle params, routing validation errors to ON-ERROR."
   (condition-case err
       (funcall fn (ellm-acp--session-lifecycle-params
@@ -654,7 +661,7 @@ SESSION-ID, when non-nil, is included for load/resume requests."
       :error-fn on-error))))
 
 (defun ellm-acp--load-existing-session (connection provider frontmatter session-id
-                                               additional-directories on-ready on-error)
+                                                   additional-directories on-ready on-error)
   "Load ACP SESSION-ID and replay history into CONNECTION's buffer."
   (setf (ellm-acp--connection-session-id connection) session-id)
   (ellm-acp--with-lifecycle-params
@@ -926,10 +933,10 @@ When SELECT is non-nil, choose a session from `session/list'."
                                        (plist-get update :messageId)))
             ("tool_call"
              (setf (ellm-acp--connection-last-message-key connection) nil)
-             (ellm-acp--insert-tool-call update))
+             (ellm-acp--insert-tool-call update connection))
             ("tool_call_update"
              (setf (ellm-acp--connection-last-message-key connection) nil)
-             (ellm-acp--insert-tool-update update))
+             (ellm-acp--insert-tool-update update connection))
             ("plan"
              (setf (ellm-acp--connection-last-message-key connection) nil)
              (ellm-acp--insert-plan update))
@@ -1029,25 +1036,43 @@ being merged into the same ellm turn."
                 (format "Resource: %s" (plist-get resource :uri))))))
     (_ nil)))
 
-(defun ellm-acp--insert-tool-call (update)
-  "Insert ACP tool call UPDATE."
+(defun ellm-acp--insert-tool-call (update &optional connection)
+  "Insert ACP tool call UPDATE.
+When CONNECTION is non-nil, remember marker ranges for incremental updates."
   (goto-char (point-max))
-  (let ((params (ellm-acp--raw-input-params (plist-get update :rawInput))))
-    (apply #'ellm--insert-turn "tool-call" (ellm-acp--tool-turn-attrs update))
-    (insert (ellm-acp--tool-update-text update :skip-raw-input t))
-    (dolist (param params)
-      (ellm--insert-turn "tool-param" :pipe-arg (format "%s" (car param)))
-      (insert (ellm--ensure-newline
-               (ellm--format-tool-param-value (cdr param)))))))
+  (let* ((id (plist-get update :toolCallId))
+         (params (ellm-acp--raw-input-params (plist-get update :rawInput)))
+         (call-beg nil))
+    (apply #'ellm--insert-turn "tool-call"
+           (ellm-acp--tool-turn-attrs update :omit-status t))
+    (setq call-beg (save-excursion
+                     (forward-line -1)
+                     (point-marker)))
+    (set-marker-insertion-type call-beg nil)
+    (let ((params-beg (point-marker))
+          (params-end nil))
+      (set-marker-insertion-type params-beg nil)
+      (ellm-acp--insert-tool-params params)
+      (setq params-end (point-marker))
+      (set-marker-insertion-type params-end t)
+      (when (and connection id)
+        (puthash id
+                 (ellm-acp--make-rendered-tool
+                  :id id
+                  :call-beg call-beg
+                  :params-beg params-beg
+                  :params-end params-end)
+                 (ellm-acp--connection-rendered-tools connection))))))
 
-(defun ellm-acp--tool-turn-attrs (update)
+(cl-defun ellm-acp--tool-turn-attrs (update &key omit-status)
   "Return ellm turn attrs for ACP tool UPDATE."
   (append (list :pipe-arg (or (plist-get update :title) "ACP tool"))
           (when-let* ((id (plist-get update :toolCallId)))
             (list :id id))
           (when-let* ((kind (plist-get update :kind)))
             (list :kind kind))
-          (when-let* ((status (plist-get update :status)))
+          (when-let* ((status (and (not omit-status)
+                                   (plist-get update :status))))
             (list :status status))))
 
 (defun ellm-acp--raw-input-params (raw-input)
@@ -1060,36 +1085,200 @@ being merged into the same ellm turn."
    ((listp raw-input) raw-input)
    (t `((input . ,raw-input)))))
 
-(defun ellm-acp--insert-tool-update (update)
-  "Insert ACP tool call UPDATE as a `tool-result' turn."
-  (when-let* ((id (plist-get update :toolCallId)))
-    (ellm-acp--delete-marked-turn "tool-result" "id" id))
-  (goto-char (point-max))
-  (apply #'ellm--insert-turn "tool-result" (ellm-acp--tool-turn-attrs update))
-  (insert (ellm-acp--tool-update-text update)))
+(defun ellm-acp--insert-tool-params (params)
+  "Insert PARAMS as nested `tool-param' turns at point."
+  (dolist (param params)
+    (unless (bolp) (insert "\n"))
+    (insert (ellm--get-turn "tool-param"
+                            :pipe-arg (format "%s" (car param)))
+            "\n")
+    (insert (ellm--ensure-newline
+             (ellm--format-tool-param-value (cdr param))))))
+
+(defun ellm-acp--tool-state (connection id)
+  "Return CONNECTION's rendered tool state for ID, or nil."
+  (and connection id
+       (gethash id (ellm-acp--connection-rendered-tools connection))))
+
+(defun ellm-acp--marker-live-p (marker)
+  "Return non-nil when MARKER points into a live buffer."
+  (and (markerp marker) (marker-buffer marker)))
+
+(defun ellm-acp--marked-line-valid-p (marker role id)
+  "Return non-nil when MARKER is on ROLE's delimiter with ID."
+  (and (ellm-acp--marker-live-p marker)
+       (eq (marker-buffer marker) (current-buffer))
+       (save-excursion
+         (goto-char marker)
+         (beginning-of-line)
+         (and (looking-at ellm-turn-regexp)
+              (equal (match-string-no-properties 2) role)
+              (equal (alist-get "id"
+                                (ellm--parse-turn-attrs
+                                 (match-string-no-properties 3))
+                                nil nil #'equal)
+                     id)))))
+
+(defun ellm-acp--tool-call-state-valid-p (state)
+  "Return non-nil when STATE still points at a rendered tool call."
+  (and state
+       (ellm-acp--marked-line-valid-p
+        (ellm-acp-rendered-tool-call-beg state)
+        "tool-call"
+        (ellm-acp-rendered-tool-id state))
+       (ellm-acp--marker-live-p (ellm-acp-rendered-tool-params-beg state))
+       (ellm-acp--marker-live-p (ellm-acp-rendered-tool-params-end state))))
+
+(defun ellm-acp--tool-result-state-valid-p (state)
+  "Return non-nil when STATE still points at a rendered tool result."
+  (and state
+       (ellm-acp--marked-line-valid-p
+        (ellm-acp-rendered-tool-result-beg state)
+        "tool-result"
+        (ellm-acp-rendered-tool-id state))
+       (ellm-acp--marker-live-p (ellm-acp-rendered-tool-result-body-beg state))
+       (ellm-acp--marker-live-p (ellm-acp-rendered-tool-result-end state))))
+
+(defun ellm-acp--replace-region-with (beg end text)
+  "Replace region BEG END with TEXT."
+  (goto-char beg)
+  (delete-region beg end)
+  (insert text))
+
+(defun ellm-acp--update-tool-call-params (state params)
+  "Replace STATE's rendered params with PARAMS."
+  (let ((beg (ellm-acp-rendered-tool-params-beg state))
+        (end (ellm-acp-rendered-tool-params-end state)))
+    (goto-char beg)
+    (delete-region beg end)
+    (ellm-acp--insert-tool-params params)
+    (set-marker (ellm-acp-rendered-tool-params-end state) (point))))
+
+(defun ellm-acp--upsert-tool-call-params (update connection)
+  "Render UPDATE's `rawInput' as params on its live tool-call turn."
+  (when-let* ((id (plist-get update :toolCallId))
+              (params (ellm-acp--raw-input-params
+                       (plist-get update :rawInput))))
+    (let ((state (ellm-acp--tool-state connection id)))
+      (if (ellm-acp--tool-call-state-valid-p state)
+          (ellm-acp--update-tool-call-params state params)
+        (ellm-acp--insert-tool-call update connection)))))
+
+(defun ellm-acp--replace-turn-header (marker role attrs)
+  "Replace turn delimiter at MARKER with ROLE and ATTRS."
+  (save-excursion
+    (goto-char marker)
+    (beginning-of-line)
+    (delete-region (point) (line-end-position))
+    (insert (apply #'ellm--get-turn role attrs))))
+
+(defun ellm-acp--insert-tool-result (update connection &optional delete-existing)
+  "Insert ACP tool result UPDATE and record marker state on CONNECTION."
+  (let* ((id (plist-get update :toolCallId))
+         (state (ellm-acp--tool-state connection id))
+         (result-beg nil)
+         (body-beg nil)
+         (result-end nil))
+    (when (and delete-existing id)
+      (ellm-acp--delete-marked-turn "tool-result" "id" id))
+    (goto-char (point-max))
+    (apply #'ellm--insert-turn "tool-result" (ellm-acp--tool-turn-attrs update))
+    (setq result-beg (save-excursion
+                       (forward-line -1)
+                       (point-marker)))
+    (set-marker-insertion-type result-beg nil)
+    (setq body-beg (point-marker))
+    (set-marker-insertion-type body-beg nil)
+    (insert (ellm-acp--tool-update-text update :skip-raw-input t))
+    (setq result-end (point-marker))
+    (set-marker-insertion-type result-end t)
+    (when (and connection id)
+      (unless state
+        (setq state (ellm-acp--make-rendered-tool :id id))
+        (puthash id state (ellm-acp--connection-rendered-tools connection)))
+      (setf (ellm-acp-rendered-tool-result-beg state) result-beg)
+      (setf (ellm-acp-rendered-tool-result-body-beg state) body-beg)
+      (setf (ellm-acp-rendered-tool-result-end state) result-end))))
+
+(defun ellm-acp--update-tool-result (state update)
+  "Update STATE's rendered result header and body from UPDATE."
+  (ellm-acp--replace-turn-header
+   (ellm-acp-rendered-tool-result-beg state)
+   "tool-result"
+   (ellm-acp--tool-turn-attrs update))
+  (ellm-acp--replace-region-with
+   (ellm-acp-rendered-tool-result-body-beg state)
+   (ellm-acp-rendered-tool-result-end state)
+   (ellm-acp--tool-update-text update :skip-raw-input t)))
+
+(defun ellm-acp--insert-tool-update (update &optional connection)
+  "Insert or update ACP tool call UPDATE as live rendered turns."
+  (when (plist-member update :rawInput)
+    (ellm-acp--upsert-tool-call-params update connection))
+  (let* ((id (plist-get update :toolCallId))
+         (state (ellm-acp--tool-state connection id)))
+    (if (ellm-acp--tool-result-state-valid-p state)
+        (ellm-acp--update-tool-result state update)
+      (ellm-acp--insert-tool-result
+       update connection
+       (or (not state)
+           (ellm-acp-rendered-tool-result-beg state))))))
 
 (cl-defun ellm-acp--tool-update-text (update &key skip-raw-input)
   "Return Markdown text for ACP tool UPDATE.
 When SKIP-RAW-INPUT is non-nil, omit `rawInput' because it is rendered as
 nested `tool-param' turns."
-  (let ((parts nil))
-    (when-let* ((status (plist-get update :status)))
-      (push (format "Status: %s\n" status) parts))
-    (when-let* ((kind (plist-get update :kind)))
-      (push (format "Kind: %s\n" kind) parts))
-    (when-let* ((locations (plist-get update :locations)))
-      (push (ellm-acp--locations-text locations) parts))
-    (when-let* ((content (plist-get update :content)))
-      (dolist (item content)
-        (push (ellm-acp--tool-content-text item) parts)))
-    (unless skip-raw-input
-      (when (plist-member update :rawInput)
-        (push (ellm-acp--json-section "Raw input" (plist-get update :rawInput))
-              parts)))
-    (when (plist-member update :rawOutput)
-      (push (ellm-acp--json-section "Raw output" (plist-get update :rawOutput))
-            parts))
-    (ellm--ensure-newline (string-join (nreverse (delq nil parts)) "\n"))))
+  (let ((parts nil)
+        (output (ellm-acp--tool-output-text update)))
+    (if output
+        (progn
+          (when-let* ((locations (plist-get update :locations)))
+            (push (ellm-acp--locations-text locations) parts))
+          (push output parts))
+      (when-let* ((locations (plist-get update :locations)))
+        (push (ellm-acp--locations-text locations) parts))
+      (unless skip-raw-input
+        (when (plist-member update :rawInput)
+          (push (ellm-acp--json-section "Raw input" (plist-get update :rawInput))
+                parts))))
+    (let ((text (string-join (nreverse (delq nil parts)) "\n")))
+      (if (string-empty-p text)
+          ""
+        (ellm--ensure-newline text)))))
+
+(defun ellm-acp--nonempty-string (value)
+  "Return VALUE when it is a non-empty string."
+  (and (stringp value)
+       (not (string-empty-p value))
+       value))
+
+(defun ellm-acp--tool-output-text (update)
+  "Return the best human-readable output text for tool UPDATE."
+  (or (and (plist-member update :rawOutput)
+           (ellm-acp--raw-output-text (plist-get update :rawOutput)))
+      (ellm-acp--tool-content-list-text (plist-get update :content))
+      (and (plist-member update :rawOutput)
+           (ellm-acp--json-section "Raw output"
+                                   (plist-get update :rawOutput)))))
+
+(defun ellm-acp--raw-output-text (raw-output)
+  "Return readable text from ACP RAW-OUTPUT, if present."
+  (cond
+   ((ellm-acp--nonempty-string raw-output))
+   ((and (listp raw-output) (keywordp (car raw-output)))
+    (or (ellm-acp--nonempty-string (plist-get raw-output :output))
+        (when-let* ((metadata (plist-get raw-output :metadata)))
+          (ellm-acp--nonempty-string (plist-get metadata :preview)))))))
+
+(defun ellm-acp--tool-content-list-text (content)
+  "Return readable text from ACP tool CONTENT list."
+  (when-let* ((items (ellm-acp--sequence-list content)))
+    (let ((parts nil))
+      (dolist (item items)
+        (when-let* ((text (ellm-acp--tool-content-text item)))
+          (push text parts)))
+      (ellm-acp--nonempty-string
+       (string-join (nreverse parts) "\n")))))
 
 (defun ellm-acp--sequence-list (value)
   "Return VALUE as a list."
@@ -1164,13 +1353,7 @@ nested `tool-param' turns."
   "Delete the last ROLE turn whose ATTR equals VALUE.
 If the matched turn has nested child turns, delete those children too."
   (let* ((turns (ellm--parse-turns))
-         (pos (cl-position-if
-               (lambda (turn)
-                 (and (equal (ellm-turn-role turn) role)
-                      (equal (alist-get attr (ellm-turn-attrs turn)
-                                        nil nil #'equal)
-                             value)))
-               turns :from-end t)))
+         (pos (ellm-acp--marked-turn-position role attr value turns)))
     (when pos
       (let* ((turn (nth pos turns))
              (depth (or (ellm-turn-depth turn) 1))
@@ -1184,6 +1367,16 @@ If the matched turn has nested child turns, delete those children too."
           (setq end (ellm-turn-end (car rest))
                 rest (cdr rest)))
         (delete-region beg end)))))
+
+(defun ellm-acp--marked-turn-position (role attr value &optional turns)
+  "Return the position of the last ROLE turn whose ATTR equals VALUE."
+  (cl-position-if
+   (lambda (turn)
+     (and (equal (ellm-turn-role turn) role)
+          (equal (alist-get attr (ellm-turn-attrs turn) nil nil #'equal)
+                 value)))
+   (or turns (ellm--parse-turns))
+   :from-end t))
 
 (defun ellm-acp--finish-prompt (buffer)
   "Finish ACP prompt in BUFFER."
