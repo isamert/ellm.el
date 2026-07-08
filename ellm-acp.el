@@ -1242,52 +1242,54 @@ When SELECT is non-nil, choose a session from `session/list'."
   (when-let* ((buffer (ellm-acp--connection-buffer connection)))
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
-        (let ((update (plist-get params :update)))
-          (pcase (plist-get update :sessionUpdate)
-            ("user_message_chunk"
-             (ellm-acp--insert-content connection "user"
-                                       (plist-get update :content)
-                                       (plist-get update :messageId)))
-            ("agent_message_chunk"
-             (ellm-acp--insert-content connection "assistant"
-                                       (plist-get update :content)
-                                       (plist-get update :messageId)))
-            ("agent_thought_chunk"
-             (ellm-acp--insert-content connection "reasoning"
-                                       (plist-get update :content)
-                                       (plist-get update :messageId)))
-            ("tool_call"
-             (setf (ellm-acp--connection-last-message-key connection) nil)
-             (ellm-acp--insert-tool-call update connection))
-            ("tool_call_update"
-             (setf (ellm-acp--connection-last-message-key connection) nil)
-             (ellm-acp--insert-tool-update update connection))
-            ("plan"
-             (setf (ellm-acp--connection-last-message-key connection) nil)
-             (ellm-acp--insert-plan update))
-            ("available_commands_update"
-             (setf (ellm-acp--connection-available-commands connection)
-                   (plist-get update :availableCommands)))
-            ("session_info_update"
-             (ellm-acp--handle-session-info-update connection update))
-            ("config_option_update"
-             (ellm-acp--update-model-candidates
-              connection (plist-get update :configOptions)))
-            ("usage_update"
-             (setf (ellm-acp--connection-last-message-key connection) nil)
-             (ellm-acp--update-usage update))
-            (_ nil)))))))
+        (ellm--preserve-user-position
+          (let ((update (plist-get params :update)))
+            (pcase (plist-get update :sessionUpdate)
+              ("user_message_chunk"
+               (ellm-acp--insert-content connection "user"
+                                         (plist-get update :content)
+                                         (plist-get update :messageId)))
+              ("agent_message_chunk"
+               (ellm-acp--insert-content connection "assistant"
+                                         (plist-get update :content)
+                                         (plist-get update :messageId)))
+              ("agent_thought_chunk"
+               (ellm-acp--insert-content connection "reasoning"
+                                         (plist-get update :content)
+                                         (plist-get update :messageId)))
+              ("tool_call"
+               (setf (ellm-acp--connection-last-message-key connection) nil)
+               (ellm-acp--insert-tool-call update connection))
+              ("tool_call_update"
+               (setf (ellm-acp--connection-last-message-key connection) nil)
+               (ellm-acp--insert-tool-update update connection))
+              ("plan"
+               (setf (ellm-acp--connection-last-message-key connection) nil)
+               (ellm-acp--insert-plan update))
+              ("available_commands_update"
+               (setf (ellm-acp--connection-available-commands connection)
+                     (plist-get update :availableCommands)))
+              ("session_info_update"
+               (ellm-acp--handle-session-info-update connection update))
+              ("config_option_update"
+               (ellm-acp--update-model-candidates
+                connection (plist-get update :configOptions)))
+              ("usage_update"
+               (setf (ellm-acp--connection-last-message-key connection) nil)
+               (ellm-acp--update-usage update))
+              (_ nil))))))))
 
 (defun ellm-acp--handle-session-info-update (connection update)
   "Persist ACP session metadata UPDATE for CONNECTION."
-  (when-let* ((buffer (ellm-acp--connection-buffer connection)))
-    (when (buffer-live-p buffer)
-      (with-current-buffer buffer
-        (when (plist-member update :title)
-          (ellm--set-frontmatter-value '(acp title) (plist-get update :title)))
-        (when (plist-member update :updatedAt)
-          (ellm--set-frontmatter-value '(acp updated-at)
-                                       (plist-get update :updatedAt)))))))
+  (unless ellm-acp--inhibit-frontmatter-persist
+    (when-let* ((buffer (ellm-acp--connection-buffer connection)))
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer
+          (when (plist-member update :title)
+            (ellm--set-frontmatter-value '(acp title) (plist-get update :title)))
+          (when (plist-member update :updatedAt)
+            (ellm--set-frontmatter-value '(acp updated-at)
+                                         (plist-get update :updatedAt))))))))
 
 (defun ellm-acp--slash-command-candidate (command)
   "Return completion candidate for ACP slash COMMAND."
@@ -1579,12 +1581,12 @@ nested `tool-param' turns."
 
 (defun ellm-acp--tool-output-text (update)
   "Return the best human-readable output text for tool UPDATE."
-  (or (and (plist-member update :rawOutput)
+  (or (ellm-acp--tool-content-list-text (plist-get update :content))
+      (and (plist-member update :rawOutput)
            (ellm-acp--raw-output-text (plist-get update :rawOutput)))
-      (ellm-acp--tool-content-list-text (plist-get update :content))
       (and (plist-member update :rawOutput)
            (ellm-acp--json-section "Raw output"
-                                   (plist-get update :rawOutput)))))
+                                    (plist-get update :rawOutput)))))
 
 (defun ellm-acp--raw-output-text (raw-output)
   "Return readable text from ACP RAW-OUTPUT, if present."
@@ -1707,12 +1709,13 @@ If the matched turn has nested child turns, delete those children too."
   "Finish ACP prompt in BUFFER."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
-      (setq ellm--active-request nil)
-      (goto-char (point-max))
-      (unless (and-let* ((turns (ellm--parse-turns))
-                         (last-turn (car (last turns))))
-                (equal (ellm-turn-role last-turn) "user"))
-        (ellm--insert-turn "user")))))
+      (ellm--preserve-user-position
+        (setq ellm--active-request nil)
+        (goto-char (point-max))
+        (unless (and-let* ((turns (ellm--parse-turns))
+                           (last-turn (car (last turns))))
+                  (equal (ellm-turn-role last-turn) "user"))
+          (ellm--insert-turn "user"))))))
 
 (defun ellm-acp--finish-with-error (buffer error-object)
   "Finish ACP request in BUFFER by signalling ERROR-OBJECT."

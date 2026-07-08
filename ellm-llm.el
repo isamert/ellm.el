@@ -270,47 +270,38 @@ When `ellm-fold-tool-calls' is non-nil each inserted turn is folded."
 (defun ellm-llm--render-streaming-response (buf request start end result)
   (ellm-llm--ensure-buffer buf request)
   (with-current-buffer buf
-    (let* ((inhibit-read-only t)
-           (saved (mapcar
-                   (lambda (w)
-                     (list w (window-start w) (window-point w)))
-                   (get-buffer-window-list buf nil t)))
-           (reasoning (plist-get result :reasoning))
-           (text      (plist-get result :text))
-           (new-text
-            (concat
-             (when (and reasoning (not (string-empty-p reasoning)))
-               (concat (ellm--get-turn "reasoning" :continuation t) "\n"
-                       (ellm--ensure-newline reasoning)))
-             (when (and text (not (string-empty-p text)))
-               (concat (ellm--get-turn "assistant" :continuation t) "\n"
-                       (ellm--ensure-newline text))))))
-      (save-excursion
+    (ellm--preserve-user-position
+      (let* ((inhibit-read-only t)
+             (reasoning (plist-get result :reasoning))
+             (text      (plist-get result :text))
+             (new-text
+              (concat
+               (when (and reasoning (not (string-empty-p reasoning)))
+                 (concat (ellm--get-turn "reasoning" :continuation t) "\n"
+                         (ellm--ensure-newline reasoning)))
+               (when (and text (not (string-empty-p text)))
+                 (concat (ellm--get-turn "assistant" :continuation t) "\n"
+                         (ellm--ensure-newline text))))))
         (goto-char start)
         (let* ((current-text
                 (buffer-substring-no-properties start end))
                (prefix-length
                 (length (fill-common-string-prefix
-                         current-text new-text))))
+                          current-text new-text))))
           (goto-char (+ start prefix-length))
           (delete-region (point) end)
-          (insert (substring new-text prefix-length))))
-      (when (and (not (string-empty-p new-text))
-                 (save-excursion
-                   (goto-char start)
-                   (re-search-forward
-                    (concat "^" (regexp-quote ellm-turn-header-2) " ")
-                    end t)))
-        (ellm--flush-pending-fold 2))
-      (when (and ellm-fold-reasoning-blocks
-                 reasoning (not (string-empty-p reasoning))
-                 text (not (string-empty-p text)))
-        (ellm-llm--fold-reasoning-in-region start end))
-      (dolist (state saved)
-        (pcase-let* ((`(,w ,ws ,wp) state))
-          (when (window-live-p w)
-            (set-window-start w ws t)
-            (set-window-point w wp)))))))
+          (insert (substring new-text prefix-length)))
+        (when (and (not (string-empty-p new-text))
+                   (save-excursion
+                     (goto-char start)
+                     (re-search-forward
+                      (concat "^" (regexp-quote ellm-turn-header-2) " ")
+                      end t)))
+          (ellm--flush-pending-fold 2))
+        (when (and ellm-fold-reasoning-blocks
+                   reasoning (not (string-empty-p reasoning))
+                   text (not (string-empty-p text)))
+          (ellm-llm--fold-reasoning-in-region start end))))))
 
 (defun ellm-llm--send-once (provider prompt buf)
   "Stream PROVIDER's reply for PROMPT into the trailing assistant turn of BUF.
@@ -333,20 +324,21 @@ is text-only, a fresh trailing `user' turn is appended."
               (ellm-llm--ensure-buffer buf request)
               (funcall partial-render result)
               (with-current-buffer buf
-                (setq ellm--active-request nil)
-                (let ((recurse nil))
-                  (if-let* ((tool-uses (plist-get result :tool-uses))
-                            (tool-results (plist-get result :tool-results)))
-                      (progn
-                        (ellm-llm--render-tool-uses tool-uses tool-results)
-                        (setq recurse t))
-                    (ellm--insert-turn "user"))
-                  ;; Fold reasoning after the following turn gives it a
-                  ;; stable boundary; covers reasoning-only responses too.
-                  (when ellm-fold-reasoning-blocks
-                    (ellm-llm--fold-reasoning-in-region start end))
-                  (when recurse
-                    (ellm-llm--send-once provider prompt buf))))))
+                (ellm--preserve-user-position
+                  (setq ellm--active-request nil)
+                  (let ((recurse nil))
+                    (if-let* ((tool-uses (plist-get result :tool-uses))
+                              (tool-results (plist-get result :tool-results)))
+                        (progn
+                          (ellm-llm--render-tool-uses tool-uses tool-results)
+                          (setq recurse t))
+                      (ellm--insert-turn "user"))
+                    ;; Fold reasoning after the following turn gives it a
+                    ;; stable boundary; covers reasoning-only responses too.
+                    (when ellm-fold-reasoning-blocks
+                      (ellm-llm--fold-reasoning-in-region start end))
+                    (when recurse
+                      (ellm-llm--send-once provider prompt buf)))))))
            (on-error
             (lambda (type msg)
               (ellm-llm--ensure-buffer buf request)

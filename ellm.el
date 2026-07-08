@@ -415,6 +415,49 @@ key whose value is nil."
               keys (cdr keys))))
     (and (null keys) cell)))
 
+(defmacro ellm--preserve-user-position (&rest body)
+  "Run BODY without disturbing user point/window positions.
+This is intended for asynchronous backend insertions into the current
+buffer.  BODY may move point and edit the buffer; visible windows showing
+the buffer are restored to the same logical point and window start after
+the edit."
+  (declare (indent 0) (debug t))
+  `(let* ((ellm--preserve-buffer (current-buffer))
+          (ellm--preserve-point (copy-marker (point) nil))
+          (ellm--preserve-window-states
+           (mapcar (lambda (window)
+                     (list window
+                           (copy-marker (window-point window) nil)
+                           (copy-marker (window-start window) nil)
+                           (window-hscroll window)))
+                   (get-buffer-window-list (current-buffer) nil t))))
+     (unwind-protect
+         (save-current-buffer
+           (save-excursion
+             ,@body))
+       (unwind-protect
+           (when (buffer-live-p ellm--preserve-buffer)
+             (with-current-buffer ellm--preserve-buffer
+               (when-let* ((pos (marker-position ellm--preserve-point)))
+                 (goto-char pos))
+               (dolist (state ellm--preserve-window-states)
+                 (let ((window (nth 0 state))
+                       (point-marker (nth 1 state))
+                       (start-marker (nth 2 state))
+                       (hscroll (nth 3 state)))
+                   (when (and (window-live-p window)
+                              (eq (window-buffer window)
+                                  ellm--preserve-buffer))
+                     (when-let* ((start (marker-position start-marker)))
+                       (set-window-start window start t))
+                     (when-let* ((point (marker-position point-marker)))
+                       (set-window-point window point))
+                     (set-window-hscroll window hscroll))))))
+         (set-marker ellm--preserve-point nil)
+         (dolist (state ellm--preserve-window-states)
+           (set-marker (nth 1 state) nil)
+           (set-marker (nth 2 state) nil))))))
+
 ;;;; Faces
 ;;;;; Utilities
 
@@ -1570,6 +1613,11 @@ accepted."
 
 ;;;;; Frontmatter completion
 
+(defvar-local ellm--active-request nil
+  "Active backend request handle for this buffer, or nil.
+Set by `ellm-send' to the object returned by `ellm-backend-send'.
+Cleared on completion, error, or cancellation.")
+
 (defconst ellm--frontmatter-keys
   '(("provider"    :ann "provider"
      :desc "Provider name from `ellm-provider-alist'."
@@ -2377,11 +2425,6 @@ one, then narrows to its outline subtree."
     (ellm-narrow-to-turn)))
 
 ;;;; Sending
-
-(defvar-local ellm--active-request nil
-  "Active backend request handle for this buffer, or nil.
-Set by `ellm-send' to the object returned by `ellm-backend-send'.
-Cleared on completion, error, or cancellation.")
 
 (defconst ellm--request-starting :ellm-request-starting
   "Internal sentinel used while `ellm-send' starts a backend request.")
