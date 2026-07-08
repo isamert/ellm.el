@@ -167,6 +167,36 @@ or `llm-make-tool' etc. via doing something like:
 
 ;;;; Tools
 
+;;;;; Shell
+
+(ellm-deftool shell/run-shell-command (:async t)
+  ((command :string "The shell command to run."))
+  "Run a shell command and return its output (stdout and stderr combined).
+The command is run via the system shell and the default directory is the
+root of the current project. The command has no stdin (EOF immediately)
+and is killed after 60 seconds if still running."
+  (let* ((default-directory (ellm-tools-current-project-root))
+         (process-connection-type nil)
+         (buf (generate-new-buffer " *ellm-tools-shell*"))
+         (proc (start-process-shell-command
+                "ellm-tools-shell" buf command)))
+    (process-send-eof proc)
+    (let ((timer (run-at-time 60 nil
+                              (lambda ()
+                                (when (process-live-p proc)
+                                  (kill-process proc))))))
+      (set-process-sentinel
+       proc
+       (lambda (process _event)
+         (when (memq (process-status process) '(exit signal))
+           (cancel-timer timer)
+           (let ((output (with-current-buffer (process-buffer process)
+                           (buffer-string)))
+                 (exit-code (process-exit-status process)))
+             (kill-buffer (process-buffer process))
+             (funcall callback
+                      (format "Exit code: %d\n%s" exit-code output)))))))))
+
 ;;;;; Files
 
 (ellm-deftool files/file-edit ()
