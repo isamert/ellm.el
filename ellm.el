@@ -1695,24 +1695,51 @@ delimiter starting from POS."
   "Return list of provider name strings from `ellm-provider-alist'."
   (mapcar (lambda (e) (symbol-name (car e))) ellm-provider-alist))
 
+(defun ellm--capf-maybe-start-session-for-models (provider frontmatter)
+  "Maybe start PROVIDER's session to load model candidates.
+This only prompts for an explicit `completion-at-point' command, avoiding
+surprise prompts from automatic completion UIs."
+  (when (and provider
+             (eq this-command 'completion-at-point)
+             (not noninteractive)
+             (not ellm--active-request)
+             (ellm-provider-model-completion-session-start-p
+              provider (current-buffer))
+             (y-or-n-p "Start provider session to load model completions? "))
+    (condition-case err
+        (progn
+          (ellm-provider-start-session-for-model-completion
+           provider frontmatter (current-buffer))
+          t)
+      (error
+       (message "ellm: failed to start session: %s"
+                (error-message-string err))
+       nil))))
+
 (defun ellm--capf-model-candidates ()
   "Return (MODELS . SOURCE) for `model:' frontmatter completion.
 MODELS is a list of model name strings.  SOURCE is one of:
   `explicit'   - taken from the alist entry's `:models' list,
   `provider'   - supplied by the resolved provider backend."
   (let* ((fm (ignore-errors (ellm--parse-frontmatter)))
-         (named (alist-get 'provider fm))
-         (sym (and named (if (stringp named) (intern named) named)))
-         (entry (and sym (alist-get sym ellm-provider-alist)))
-         (explicit (and entry (ellm--provider-entry-models entry)))
-         (provider (and entry (ellm--provider-entry-provider entry)))
-         (models (and provider
-                      (ellm-provider-buffer-model-candidates
-                       provider (current-buffer)))))
+          (named (alist-get 'provider fm))
+          (sym (and named (if (stringp named) (intern named) named)))
+          (entry (and sym (alist-get sym ellm-provider-alist)))
+          (explicit (and entry (ellm--provider-entry-models entry)))
+          (provider (or (and entry (ellm--provider-entry-provider entry))
+                        (and (not named) ellm-provider)))
+          (models (and provider
+                       (ellm-provider-buffer-model-candidates
+                        provider (current-buffer)))))
     (cond
-     (explicit (cons explicit 'explicit))
-     (models (cons models 'provider))
-     (t (cons nil nil)))))
+      (explicit (cons explicit 'explicit))
+      (models (cons models 'provider))
+      ((and provider
+            (ellm--capf-maybe-start-session-for-models provider fm))
+       (cons (ellm-provider-buffer-model-candidates
+              provider (current-buffer))
+             'provider))
+      (t (cons nil nil)))))
 
 (defun ellm--capf-tool-candidates ()
   "Return list of completion strings for `tools:' frontmatter.
@@ -2497,6 +2524,16 @@ Errors during streaming are signalled normally."
          (provider (ellm--command-provider fm)))
     (ellm-provider-load-session provider fm)))
 
+(defun ellm-start-session ()
+  "Start/login the backend session without sending a prompt."
+  (interactive)
+  (when ellm--active-request
+    (user-error "ellm: a request is already in flight; M-x ellm-cancel"))
+  (let* ((fm (ellm--command-frontmatter))
+         (provider (ellm--command-provider fm)))
+    (ellm-provider-start-session provider fm (current-buffer))
+    (message "ellm: session ready")))
+
 (defun ellm-close-session ()
   "Close the backend session associated with the current ellm buffer."
   (interactive)
@@ -2560,6 +2597,32 @@ map.  Entries use the same shape as `ellm--frontmatter-keys'.")
 
 (cl-defmethod ellm-provider-frontmatter-entries (_provider _path _buffer)
   "Default dynamic frontmatter entries for providers without extensions."
+  nil)
+
+(cl-defgeneric ellm-provider-start-session (provider frontmatter buffer)
+  "Start PROVIDER's session for BUFFER without sending a prompt.
+FRONTMATTER is the parsed YAML frontmatter alist for BUFFER.")
+
+(cl-defmethod ellm-provider-start-session (_provider _frontmatter _buffer)
+  "Default session start implementation for providers without sessions."
+  (user-error "ellm: provider does not support explicit session start"))
+
+(cl-defgeneric ellm-provider-model-completion-session-start-p (provider buffer)
+  "Return non-nil if model completion should offer starting PROVIDER for BUFFER.")
+
+(cl-defmethod ellm-provider-model-completion-session-start-p (_provider _buffer)
+  "Default model-completion session prompt predicate."
+  nil)
+
+(cl-defgeneric ellm-provider-start-session-for-model-completion
+    (provider frontmatter buffer)
+  "Start PROVIDER's session for model completion in BUFFER.
+Implementations should avoid frontmatter rewrites that would invalidate the
+completion-at-point bounds when possible.")
+
+(cl-defmethod ellm-provider-start-session-for-model-completion
+    (_provider _frontmatter _buffer)
+  "Default model-completion session start implementation."
   nil)
 
 (cl-defgeneric ellm-provider-load-session (provider frontmatter)
@@ -2687,6 +2750,7 @@ Implementations should stream into the assistant turn already appended by
     (define-key map (kbd "<backtab>") #'outline-cycle-buffer)
     (define-key map (kbd "C-c C-c")   #'ellm-send)
     (define-key map (kbd "C-c C-k")   #'ellm-cancel)
+    (define-key map (kbd "C-c C-s")   #'ellm-start-session)
     (define-key map (kbd "C-c C-l")   #'ellm-load-session)
     map)
   "Keymap for `ellm-mode'.")

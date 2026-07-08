@@ -132,6 +132,9 @@ CONFIG-ALIASES maps friendly frontmatter keys to ACP config option ids."
 (defvar-local ellm-acp--connection nil
   "ACP connection associated with the current ellm buffer.")
 
+(defvar ellm-acp--inhibit-frontmatter-persist nil
+  "When non-nil, do not persist ACP session metadata into frontmatter.")
+
 ;;;;; Support per ACP provider
 
 (defconst ellm-acp-opencode-config-aliases
@@ -199,6 +202,25 @@ OpenCode's ACP `effort' config option."
     ('(acp config)
      (ellm-acp--config-frontmatter-entries buffer))
     (_ nil)))
+
+(cl-defmethod ellm-provider-start-session ((provider ellm-acp-provider) frontmatter buffer)
+  "Start/login an ACP session for BUFFER without sending a prompt."
+  (ellm-acp-start-session provider frontmatter buffer))
+
+(cl-defmethod ellm-provider-model-completion-session-start-p
+  ((_provider ellm-acp-provider) buffer)
+  "Return non-nil when BUFFER has no live ACP session yet."
+  (and (buffer-live-p buffer)
+       (with-current-buffer buffer
+         (not (and ellm-acp--connection
+                   (jsonrpc-running-p ellm-acp--connection)
+                   (ellm-acp--connection-session-id ellm-acp--connection))))))
+
+(cl-defmethod ellm-provider-start-session-for-model-completion
+  ((provider ellm-acp-provider) frontmatter buffer)
+  "Start an ACP session for model completion without rewriting frontmatter."
+  (let ((ellm-acp--inhibit-frontmatter-persist t))
+    (ellm-acp-start-session provider frontmatter buffer :quiet)))
 
 (cl-defmethod ellm-provider-load-session ((provider ellm-acp-provider) frontmatter)
   "Select and load an ACP session for PROVIDER."
@@ -629,11 +651,68 @@ SESSION-ID, when non-nil, is included for load/resume requests."
    (t
     (ellm-acp--initialize
      connection
-     (lambda (_result)
-       (setf (ellm-acp--connection-initialized connection) t)
-       (ellm-acp--ensure-session
-        connection provider frontmatter on-ready on-error))
-     on-error))))
+      (lambda (_result)
+        (setf (ellm-acp--connection-initialized connection) t)
+        (ellm-acp--ensure-session
+         connection provider frontmatter on-ready on-error))
+      on-error))))
+
+(defun ellm-acp--ensure-session-sync (connection provider frontmatter)
+  "Synchronously ensure CONNECTION is initialized and has an ACP session."
+  (ellm-acp--initialize-sync connection)
+  (unless (ellm-acp--connection-session-id connection)
+    (if-let* ((session-id (ellm--alist-get-nested frontmatter '(acp session-id))))
+        (ellm-acp--restore-session-sync connection provider frontmatter session-id)
+      (ellm-acp--new-session-sync connection provider frontmatter)))
+  connection)
+
+(defun ellm-acp--new-session-sync (connection provider frontmatter)
+  "Synchronously create a new ACP session for CONNECTION."
+  (let* ((params (ellm-acp--session-lifecycle-params
+                  connection provider frontmatter))
+         (result (ellm-acp--request-sync connection :session/new params))
+         (session-id (plist-get result :sessionId)))
+    (setf (ellm-acp--connection-session-id connection) session-id)
+    (when session-id
+      (ellm-acp--persist-session-id connection session-id))
+    (ellm-acp--update-model-candidates
+     connection (plist-get result :configOptions))
+    (ellm-acp--maybe-set-model-sync
+     connection
+     (or (alist-get 'model frontmatter)
+         (ellm-acp-provider-model provider)))))
+
+(defun ellm-acp--restore-session-sync (connection provider frontmatter session-id)
+  "Synchronously restore ACP SESSION-ID for CONNECTION."
+  (cond
+   ((ellm-acp--capability connection '(sessionCapabilities resume))
+    (ellm-acp--resume-session-sync connection provider frontmatter session-id))
+   ((ellm-acp--capability connection '(loadSession))
+    (ellm-acp--load-existing-session-sync
+     connection provider frontmatter session-id nil))
+   (t
+    (user-error
+     "ellm ACP: agent does not support session/resume or session/load for saved session `%s'"
+     session-id))))
+
+(defun ellm-acp--resume-session-sync (connection provider frontmatter session-id)
+  "Synchronously resume ACP SESSION-ID without replaying history."
+  (setf (ellm-acp--connection-session-id connection) session-id)
+  (let* ((params (ellm-acp--session-lifecycle-params
+                  connection provider frontmatter session-id))
+         (result (ellm-acp--request-sync connection :session/resume params)))
+    (ellm-acp--update-model-candidates
+     connection (plist-get result :configOptions))))
+
+(defun ellm-acp--load-existing-session-sync (connection provider frontmatter session-id
+                                                        additional-directories)
+  "Synchronously load ACP SESSION-ID and replay history into CONNECTION's buffer."
+  (setf (ellm-acp--connection-session-id connection) session-id)
+  (let* ((params (ellm-acp--session-lifecycle-params
+                  connection provider frontmatter session-id additional-directories))
+         (result (ellm-acp--request-sync connection :session/load params)))
+    (ellm-acp--update-model-candidates
+     connection (plist-get result :configOptions))))
 
 (defun ellm-acp--initialize (connection on-result on-error)
   "Initialize ACP CONNECTION."
@@ -718,10 +797,11 @@ SESSION-ID, when non-nil, is included for load/resume requests."
 
 (defun ellm-acp--persist-session-id (connection session-id)
   "Persist ACP SESSION-ID in CONNECTION's conversation frontmatter."
-  (when-let* ((buffer (ellm-acp--connection-buffer connection)))
-    (when (buffer-live-p buffer)
-      (with-current-buffer buffer
-        (ellm--set-frontmatter-value '(acp session-id) session-id)))))
+  (unless ellm-acp--inhibit-frontmatter-persist
+    (when-let* ((buffer (ellm-acp--connection-buffer connection)))
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer
+          (ellm--set-frontmatter-value '(acp session-id) session-id))))))
 
 (defun ellm-acp--ensure-frontmatter-model (connection frontmatter on-ready on-error)
   "Apply FRONTMATTER `model:' to CONNECTION before calling ON-READY."
@@ -756,6 +836,19 @@ SESSION-ID, when non-nil, is included for load/resume requests."
      (t
       (ellm-acp--set-model connection config-id model on-ready on-error)))))
 
+(defun ellm-acp--maybe-set-model-sync (connection model)
+  "Synchronously set ACP session MODEL when it differs."
+  (let ((config-id (ellm-acp--connection-model-config-id connection))
+        (current (ellm-acp--connection-current-model connection)))
+    (cond
+     ((or (not model) (equal model current))
+      nil)
+     ((not config-id)
+      (setq config-id "model")
+      (ellm-acp--set-model-sync connection config-id model))
+     (t
+      (ellm-acp--set-model-sync connection config-id model)))))
+
 (defun ellm-acp--set-model (connection config-id model on-ready on-error)
   "Set ACP session MODEL using CONFIG-ID, then call ON-READY."
   (ellm-acp--set-config-option
@@ -765,8 +858,17 @@ SESSION-ID, when non-nil, is included for load/resume requests."
      (setf (ellm-acp--connection-current-model connection) model)
      (ellm-acp--persist-current-model connection))))
 
+(defun ellm-acp--set-model-sync (connection config-id model)
+  "Synchronously set ACP session MODEL using CONFIG-ID."
+  (ellm-acp--set-config-option-sync
+   connection config-id model
+   (ellm-acp--config-option connection config-id)
+   (lambda (_result)
+     (setf (ellm-acp--connection-current-model connection) model)
+     (ellm-acp--persist-current-model connection))))
+
 (defun ellm-acp--set-config-option (connection config-id value on-ready on-error
-                                           &optional option after-success)
+                                               &optional option after-success)
   "Set ACP CONFIG-ID to VALUE on CONNECTION, then call ON-READY.
 OPTION is the advertised ACP config option, when known.  AFTER-SUCCESS is
 called with the raw response before ON-READY."
@@ -785,6 +887,23 @@ called with the raw response before ON-READY."
                      (funcall after-success result))
                    (funcall on-ready))
      :error-fn on-error)))
+
+(defun ellm-acp--set-config-option-sync (connection config-id value
+                                                    &optional option after-success)
+  "Synchronously set ACP CONFIG-ID to VALUE on CONNECTION."
+  (let* ((wire-value (ellm-acp--config-value-for-wire option value config-id))
+         (params `(:sessionId ,(ellm-acp--connection-session-id connection)
+                   :configId ,config-id
+                   :value ,wire-value)))
+    (when (equal (plist-get option :type) "boolean")
+      (setq params (append params '(:type "boolean"))))
+    (let ((result (ellm-acp--request-sync
+                   connection :session/set_config_option params)))
+      (ellm-acp--update-config-options
+       connection (plist-get result :configOptions))
+      (when after-success
+        (funcall after-success result))
+      result)))
 
 (defun ellm-acp--apply-config-options (connection entries on-ready on-error)
   "Apply desired ACP config ENTRIES sequentially for CONNECTION."
@@ -811,6 +930,23 @@ called with the raw response before ON-READY."
             connection (cdr entries) on-ready on-error))
          on-error
          option))))))
+
+(defun ellm-acp--apply-config-options-sync (connection entries)
+  "Synchronously apply desired ACP config ENTRIES for CONNECTION."
+  (dolist (entry entries)
+    (let* ((config-id (plist-get entry :id))
+           (value (plist-get entry :value))
+           (option (ellm-acp--config-option connection config-id)))
+      (cond
+       ((and (ellm-acp--connection-config-options connection)
+             (not option))
+        (user-error "ellm ACP: config option `%s' is not advertised"
+                    config-id))
+       ((ellm-acp--config-value-current-p option value config-id)
+        nil)
+       (t
+        (ellm-acp--set-config-option-sync
+         connection config-id value option))))))
 
 (defun ellm-acp--frontmatter-config-values (provider connection frontmatter)
   "Return desired ACP config entries from FRONTMATTER for PROVIDER."
@@ -967,11 +1103,12 @@ called with the raw response before ON-READY."
 
 (defun ellm-acp--persist-current-model (connection)
   "Persist CONNECTION's current ACP model in its buffer frontmatter."
-  (when-let* ((model (ellm-acp--connection-current-model connection))
-              (buffer (ellm-acp--connection-buffer connection)))
-    (when (buffer-live-p buffer)
-      (with-current-buffer buffer
-        (ellm--set-frontmatter-value 'model model)))))
+  (unless ellm-acp--inhibit-frontmatter-persist
+    (when-let* ((model (ellm-acp--connection-current-model connection))
+                (buffer (ellm-acp--connection-buffer connection)))
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer
+          (ellm--set-frontmatter-value 'model model))))))
 
 (defun ellm-acp--config-value-candidate (option)
   "Return a completion candidate for ACP select OPTION."
@@ -1094,9 +1231,28 @@ called with the raw response before ON-READY."
 (defun ellm-acp--last-user-content ()
   "Return the content of the most recent user turn in the current buffer."
   (when-let* ((turn (cl-find-if (lambda (turn)
-                                  (equal (ellm-turn-role turn) "user"))
-                                (reverse (ellm--parse-turns)))))
+                                   (equal (ellm-turn-role turn) "user"))
+                                 (reverse (ellm--parse-turns)))))
     (ellm-turn-content turn)))
+
+(defun ellm-acp-start-session (provider frontmatter buffer &optional quiet)
+  "Start/login an ACP session for BUFFER without sending a prompt.
+FRONTMATTER is BUFFER's parsed YAML frontmatter.  When QUIET is non-nil,
+do not show a success message.  Return the ready ACP connection."
+  (unless (buffer-live-p buffer)
+    (user-error "ellm ACP: buffer is not live"))
+  (with-current-buffer buffer
+    (let ((connection (ellm-acp--ensure-connection provider buffer)))
+      (ellm-acp--ensure-session-sync connection provider frontmatter)
+      (ellm-acp--maybe-set-model-sync
+       connection (alist-get 'model frontmatter))
+      (ellm-acp--apply-config-options-sync
+       connection
+       (ellm-acp--frontmatter-config-values provider connection frontmatter))
+      (unless quiet
+        (message "ellm ACP: session %s ready"
+                 (or (ellm-acp--connection-session-id connection) "<unknown>")))
+      connection)))
 
 ;;;; Session listing/loading
 
