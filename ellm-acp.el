@@ -62,6 +62,16 @@ Each ACP connection gets its own log buffer derived from this name."
   :type 'string
   :group 'ellm-acp)
 
+(defcustom ellm-acp-tool-detail-limit nil
+  "Maximum characters to render for each ACP tool detail body.
+Nil renders full tool parameters and results.  Zero inserts only
+`tool-call' and `tool-result' headings.  A positive integer renders up to
+that many characters for each parameter value and result body, followed by a
+truncation marker when text was omitted."
+  :type '(choice (const :tag "No limit" nil)
+                 (natnum :tag "Maximum characters"))
+  :group 'ellm-acp)
+
 (cl-defstruct (ellm-acp-provider (:constructor ellm-make-acp-provider))
   "Provider configuration for an ACP agent process.
 COMMAND is the executable used to start the ACP agent.  ARGS is a list of
@@ -1528,7 +1538,8 @@ being merged into the same ellm turn."
 When CONNECTION is non-nil, remember marker ranges for incremental updates."
   (goto-char (point-max))
   (let* ((id (plist-get update :toolCallId))
-         (params (ellm-acp--raw-input-params (plist-get update :rawInput)))
+         (params (and (ellm-acp--tool-details-enabled-p)
+                      (ellm-acp--raw-input-params (plist-get update :rawInput))))
          (call-beg nil))
     (apply #'ellm--insert-turn "tool-call"
            (ellm-acp--tool-turn-attrs update :omit-status t))
@@ -1541,7 +1552,7 @@ When CONNECTION is non-nil, remember marker ranges for incremental updates."
       (set-marker-insertion-type params-beg nil)
       (ellm-acp--insert-tool-params params)
       (setq params-end (point-marker))
-      (set-marker-insertion-type params-end t)
+      (set-marker-insertion-type params-end nil)
       (when (and connection id)
         (puthash id
                  (ellm-acp--make-rendered-tool
@@ -1594,15 +1605,37 @@ objects otherwise look like malformed plists to `json-serialize'."
     (vconcat (mapcar #'ellm-acp--json-serializable-value value)))
    (t value)))
 
+(defun ellm-acp--normalized-tool-detail-limit ()
+  "Return normalized `ellm-acp-tool-detail-limit'."
+  (when (integerp ellm-acp-tool-detail-limit)
+    (max 0 ellm-acp-tool-detail-limit)))
+
+(defun ellm-acp--tool-details-enabled-p ()
+  "Return non-nil when ACP tool detail bodies should be rendered."
+  (not (equal (ellm-acp--normalized-tool-detail-limit) 0)))
+
+(defun ellm-acp--limited-tool-detail-text (text)
+  "Return TEXT capped by `ellm-acp-tool-detail-limit'."
+  (let ((limit (ellm-acp--normalized-tool-detail-limit)))
+    (cond
+     ((null limit) text)
+     ((zerop limit) "")
+     ((<= (length text) limit) text)
+     (t (concat (substring text 0 limit)
+                (format "\n[... truncated %d chars]\n"
+                        (- (length text) limit)))))))
+
 (defun ellm-acp--insert-tool-params (params)
   "Insert PARAMS as nested `tool-param' turns at point."
-  (dolist (param params)
-    (unless (bolp) (insert "\n"))
-    (insert (ellm--get-turn "tool-param"
-                            :pipe-arg (format "%s" (car param)))
-            "\n")
-    (insert (ellm--ensure-newline
-             (ellm--format-tool-param-value (cdr param))))))
+  (when (ellm-acp--tool-details-enabled-p)
+    (dolist (param params)
+      (unless (bolp) (insert "\n"))
+      (insert (ellm--get-turn "tool-param"
+                              :pipe-arg (format "%s" (car param)))
+              "\n")
+      (insert (ellm--ensure-newline
+               (ellm-acp--limited-tool-detail-text
+                (ellm--format-tool-param-value (cdr param))))))))
 
 (defun ellm-acp--tool-state (connection id)
   "Return CONNECTION's rendered tool state for ID, or nil."
@@ -1652,7 +1685,10 @@ objects otherwise look like malformed plists to `json-serialize'."
   "Replace region BEG END with TEXT."
   (goto-char beg)
   (delete-region beg end)
-  (insert text))
+  (insert text)
+  (when (markerp end)
+    (set-marker end (point))
+    (set-marker-insertion-type end nil)))
 
 (defun ellm-acp--update-tool-call-params (state params)
   "Replace STATE's rendered params with PARAMS."
@@ -1661,17 +1697,24 @@ objects otherwise look like malformed plists to `json-serialize'."
     (goto-char beg)
     (delete-region beg end)
     (ellm-acp--insert-tool-params params)
-    (set-marker (ellm-acp-rendered-tool-params-end state) (point))))
+    (set-marker (ellm-acp-rendered-tool-params-end state) (point))
+    (set-marker-insertion-type (ellm-acp-rendered-tool-params-end state) nil)))
 
 (defun ellm-acp--upsert-tool-call-params (update connection)
   "Render UPDATE's `rawInput' as params on its live tool-call turn."
-  (when-let* ((id (plist-get update :toolCallId))
-              (params (ellm-acp--raw-input-params
-                       (plist-get update :rawInput))))
-    (let ((state (ellm-acp--tool-state connection id)))
-      (if (ellm-acp--tool-call-state-valid-p state)
-          (ellm-acp--update-tool-call-params state params)
-        (ellm-acp--insert-tool-call update connection)))))
+  (when-let* ((id (plist-get update :toolCallId)))
+    (let ((state (ellm-acp--tool-state connection id))
+          (params (and (ellm-acp--tool-details-enabled-p)
+                       (ellm-acp--raw-input-params (plist-get update :rawInput)))))
+      (cond
+       ((not (ellm-acp--tool-details-enabled-p))
+        (unless (ellm-acp--tool-call-state-valid-p state)
+          (ellm-acp--insert-tool-call update connection)))
+       ((not params) nil)
+       ((ellm-acp--tool-call-state-valid-p state)
+        (ellm-acp--update-tool-call-params state params))
+       (t
+        (ellm-acp--insert-tool-call update connection))))))
 
 (defun ellm-acp--replace-turn-header (marker role attrs)
   "Replace turn delimiter at MARKER with ROLE and ATTRS."
@@ -1698,9 +1741,11 @@ objects otherwise look like malformed plists to `json-serialize'."
     (set-marker-insertion-type result-beg nil)
     (setq body-beg (point-marker))
     (set-marker-insertion-type body-beg nil)
-    (insert (ellm-acp--tool-update-text update :skip-raw-input t))
+    (when (ellm-acp--tool-details-enabled-p)
+      (insert (ellm-acp--limited-tool-detail-text
+               (ellm-acp--tool-update-text update :skip-raw-input t))))
     (setq result-end (point-marker))
-    (set-marker-insertion-type result-end t)
+    (set-marker-insertion-type result-end nil)
     (when (and connection id)
       (unless state
         (setq state (ellm-acp--make-rendered-tool :id id))
@@ -1715,10 +1760,12 @@ objects otherwise look like malformed plists to `json-serialize'."
    (ellm-acp-rendered-tool-result-beg state)
    "tool-result"
    (ellm-acp--tool-turn-attrs update))
-  (ellm-acp--replace-region-with
-   (ellm-acp-rendered-tool-result-body-beg state)
-   (ellm-acp-rendered-tool-result-end state)
-   (ellm-acp--tool-update-text update :skip-raw-input t)))
+  (when (ellm-acp--tool-details-enabled-p)
+    (ellm-acp--replace-region-with
+     (ellm-acp-rendered-tool-result-body-beg state)
+     (ellm-acp-rendered-tool-result-end state)
+     (ellm-acp--limited-tool-detail-text
+      (ellm-acp--tool-update-text update :skip-raw-input t)))))
 
 (defun ellm-acp--insert-tool-update (update &optional connection)
   "Insert or update ACP tool call UPDATE as live rendered turns."
