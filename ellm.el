@@ -1395,10 +1395,11 @@ delimiter line (i.e. the end of the match against
               (- end 4)
               (match-string-no-properties 1))))))
 
-(defun ellm--parse-frontmatter ()
+(defun ellm--parse-frontmatter (&optional quiet)
   "Return alist parsed from the buffer's YAML frontmatter, or nil.
 Keys are symbols.  Returns nil when there is no frontmatter or when
-parsing fails (a `lwarn' is issued in the latter case)."
+parsing fails.  Unless QUIET is non-nil, parsing failures issue a
+`lwarn'."
   (when-let* ((bounds (ellm--frontmatter-bounds))
               (body (nth 4 bounds)))
     (condition-case err
@@ -1408,7 +1409,8 @@ parsing fails (a `lwarn' is issued in the latter case)."
                            :null-object nil
                            :false-object nil)
       (error
-       (lwarn 'ellm :warning "Failed to parse frontmatter: %S" err)
+       (unless quiet
+         (lwarn 'ellm :warning "Failed to parse frontmatter: %S" err))
        nil))))
 
 (defun ellm--frontmatter-value (key)
@@ -1721,8 +1723,9 @@ surprise prompts from automatic completion UIs."
 MODELS is a list of model name strings.  SOURCE is one of:
   `explicit'   - taken from the alist entry's `:models' list,
   `provider'   - supplied by the resolved provider backend."
-  (let* ((fm (ignore-errors (ellm--parse-frontmatter)))
-          (named (alist-get 'provider fm))
+  (let* ((fm (ignore-errors (ellm--parse-frontmatter t)))
+          (named (or (alist-get 'provider fm)
+                     (ellm--capf-frontmatter-provider-name)))
           (sym (and named (if (stringp named) (intern named) named)))
           (entry (and sym (alist-get sym ellm-provider-alist)))
           (explicit (and entry (ellm--provider-entry-models entry)))
@@ -1875,45 +1878,55 @@ appended to the fallback annotation."
    key (ellm--frontmatter-capf--key-entries
         (ellm--frontmatter-capf--parent-spec indent))))
 
+(defun ellm--frontmatter-capf--quoted-token-bounds-at (pos quote)
+  "Return content bounds of the quoted token around POS using QUOTE.
+The returned bounds exclude the quote characters, so completing inside a
+quoted scalar preserves the existing YAML quoting."
+  (save-excursion
+    (let ((line-beg (line-beginning-position))
+          (line-end (line-end-position))
+          open
+          bounds)
+      (goto-char line-beg)
+      (while (and (< (point) line-end) (not bounds))
+        (when (and (eq (char-after) quote)
+                   (not (and (eq quote ?\")
+                             (> (point) line-beg)
+                             (eq (char-before) ?\\))))
+          (if open
+              (let ((close (point)))
+                (when (and (>= pos open) (<= pos (1+ close)))
+                  (setq bounds (cons (1+ open) close)))
+                (setq open nil))
+            (setq open (point))))
+        (forward-char 1))
+      (when (and open (not bounds) (>= pos open) (<= pos line-end))
+        (setq bounds (cons (1+ open) line-end)))
+      bounds)))
+
 (defun ellm--frontmatter-capf--token-bounds-at (pos)
   "Return (BEG . END) of the YAML/JSON-array token at POS.
-A token is a run of non-delimiter characters: anything except
+A bare token is a run of non-delimiter characters: anything except
 whitespace, brackets `[]', braces `{}', commas `,', colons `:',
-and double-quotes `\"'.  Double-quoted strings are treated as a
-single token (BEG points at the opening `\"', END past the closing
-`\"').  Returns nil when POS is not inside any token."
+and quotes.  Quoted strings are treated as a single token whose bounds
+cover only the string contents, not the quote characters.  Returns nil
+when POS is not inside any token."
   (save-excursion
     (goto-char pos)
-    ;; If point is right on a quote, treat the whole quoted string as the token.
-    (cond
-     ((eq (char-after) ?\")
-      (let ((beg (point)))
-        (forward-char 1)
-        (when (search-forward "\"" (line-end-position) t)
-          (cons beg (point)))))
-     ;; Inside a quoted string — back up to the opening quote.
-     ((save-excursion
-        (let ((q (search-backward "\"" (line-beginning-position) t)))
-          (and q
-               (not (search-forward "\"" pos t))
-               q)))
-      (let ((beg (save-excursion
-                   (search-backward "\"" (line-beginning-position) t))))
-        (goto-char beg)
-        (forward-char 1)
-        (when (search-forward "\"" (line-end-position) t)
-          (cons beg (point)))))
-     ;; Bare token (no quotes): a token exists at POS if there is a valid
-     ;; token char immediately after OR immediately before point (the latter
-     ;; covers the common case of point sitting at the end of the token).
-     (t
-      (let* ((token-char "^ \t\[\]{},:\"\n")
-             (after-tok (and (not (eolp))
-                             (not (string-match-p "[ \t\[\]{},:\"\n]"
-                                                  (char-to-string (char-after))))))
-             (before-tok (and (not (bolp))
-                              (not (string-match-p "[ \t\[\]{},:\"\n]"
-                                                   (char-to-string (char-before)))))))
+    (or (ellm--frontmatter-capf--quoted-token-bounds-at pos ?\")
+        (ellm--frontmatter-capf--quoted-token-bounds-at pos ?\')
+        ;; Bare token (no quotes): a token exists at POS if there is a valid
+        ;; token char immediately after OR immediately before point (the latter
+        ;; covers the common case of point sitting at the end of the token).
+        (let* ((token-char "^ \t\[\]{},:\"'\n")
+               (after-tok
+                (and (not (eolp))
+                     (not (string-match-p "[ \t\[\]{},:\"'\n]"
+                                          (char-to-string (char-after))))))
+               (before-tok
+                (and (not (bolp))
+                     (not (string-match-p "[ \t\[\]{},:\"'\n]"
+                                          (char-to-string (char-before)))))))
         (when (or after-tok before-tok)
           (let ((end (save-excursion
                        (skip-chars-forward token-char)
@@ -1921,7 +1934,7 @@ single token (BEG points at the opening `\"', END past the closing
                 (beg (save-excursion
                        (skip-chars-backward token-char)
                        (point))))
-            (cons beg end))))))))
+            (cons beg end)))))))
 
 (defun ellm--frontmatter-capf--inline-token-at (pos line-value-beg line-value-end)
   "Return (BEG . END) for the token at POS within an inline value region.
@@ -1944,7 +1957,9 @@ Returns nil when POS is outside the value region or not on a token."
                           (1- (point))
                         (point)))))
       (when (and (>= pos val-beg) (<= pos val-end))
-        (ellm--frontmatter-capf--token-bounds-at pos)))))
+        (when-let* ((tok (ellm--frontmatter-capf--token-bounds-at pos)))
+          (cons (max (car tok) val-beg)
+                (min (cdr tok) val-end)))))))
 
 (defun ellm--frontmatter-capf--inline-array-p (value-beg value-end)
   "Return non-nil when VALUE-BEG..VALUE-END is a bracketed inline array."
