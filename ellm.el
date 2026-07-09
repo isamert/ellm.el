@@ -2272,6 +2272,50 @@ Headings inside fenced code blocks do not count."
     (when (ellm--outline-search-function nil nil nil t)
       (ellm--outline-level))))
 
+(defun ellm--blank-separator-heading-at-point-p ()
+  "Return non-nil if point is on a heading whose turn separator is blank."
+  (save-excursion
+    (forward-line 0)
+    (and (ellm--outline-search-function nil nil nil t)
+         (looking-at ellm-turn-regexp)
+         (ellm--blank-separator-p
+          (match-string-no-properties 2)
+          (ellm--continuation-header-p
+           (match-string-no-properties 1))))))
+
+(defun ellm--show-visible-blank-separator-subtrees ()
+  "Show visible outline subtrees whose turn separator is intentionally blank."
+  (save-excursion
+    (goto-char (point-min))
+    (while (ellm--outline-search-function nil nil nil)
+      (forward-line 0)
+      (let ((pos (point)))
+        (when (and (not (invisible-p pos))
+                   (ellm--blank-separator-heading-at-point-p))
+          (outline-show-subtree))
+        (goto-char pos)
+        (forward-line 1)))))
+
+(defun ellm-outline-cycle (&optional event)
+  "Like `outline-cycle', but reveal implementation-detail assistant turns.
+When point is itself on such a turn, preserve plain `outline-cycle'
+behaviour so the turn can still be cycled directly."
+  (interactive (list last-nonmenu-event))
+  (let ((blank-heading (save-excursion
+                         (when (mouse-event-p event)
+                           (mouse-set-point event))
+                         (ellm--blank-separator-heading-at-point-p))))
+    (outline-cycle event)
+    (unless blank-heading
+      (ellm--show-visible-blank-separator-subtrees))))
+
+(defun ellm-outline-cycle-buffer (&optional level)
+  "Like `outline-cycle-buffer', but reveal implementation-detail assistant turns."
+  (interactive (list (when current-prefix-arg
+                       (prefix-numeric-value current-prefix-arg))))
+  (outline-cycle-buffer level)
+  (ellm--show-visible-blank-separator-subtrees))
+
 (defun ellm-beginning-of-defun (&optional arg)
   "Move backward to the beginning of the ARG-th preceding heading.
 A heading is a turn delimiter or a Markdown heading (outside code
@@ -2765,7 +2809,9 @@ Implementations should stream into the assistant turn already appended by
 
 (defvar ellm-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "<backtab>") #'outline-cycle-buffer)
+    (define-key map [remap outline-cycle] #'ellm-outline-cycle)
+    (define-key map [remap outline-cycle-buffer] #'ellm-outline-cycle-buffer)
+    (define-key map (kbd "<backtab>") #'ellm-outline-cycle-buffer)
     (define-key map (kbd "C-c C-c")   #'ellm-send)
     (define-key map (kbd "C-c C-k")   #'ellm-cancel)
     (define-key map (kbd "C-c C-s")   #'ellm-start-session)
