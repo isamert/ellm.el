@@ -1567,10 +1567,32 @@ When CONNECTION is non-nil, remember marker ranges for incremental updates."
   (cond
    ((null raw-input) nil)
    ((and (listp raw-input) (keywordp (car raw-input)))
-    (cl-loop for (key value) on raw-input by #'cddr
-             collect (cons (substring (symbol-name key) 1) value)))
+     (cl-loop for (key value) on raw-input by #'cddr
+              collect (cons (substring (symbol-name key) 1)
+                            (ellm-acp--json-serializable-value value))))
    ((listp raw-input) raw-input)
-   (t `((input . ,raw-input)))))
+   (t `((input . ,(ellm-acp--json-serializable-value raw-input))))))
+
+(defun ellm-acp--json-plist-p (value)
+  "Return non-nil when VALUE is a JSON object represented as a plist."
+  (and (proper-list-p value)
+       (zerop (mod (length value) 2))
+       (cl-loop for (key _value) on value by #'cddr
+                always (keywordp key))))
+
+(defun ellm-acp--json-serializable-value (value)
+  "Return VALUE with ACP JSON arrays converted for `json-serialize'.
+ACP messages are parsed with `:array-type' `list', so nested arrays of
+objects otherwise look like malformed plists to `json-serialize'."
+  (cond
+   ((vectorp value)
+    (vconcat (mapcar #'ellm-acp--json-serializable-value value)))
+   ((ellm-acp--json-plist-p value)
+    (cl-loop for (key child) on value by #'cddr
+             append (list key (ellm-acp--json-serializable-value child))))
+   ((proper-list-p value)
+    (vconcat (mapcar #'ellm-acp--json-serializable-value value)))
+   (t value)))
 
 (defun ellm-acp--insert-tool-params (params)
   "Insert PARAMS as nested `tool-param' turns at point."
@@ -1790,7 +1812,8 @@ nested `tool-param' turns."
   "Return a fenced JSON section named TITLE for VALUE."
   (format "%s:\n```json\n%s\n```\n"
           title
-          (json-serialize value :false-object :json-false :null-object nil)))
+          (json-serialize (ellm-acp--json-serializable-value value)
+                          :false-object :json-false :null-object nil)))
 
 (defun ellm-acp--tool-content-text (item)
   "Return Markdown text for ACP tool content ITEM."
