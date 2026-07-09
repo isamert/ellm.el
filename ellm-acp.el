@@ -1327,6 +1327,10 @@ do not show a success message.  Return the ready ACP connection."
         (user-error "ellm ACP: agent does not support session/close"))
       (ellm-acp--request-sync connection :session/close `(:sessionId ,session-id))
       (setf (ellm-acp--connection-session-id connection) nil)
+      (ellm--set-frontmatter-value '(acp session-id) nil)
+      (and-let* ((proc (ellm-acp--connection-process ellm-acp--connection))
+                 ((process-live-p proc)))
+        (kill-process (ellm-acp--connection-process ellm-acp--connection)))
       (message "ellm ACP: closed session %s" session-id))))
 
 (defun ellm-acp-delete-session (provider frontmatter buffer &optional select)

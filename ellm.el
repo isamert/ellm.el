@@ -2506,14 +2506,17 @@ Errors during streaming are signalled normally."
     (when (eq ellm--active-request ellm--request-starting)
       (setq ellm--active-request request))))
 
-(defun ellm-cancel ()
-  "Cancel the in-flight LLM request for this buffer, if any."
+(defun ellm-cancel (&optional quiet)
+  "Cancel the in-flight LLM request for this buffer, if any.
+If QUIET is non-nil, then do not print any messages."
   (interactive)
   (if (not ellm--active-request)
-      (message "ellm: no active request")
+      (unless quiet
+        (message "ellm: no active request"))
     (ellm-backend-cancel ellm--active-request)
     (setq ellm--active-request nil)
-    (message "ellm: request cancelled")))
+    (unless quiet
+      (message "ellm: request cancelled"))))
 
 (defun ellm--command-frontmatter ()
   "Return frontmatter for the current command context, if available."
@@ -2786,6 +2789,7 @@ Implementations should stream into the assistant turn already appended by
   (add-hook 'post-command-hook #'ellm--reveal-separator-at-point nil t)
   (add-hook 'completion-at-point-functions #'ellm--frontmatter-capf nil t)
   (add-hook 'completion-at-point-functions #'ellm--slash-command-capf nil t)
+  (add-hook 'kill-buffer-hook #'ellm-close-session nil t)
   (setq-local outline-regexp (ellm--outline-regexp))
   (setq-local outline-search-function #'ellm--outline-search-function)
   (setq-local outline-level #'ellm--outline-level)

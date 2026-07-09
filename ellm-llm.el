@@ -76,6 +76,12 @@ Backend-specific provider types should define a more specific
   "Return a copy of PROVIDER with its `chat-model' slot set to MODEL."
   (ellm-llm--provider-with-model provider model))
 
+(cl-defmethod ellm-provider-close-session ((provider llm-standard-chat-provider) _frontmatter _buffer)
+  "Close the session.
+In this case there is no real session, so we just close the in-flight requests."
+  ()
+  (ellm-cancel t))
+
 ;;;; Internal
 
 ;;;;; Tool handling
