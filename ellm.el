@@ -2164,6 +2164,17 @@ pairs, e.g. `:ts 2025-01-01T00:00:00 :id call_1'."
       (ellm--flush-pending-fold depth)
       (ellm--mark-pending-fold beg role depth))))
 
+(defun ellm--clear-buffer-keeping-frontmatter ()
+  "Clear the conversation, preserving frontmatter and adding an empty user turn."
+  (let* ((bounds (ellm--frontmatter-bounds))
+         (frontmatter (and bounds
+                           (buffer-substring-no-properties
+                            (point-min) (nth 1 bounds)))))
+    (delete-region (point-min) (point-max))
+    (when frontmatter
+      (insert frontmatter "\n\n"))
+    (ellm--insert-turn "user")))
+
 (defun ellm--format-tool-param-value (value)
   "Return a stable buffer representation for tool parameter VALUE."
   (cond
@@ -2596,12 +2607,19 @@ If QUIET is non-nil, then do not print any messages."
     (ellm-provider-start-session provider fm (current-buffer))
     (message "ellm: session ready")))
 
-(defun ellm-close-session ()
-  "Close the backend session associated with the current ellm buffer."
-  (interactive)
+(defun ellm-close-session (&optional prompt-to-clear)
+  "Close the backend session associated with the current ellm buffer.
+When PROMPT-TO-CLEAR is non-nil, ask whether to clear the conversation while
+keeping frontmatter and an empty user prompt."
+  (interactive (list t))
   (let* ((fm (ellm--command-frontmatter))
          (provider (ellm--command-provider fm)))
-    (ellm-provider-close-session provider fm (current-buffer))))
+    (ellm-provider-close-session provider fm (current-buffer))
+    (when (and prompt-to-clear
+               (derived-mode-p 'ellm-mode)
+               (y-or-n-p
+                "Clear buffer, keeping frontmatter? "))
+      (ellm--clear-buffer-keeping-frontmatter))))
 
 (defun ellm-delete-session (&optional select)
   "Delete an ACP/backend session from session history.
