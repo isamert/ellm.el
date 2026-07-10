@@ -312,10 +312,10 @@ Group 1: the leading hash characters indicating the heading level.")
   '((user        :face ellm-role-user      :glyph "❯ USER")
     (assistant   :face ellm-role-assistant :glyph "❮ ASSISTANT")
     (system      :face ellm-role-system    :glyph "❯ SYSTEM")
-    (tool-call   :face ellm-role-tool      :glyph "❮❮ CALL"     :tool t :shade ellm-block)
-    (tool-result :face ellm-role-tool      :glyph "❯❯ RESULT"   :tool t :shade ellm-block)
-    (tool-param  :face ellm-role-tool      :glyph "  ↳ PARAM"   :tool t :shade ellm-block)
-    (reasoning   :face ellm-role-reasoning :glyph "❮❮ REASONING"        :shade ellm-reasoning))
+    (tool-call   :face ellm-role-tool      :glyph "❮❮ CALL"     :tool t :shade ellm-block     :markdown nil)
+    (tool-result :face ellm-role-tool      :glyph "❯❯ RESULT"   :tool t :shade ellm-block     :markdown nil)
+    (tool-param  :face ellm-role-tool      :glyph "  ↳ PARAM"   :tool t :shade ellm-block     :markdown nil)
+    (reasoning   :face ellm-role-reasoning :glyph "❮❮ REASONING"        :shade ellm-reasoning :markdown nil))
   "Single source of truth for role metadata.
 Each entry is `(ROLE-SYM . PLIST)' where PLIST may include:
   :face   FACE-SYMBOL  Face used for the role's keyword on the delimiter line.
@@ -323,7 +323,9 @@ Each entry is `(ROLE-SYM . PLIST)' where PLIST may include:
   :tool   BOOL         Non-nil for `tool-call'/`tool-result'/`tool-param'
                        roles, whose bodies are shaded with `ellm-block'.
   :shade  FACE-SYMBOL  Face appended to the role's turn body (see
-                       `ellm--fontify-shaded-turns').")
+                       `ellm--fontify-shaded-turns').
+  :markdown BOOL       Nil when the role's body is raw text rather than
+                       Markdown prose.")
 
 (defun ellm--role-prop (role prop)
   "Return PROP for ROLE (string or symbol) from `ellm--roles', or nil."
@@ -348,6 +350,15 @@ Tool roles are `tool-call', `tool-result', and `tool-param'."
 (defun ellm--role-shade-face (role)
   "Return the face used to shade ROLE's turn body, or nil if none."
   (ellm--role-prop role :shade))
+
+(defun ellm--role-markdown-p (role)
+  "Return non-nil if ROLE's body should be treated as Markdown prose."
+  (let* ((sym (if (stringp role) (intern-soft role) role))
+         (entry (and sym (assq sym ellm--roles)))
+         (plist (cdr-safe entry)))
+    (if (plist-member plist :markdown)
+        (plist-get plist :markdown)
+      t)))
 
 (defun ellm--continuation-header-p (header)
   "Return non-nil if HEADER (the captured group 1 of `ellm-turn-regexp')
@@ -746,19 +757,27 @@ it."
 
 ;;;;; Font-lock keywords
 
-(defun ellm--make-skip-code-matcher (regexp)
-  "Return a font-lock matcher function for REGEXP that skips code blocks."
+(defun ellm--make-markdown-matcher (regexp)
+  "Return a font-lock matcher for Markdown REGEXP.
+Matches inside fenced code blocks and Markdown-disabled turn bodies are
+ignored.  When a match lands inside a Markdown-disabled turn body, point
+jumps to that body's end so large tool outputs are skipped in one step."
   (lambda (limit)
     (let (found)
       (while (and (not found)
                   (re-search-forward regexp limit t))
         (let ((mb (match-beginning 0))
               (md (match-data)))
-          (if (ellm--in-code-block-p mb)
-              ;; Skip this match and continue searching.
-              nil
+          (cond
+           ((ellm--in-code-block-p mb)
+            ;; Skip this match and continue searching.
+            nil)
+           ((when-let* ((bounds (ellm--markdown-disabled-bounds-at mb)))
+              (goto-char (min limit (max (point) (cdr bounds))))
+              t))
+           (t
             (set-match-data md)
-            (setq found t))))
+            (setq found t)))))
       found)))
 
 (defconst ellm-font-lock-keywords
@@ -772,22 +791,22 @@ it."
     (,ellm-code-block-header-regexp (0 'ellm-code-block-delimiter t))
     (,ellm-code-block-end-regexp (0 'ellm-code-block-delimiter t))
     ;; Bold **text**
-    (,(ellm--make-skip-code-matcher "\\*\\*\\([^*]+\\)\\*\\*") (0 'ellm-bold t))
+    (,(ellm--make-markdown-matcher "\\*\\*\\([^*]+\\)\\*\\*") (0 'ellm-bold t))
     ;; Italic *text* (not bold)
-    (,(ellm--make-skip-code-matcher "\\(?:^\\|[^*]\\)\\(\\*\\([^*]+\\)\\*\\)[^*]") (1 'ellm-italic t))
+    (,(ellm--make-markdown-matcher "\\(?:^\\|[^*]\\)\\(\\*\\([^*]+\\)\\*\\)[^*]") (1 'ellm-italic t))
     ;; Inline code `text`
-    (,(ellm--make-skip-code-matcher "`\\([^`\n]+\\)`") (0 'ellm-inline-code t))
+    (,(ellm--make-markdown-matcher "`\\([^`\n]+\\)`") (0 'ellm-inline-code t))
     ;; Headings
-    (,(ellm--make-skip-code-matcher "^# .*$") (0 'ellm-heading-1 t))
-    (,(ellm--make-skip-code-matcher "^## .*$") (0 'ellm-heading-2 t))
-    (,(ellm--make-skip-code-matcher "^### .*$") (0 'ellm-heading-3 t))
-    (,(ellm--make-skip-code-matcher "^#### .*$") (0 'ellm-heading-4 t))
-    (,(ellm--make-skip-code-matcher "^##### .*$") (0 'ellm-heading-5 t))
-    (,(ellm--make-skip-code-matcher "^###### .*$") (0 'ellm-heading-6 t))
+    (,(ellm--make-markdown-matcher "^# .*$") (0 'ellm-heading-1 t))
+    (,(ellm--make-markdown-matcher "^## .*$") (0 'ellm-heading-2 t))
+    (,(ellm--make-markdown-matcher "^### .*$") (0 'ellm-heading-3 t))
+    (,(ellm--make-markdown-matcher "^#### .*$") (0 'ellm-heading-4 t))
+    (,(ellm--make-markdown-matcher "^##### .*$") (0 'ellm-heading-5 t))
+    (,(ellm--make-markdown-matcher "^###### .*$") (0 'ellm-heading-6 t))
     ;; Blockquotes
-    (,(ellm--make-skip-code-matcher "^> .*$") (0 'ellm-blockquote t))
+    (,(ellm--make-markdown-matcher "^> .*$") (0 'ellm-blockquote t))
     ;; List markers
-    (,(ellm--make-skip-code-matcher "^\\s-*\\([-*]\\|[0-9]+\\.\\) ") (1 'ellm-list-marker t)))
+    (,(ellm--make-markdown-matcher "^\\s-*\\([-*]\\|[0-9]+\\.\\) ") (1 'ellm-list-marker t)))
   "Font-lock keywords for `ellm-mode'.")
 
 ;;;;; Fence position cache
@@ -908,8 +927,137 @@ Assumes `ellm--fence-positions' is sorted ascending."
       (let ((mid (/ (+ lo hi) 2)))
         (if (< (aref vec mid) target)
             (setq lo (1+ mid))
-          (setq hi mid))))
+            (setq hi mid))))
     (cl-oddp lo)))
+
+;;;;; Turn body cache
+
+(defvar-local ellm--turn-body-cache nil
+  "Sorted list of cached turn body entries.
+Each entry is a vector [DELIMITER-BEG BODY-BEG ROLE MARKDOWN-DISABLED].")
+
+(defvar-local ellm--turn-body-cache-vector []
+  "Vector copy of `ellm--turn-body-cache' for binary-search lookups.")
+
+(defvar-local ellm--turn-body-cache-valid nil
+  "Non-nil when `ellm--turn-body-cache' is up to date with the buffer.")
+
+(defvar-local ellm--turn-body-cache-force-rebuild nil
+  "Non-nil when the next change update must rebuild the turn body cache.")
+
+(defun ellm--sync-turn-body-cache-vector ()
+  "Synchronize `ellm--turn-body-cache-vector' from the cache list."
+  (setq ellm--turn-body-cache-vector (vconcat ellm--turn-body-cache)))
+
+(defun ellm--turn-body-cache-entry (delimiter-beg body-beg role)
+  "Return a turn body cache entry for ROLE at DELIMITER-BEG/BODY-BEG."
+  (vector delimiter-beg body-beg role (not (ellm--role-markdown-p role))))
+
+(defun ellm--rebuild-turn-body-cache ()
+  "Rebuild `ellm--turn-body-cache' from buffer contents."
+  (save-excursion
+    (save-match-data
+      (goto-char (point-min))
+      (let (entries)
+        (while (re-search-forward ellm-turn-regexp nil t)
+          (push (ellm--turn-body-cache-entry
+                 (line-beginning-position)
+                 (min (1+ (line-end-position)) (point-max))
+                 (match-string-no-properties 2))
+                entries)
+          (forward-line 1))
+        (setq ellm--turn-body-cache (nreverse entries)
+              ellm--turn-body-cache-valid t
+              ellm--turn-body-cache-force-rebuild nil)
+        (ellm--sync-turn-body-cache-vector)))))
+
+(defun ellm--ensure-turn-body-cache ()
+  "Ensure the turn body cache is initialized and current."
+  (unless ellm--turn-body-cache-valid
+    (ellm--rebuild-turn-body-cache)))
+
+(defun ellm--turn-delimiter-in-region-p (beg end)
+  "Return non-nil if any line touched by BEG..END is a turn delimiter."
+  (save-excursion
+    (save-match-data
+      (let ((scan-beg (save-excursion
+                        (goto-char beg)
+                        (line-beginning-position)))
+            (scan-end (save-excursion
+                        (goto-char end)
+                        (min (1+ (line-end-position)) (point-max)))))
+        (goto-char scan-beg)
+        (re-search-forward ellm-turn-regexp scan-end t)))))
+
+(defun ellm--shift-turn-body-cache-after-change (beg end old-len)
+  "Shift cached turn body positions after a non-structural change.
+BEG, END, and OLD-LEN are the values passed to `after-change-functions'."
+  (let* ((delta (- (- end beg) old-len))
+         (old-end (+ beg old-len)))
+    (unless (zerop delta)
+      (setq ellm--turn-body-cache
+            (mapcar
+             (lambda (entry)
+               (vector (let ((pos (aref entry 0)))
+                         (if (>= pos old-end) (+ pos delta) pos))
+                       (let ((pos (aref entry 1)))
+                         (if (>= pos old-end) (+ pos delta) pos))
+                       (aref entry 2)
+                       (aref entry 3)))
+             ellm--turn-body-cache))
+      (ellm--sync-turn-body-cache-vector))))
+
+(defun ellm--update-turn-body-cache-after-change (beg end old-len)
+  "Update turn body cache after a buffer change.
+Rebuild only when the changed old/new lines contain turn delimiters;
+otherwise shift cached positions past the edit."
+  (when ellm--turn-body-cache-valid
+    (if (or ellm--turn-body-cache-force-rebuild
+            (ellm--turn-delimiter-in-region-p beg end))
+        (ellm--rebuild-turn-body-cache)
+      (ellm--shift-turn-body-cache-after-change beg end old-len)))
+  (setq ellm--turn-body-cache-force-rebuild nil))
+
+(defun ellm--turn-body-cache-index-at (pos)
+  "Return index of the turn cache entry containing POS structurally."
+  (ellm--ensure-turn-body-cache)
+  (let ((vec ellm--turn-body-cache-vector)
+        (lo 0)
+        (hi (length ellm--turn-body-cache-vector)))
+    (while (< lo hi)
+      (let ((mid (/ (+ lo hi) 2)))
+        (if (<= (aref (aref vec mid) 0) pos)
+            (setq lo (1+ mid))
+          (setq hi mid))))
+    (let ((idx (1- lo)))
+      (and (>= idx 0) idx))))
+
+(defun ellm--markdown-disabled-bounds-at (&optional pos)
+  "Return raw turn body bounds containing POS, or nil.
+The returned cons is (BODY-BEG . BODY-END).  Delimiter lines are never
+considered part of the body, so turn delimiters remain structural even
+for Markdown-disabled roles."
+  (let* ((target (or pos (point)))
+         (idx (ellm--turn-body-cache-index-at target))
+         (vec ellm--turn-body-cache-vector)
+         (entry (and idx (aref vec idx))))
+    (when (and entry
+               (aref entry 3)
+               (>= target (aref entry 1)))
+      (cons (aref entry 1)
+            (if (< (1+ idx) (length vec))
+                (aref (aref vec (1+ idx)) 0)
+              (point-max))))))
+
+(defun ellm--markdown-disabled-at-p (&optional pos)
+  "Return non-nil if POS is in a turn body that disables Markdown prose."
+  (and (ellm--markdown-disabled-bounds-at pos) t))
+
+(defun ellm--markdown-excluded-at-p (&optional pos)
+  "Return non-nil if Markdown prose syntax should be ignored at POS."
+  (let ((target (or pos (point))))
+    (or (ellm--in-code-block-p target)
+        (ellm--markdown-disabled-at-p target))))
 
 ;;;;; Core
 
@@ -972,12 +1120,12 @@ when the surrounding text was deleted.")
   "Record pending deletions that will affect a turn delimiter line.
 BEG and END bound the to-be-changed region.  Insertions (BEG == END)
 can't collapse any overlays, so they're ignored."
+  (when (ellm--turn-delimiter-in-region-p beg end)
+    (setq ellm--turn-body-cache-force-rebuild t))
   (when (and (not ellm--pending-delimiter-deletion)
              (/= beg end))
-    (save-excursion
-      (goto-char beg)
-      (when (re-search-forward ellm-turn-regexp end t)
-        (setq ellm--pending-delimiter-deletion (cons beg end))))))
+    (when (ellm--turn-delimiter-in-region-p beg end)
+      (setq ellm--pending-delimiter-deletion (cons beg end)))))
 
 (defun ellm--refresh-rules-around (pos &optional window)
   "Rebuild rule overlays in the local neighborhood of POS.
@@ -1004,6 +1152,7 @@ Optional WINDOW determines the rule width."
   "Update fence cache and rule overlays after a buffer change.
 BEG END OLD-LEN are passed by `after-change'."
   (ellm--update-fences-after-change beg end old-len)
+  (ellm--update-turn-body-cache-after-change beg end old-len)
   ;; If the deletion intersected a delimiter line, every rule overlay
   ;; that lived inside the deleted range has now collapsed to the
   ;; single post-change point.  Sweep just that point for orphans and
@@ -1249,10 +1398,13 @@ the user can edit it without the glyph reappearing on every keystroke."
           (let* ((line-beg (line-beginning-position))
                  (line-end (line-end-position)))
             ;; Skip the currently revealed line so editing it isn't
-            ;; clobbered by font-lock re-runs.
-            (unless (and revealed-beg revealed-end
-                         (<= revealed-beg line-beg)
-                         (<= line-beg revealed-end))
+            ;; clobbered by font-lock re-runs.  Also skip folded lines:
+            ;; outline already hides their real delimiter text, so adding
+            ;; display overlays there makes hidden child turns visible again.
+            (unless (or (invisible-p line-beg)
+                        (and revealed-beg revealed-end
+                             (<= revealed-beg line-beg)
+                             (<= line-beg revealed-end)))
               (let* ((header (match-string-no-properties 1))
                      (role (match-string-no-properties 2))
                      (continuation (ellm--continuation-header-p header))
@@ -1375,6 +1527,13 @@ stored without their leading colon, e.g. `:id call_1' becomes
                           current-beg (point-max))))
               turns))
       (nreverse turns))))
+
+(defun ellm--turn-delimiter-beg (turn)
+  "Return the beginning of TURN's delimiter line."
+  (save-excursion
+    (goto-char (ellm-turn-beg turn))
+    (forward-line -1)
+    (line-beginning-position)))
 
 ;;;;; Frontmatter
 
@@ -2229,10 +2388,22 @@ Level mapping:
         (+ 3 (length (match-string 1 text))))
        (t 1)))))
 
+(defun ellm--outline-match-enabled-p ()
+  "Return non-nil if the current outline regexp match is a real heading.
+Turn delimiters are always structural.  Markdown headings are ignored
+inside fenced code blocks and Markdown-disabled turn bodies."
+  (let ((pos (match-beginning 0)))
+    (or (save-excursion
+          (goto-char pos)
+          (save-match-data
+            (looking-at ellm-turn-regexp)))
+        (not (ellm--markdown-excluded-at-p pos)))))
+
 (defun ellm--outline-search-function (&optional bound move backward looking-at)
-  "Code-block-aware heading search for `outline-search-function'.
-Searches for turn delimiters and Markdown headings while skipping any
-matches that fall inside a fenced code block.
+  "Markdown-aware heading search for `outline-search-function'.
+Searches for turn delimiters and Markdown headings while skipping
+Markdown headings inside fenced code blocks and Markdown-disabled turn
+bodies.
 
 The four optional arguments follow the `outline-search-function'
 contract exactly:
@@ -2246,7 +2417,7 @@ contract exactly:
         (save-excursion
           (forward-line 0)
           (when (and (looking-at re)
-                     (not (ellm--in-code-block-p)))
+                     (ellm--outline-match-enabled-p))
             (set-match-data (match-data))
             t))
       ;; Search mode: find the next/previous heading outside code blocks.
@@ -2255,7 +2426,7 @@ contract exactly:
             found)
         (while (and (not found)
                     (funcall search re bound noerror))
-          (unless (ellm--in-code-block-p (match-beginning 0))
+          (when (ellm--outline-match-enabled-p)
             (setq found t)))
         found))))
 
@@ -2474,12 +2645,10 @@ according to `ellm-fold-tool-calls' / `ellm-fold-reasoning-blocks'."
           (let ((subtree-end
                  (or (cl-loop for next in (cdr rest)
                               when (<= (ellm-turn-depth next) depth)
-                              return (save-excursion
-                                       (goto-char (ellm-turn-beg next))
-                                       (forward-line -1)
-                                       (line-beginning-position)))
+                              return (ellm--turn-delimiter-beg next))
                      (point-max))))
-            (ellm--fold-region-at (ellm-turn-beg turn) subtree-end)))))))
+            (ellm--fold-region-at (ellm--turn-delimiter-beg turn)
+                                  subtree-end)))))))
 
 ;;;; Narrowing
 
@@ -2871,6 +3040,7 @@ Implementations should stream into the assistant turn already appended by
   (outline-minor-mode 1)
   ;; Cache
   (ellm--rebuild-fence-cache)
+  (ellm--rebuild-turn-body-cache)
   ;; Collapse configured turns (tool calls / reasoning) in loaded
   ;; conversations.  Safe here because every turn is already complete.
   (ellm--fold-configured-turns))
