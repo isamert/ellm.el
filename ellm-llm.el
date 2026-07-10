@@ -277,8 +277,7 @@ When `ellm-fold-tool-calls' is non-nil each inserted turn is folded."
   (ellm-llm--ensure-buffer buf request)
   (with-current-buffer buf
     (ellm--preserve-user-position
-      (let* ((inhibit-read-only t)
-             (reasoning (plist-get result :reasoning))
+      (let* ((reasoning (plist-get result :reasoning))
              (text      (plist-get result :text))
              (new-text
               (concat
@@ -331,8 +330,8 @@ is text-only, a fresh trailing `user' turn is appended."
               (funcall partial-render result)
               (with-current-buffer buf
                 (ellm--preserve-user-position
-                  (setq ellm--active-request nil)
                   (let ((recurse nil))
+                    (ellm--set-active-request nil)
                     (if-let* ((tool-uses (plist-get result :tool-uses))
                               (tool-results (plist-get result :tool-results)))
                         (progn
@@ -346,16 +345,24 @@ is text-only, a fresh trailing `user' turn is appended."
                     (when recurse
                       (ellm-llm--send-once provider prompt buf)))))))
            (on-error
-            (lambda (type msg)
-              (ellm-llm--ensure-buffer buf request)
-              (with-current-buffer buf
-                (setq ellm--active-request nil))
-              (signal type (list msg)))))
-      (setq request (llm-chat-streaming
-                     provider prompt
-                     partial-render final-render on-error
-                     'multi-output))
-      (setq ellm--active-request (ellm-llm--make-request :raw request)))))
+             (lambda (type msg)
+               (ellm-llm--ensure-buffer buf request)
+               (with-current-buffer buf
+                 (ellm--set-active-request nil))
+               (signal type (list msg)))))
+      (ellm--set-active-request ellm--request-starting)
+      (condition-case err
+          (progn
+            (setq request (llm-chat-streaming
+                           provider prompt
+                           partial-render final-render on-error
+                           'multi-output))
+            (when (eq ellm--active-request ellm--request-starting)
+              (ellm--set-active-request (ellm-llm--make-request :raw request))))
+        (error
+         (when (eq ellm--active-request ellm--request-starting)
+           (ellm--set-active-request nil))
+         (signal (car err) (cdr err)))))))
 
 (defun ellm-llm--frontmatter-cwd (frontmatter)
   "Return FRONTMATTER's `cwd' as an absolute directory, or nil."

@@ -431,7 +431,8 @@ key whose value is nil."
 This is intended for asynchronous backend insertions into the current
 buffer.  BODY may move point and edit the buffer; visible windows showing
 the buffer are restored to the same logical point and window start after
-the edit."
+the edit.  BODY runs with `inhibit-read-only' so backend insertions can
+update request-locked buffers."
   (declare (indent 0) (debug t))
   `(let* ((ellm--preserve-buffer (current-buffer))
           (ellm--preserve-point (copy-marker (point) nil))
@@ -443,9 +444,10 @@ the edit."
                            (window-hscroll window)))
                    (get-buffer-window-list (current-buffer) nil t))))
      (unwind-protect
-         (save-current-buffer
-           (save-excursion
-             ,@body))
+         (let ((inhibit-read-only t))
+           (save-current-buffer
+             (save-excursion
+               ,@body)))
        (unwind-protect
            (when (buffer-live-p ellm--preserve-buffer)
              (with-current-buffer ellm--preserve-buffer
@@ -1580,15 +1582,17 @@ KEY may be a symbol/string or a list naming a nested path."
 (defun ellm--set-frontmatter-value (key &optional value)
   "Set scalar frontmatter KEY to VALUE in the current buffer.
 When the buffer has no frontmatter, create one at the beginning.  VALUE is
-written as a YAML scalar string.  Nil VALUE deletes KEY."
-  (pcase-let ((fm (ellm--parse-frontmatter))
-              (`(_ _ ,beg ,end _) (ellm--frontmatter-bounds)))
-    (replace-region-contents
-     (or beg (point-min)) (or end (point-min))
-     (lambda ()
-       (concat (unless beg "---\n")
-               (yaml-encode (ellm--alist-set-nested fm key value))
-               (unless beg "\n---\n\n"))))))
+written as a YAML scalar string.  Nil VALUE deletes KEY.  This ignores
+request-time read-only protection."
+  (let ((inhibit-read-only t))
+    (pcase-let ((fm (ellm--parse-frontmatter))
+                (`(_ _ ,beg ,end _) (ellm--frontmatter-bounds)))
+      (replace-region-contents
+       (or beg (point-min)) (or end (point-min))
+       (lambda ()
+         (concat (unless beg "---\n")
+                 (yaml-encode (ellm--alist-set-nested fm key value))
+                 (unless beg "\n---\n\n")))))))
 
 ;;;;; Provider resolution
 
@@ -1778,6 +1782,30 @@ accepted."
   "Active backend request handle for this buffer, or nil.
 Set by `ellm-send' to the object returned by `ellm-backend-send'.
 Cleared on completion, error, or cancellation.")
+
+(defvar-local ellm--request-read-only-state nil
+  "Saved `buffer-read-only' value before the current request locked the buffer.")
+
+(defvar-local ellm--request-read-only-state-saved-p nil
+  "Non-nil when `ellm--request-read-only-state' should be restored.")
+
+(defun ellm--set-active-request (request)
+  "Set active REQUEST for the current buffer.
+Non-nil REQUEST makes the buffer read-only so user edits cannot race with
+streaming backend insertions.  Nil REQUEST restores the previous
+`buffer-read-only' value."
+  (setq ellm--active-request request)
+  (if request
+      (progn
+        (unless ellm--request-read-only-state-saved-p
+          (setq ellm--request-read-only-state buffer-read-only
+                ellm--request-read-only-state-saved-p t))
+        (setq buffer-read-only t))
+    (when ellm--request-read-only-state-saved-p
+      (setq buffer-read-only ellm--request-read-only-state
+            ellm--request-read-only-state nil
+            ellm--request-read-only-state-saved-p nil)))
+  request)
 
 (defconst ellm--frontmatter-keys
   '(("provider"    :ann "provider"
@@ -2722,13 +2750,18 @@ Errors during streaming are signalled normally."
          (buf      (current-buffer))
          request)
     (ellm--insert-turn "assistant")
-    (setq ellm--active-request ellm--request-starting)
-    (setq request (ellm-backend-send provider fm buf))
-    ;; Some backends can complete synchronously while `ellm-backend-send' is
-    ;; still on the stack.  In that case completion already cleared
-    ;; `ellm--active-request'; do not resurrect a stale request handle here.
-    (when (eq ellm--active-request ellm--request-starting)
-      (setq ellm--active-request request))))
+    (ellm--set-active-request ellm--request-starting)
+    (condition-case err
+        (progn
+          (setq request (ellm-backend-send provider fm buf))
+          ;; Some backends can complete synchronously while `ellm-backend-send' is
+          ;; still on the stack.  In that case completion already cleared
+          ;; `ellm--active-request'; do not resurrect a stale request handle here.
+          (when (eq ellm--active-request ellm--request-starting)
+            (ellm--set-active-request request)))
+      (error
+       (ellm--set-active-request nil)
+       (signal (car err) (cdr err))))))
 
 (defun ellm-cancel (&optional quiet)
   "Cancel the in-flight LLM request for this buffer, if any.
@@ -2738,7 +2771,7 @@ If QUIET is non-nil, then do not print any messages."
       (unless quiet
         (message "ellm: no active request"))
     (ellm-backend-cancel ellm--active-request)
-    (setq ellm--active-request nil)
+    (ellm--set-active-request nil)
     (unless quiet
       (message "ellm: request cancelled"))))
 
