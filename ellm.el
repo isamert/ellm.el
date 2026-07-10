@@ -2790,6 +2790,14 @@ keeping frontmatter and an empty user prompt."
                 "Clear buffer, keeping frontmatter? "))
       (ellm--clear-buffer-keeping-frontmatter))))
 
+(defun ellm--close-session-on-kill ()
+  "Best-effort session cleanup for `kill-buffer-hook'."
+  (condition-case err
+      (ellm-close-session)
+    (user-error nil)
+    (error
+     (message "ellm: session cleanup failed: %s" (error-message-string err)))))
+
 (defun ellm-delete-session (&optional select)
   "Delete an ACP/backend session from session history.
 With prefix argument SELECT, choose a session from the backend when supported.
@@ -3022,7 +3030,7 @@ Implementations should stream into the assistant turn already appended by
   (add-hook 'post-command-hook #'ellm--reveal-separator-at-point nil t)
   (add-hook 'completion-at-point-functions #'ellm--frontmatter-capf nil t)
   (add-hook 'completion-at-point-functions #'ellm--slash-command-capf nil t)
-  (add-hook 'kill-buffer-hook #'ellm-close-session nil t)
+  (add-hook 'kill-buffer-hook #'ellm--close-session-on-kill nil t)
   (setq-local outline-regexp (ellm--outline-regexp))
   (setq-local outline-search-function #'ellm--outline-search-function)
   (setq-local outline-level #'ellm--outline-level)
