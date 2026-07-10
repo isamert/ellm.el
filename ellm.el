@@ -623,8 +623,8 @@ Used in {load,enable,disable}-theme hooks."
 
 (defvar ellm--special-lang-name-alist
   '(("elisp" . emacs-lisp-mode))
-  "Same as `ellm--lang-mode-cache' but for language names requiring special handling.
-Also with this, you can override the default language mode inference logic.")
+  "Language names requiring special mode inference.
+Entries here override the default language mode inference logic.")
 
 (defun ellm--lang-mode (lang)
   "Return major mode symbol for LANG, or nil."
