@@ -269,9 +269,9 @@ by `ellm--make-rule-overlay'.  Used as the buffer-local `page-delimiter'
 so `forward-page' / `backward-page' stop at each rendered ruler.")
 
 (defconst ellm-code-block-header-regexp
-  "^[ \t]*``` ?\\([a-zA-Z-]+\\)?\n"
+  "^[ \t]*```\\(?: ?\\([a-zA-Z-]+\\)\\)?[^`\n]*\n"
   "Regexp matching the opening line of a fenced code block.
-Group 1: language.")
+Group 1: language when the info string starts with a supported language tag.")
 
 (defconst ellm-code-block-end-regexp
   "^[ \t]*```\n"
@@ -280,7 +280,7 @@ Group 1: language.")
 (defconst ellm-code-block-fence-regexp
   "^[ \t]*```"
   "Regexp matching any fenced code block line (open or close).
-Anchored at beginning of line; the line may have a language tag after it
+Anchored at beginning of line; the line may have an info string after it
 or be a bare ``` close fence.")
 
 (defconst ellm-code-block-regexp
