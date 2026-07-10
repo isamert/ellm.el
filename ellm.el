@@ -1539,6 +1539,22 @@ stored without their leading colon, e.g. `:id call_1' becomes
 
 ;;;;; Frontmatter
 
+(defvar-local ellm--frontmatter-cache-valid nil
+  "Non-nil when `ellm--frontmatter-cache-*' reflects the last parsed body.")
+
+(defvar-local ellm--frontmatter-cache-body nil
+  "YAML frontmatter body string used for the cached parse result.")
+
+(defvar-local ellm--frontmatter-cache-value nil
+  "Cached parsed YAML frontmatter value.")
+
+(defvar-local ellm--frontmatter-cache-error nil
+  "Cached parse error for `ellm--frontmatter-cache-body', or nil.")
+
+(defun ellm--warn-frontmatter-parse-error (err)
+  "Warn about frontmatter parse ERR."
+  (lwarn 'ellm :warning "Failed to parse frontmatter: %S" err))
+
 (defun ellm--frontmatter-bounds ()
   "Return (BEG END CONTENTS-BEG CONTENTS-END CONTENTS) of YAML frontmatter.
 BEG is `point-min'; END is the position just after the closing `---'
@@ -1561,18 +1577,36 @@ delimiter line (i.e. the end of the match against
 Keys are symbols.  Returns nil when there is no frontmatter or when
 parsing fails.  Unless QUIET is non-nil, parsing failures issue a
 `lwarn'."
-  (when-let* ((bounds (ellm--frontmatter-bounds))
-              (body (nth 4 bounds)))
-    (condition-case err
-        (yaml-parse-string body
-                           :object-type 'alist
-                           :sequence-type 'list
-                           :null-object nil
-                           :false-object nil)
-      (error
-       (unless quiet
-         (lwarn 'ellm :warning "Failed to parse frontmatter: %S" err))
-       nil))))
+  (if-let* ((bounds (ellm--frontmatter-bounds))
+            (body (nth 4 bounds)))
+      (if (and ellm--frontmatter-cache-valid
+               (equal body ellm--frontmatter-cache-body))
+          (progn
+            (when (and ellm--frontmatter-cache-error (not quiet))
+              (ellm--warn-frontmatter-parse-error
+               ellm--frontmatter-cache-error))
+            (copy-tree ellm--frontmatter-cache-value))
+        (condition-case err
+            (let ((value (yaml-parse-string body
+                                            :object-type 'alist
+                                            :sequence-type 'list
+                                            :null-object nil
+                                            :false-object nil)))
+              (setq ellm--frontmatter-cache-valid t
+                    ellm--frontmatter-cache-body body
+                    ellm--frontmatter-cache-value (copy-tree value)
+                    ellm--frontmatter-cache-error nil)
+              (copy-tree value))
+          (error
+           (setq ellm--frontmatter-cache-valid t
+                 ellm--frontmatter-cache-body body
+                 ellm--frontmatter-cache-value nil
+                 ellm--frontmatter-cache-error err)
+           (unless quiet
+             (ellm--warn-frontmatter-parse-error err))
+           nil)))
+    (setq ellm--frontmatter-cache-valid nil)
+    nil))
 
 (defun ellm--frontmatter-value (key)
   "Return frontmatter KEY from the current buffer.

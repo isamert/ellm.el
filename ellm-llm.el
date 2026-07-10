@@ -248,9 +248,11 @@ When `ellm-fold-tool-calls' is non-nil each inserted turn is folded."
           copy)
       (error provider))))
 
-(defun ellm-llm--parse-buffer-as-chat (provider)
-  "Build an `llm-chat-prompt' from the current buffer for PROVIDER."
-  (let* ((fm          (ellm--parse-frontmatter))
+(cl-defun ellm-llm--parse-buffer-as-chat
+    (provider &optional (frontmatter (ellm--parse-frontmatter)))
+  "Build an `llm-chat-prompt' from the current buffer for PROVIDER.
+FRONTMATTER, when supplied, is the already parsed YAML frontmatter alist."
+  (let* ((fm          frontmatter)
          (turns       (cl-loop for turn in (ellm--parse-turns)
                                unless (equal "reasoning" (ellm-turn-role turn))
                                collect turn))
@@ -383,7 +385,7 @@ when they later re-enter the buffer."
   "Send BUFFER through a normal `llm.el' PROVIDER."
   (with-current-buffer buffer
     (ellm-llm--apply-cwd frontmatter)
-    (let ((prompt (ellm-llm--parse-buffer-as-chat provider)))
+    (let ((prompt (ellm-llm--parse-buffer-as-chat provider frontmatter)))
       (ellm-llm--send-once provider prompt buffer))))
 
 ;;;;; Utility
