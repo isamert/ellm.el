@@ -1434,6 +1434,20 @@ not for the selected window (which may be on an unrelated buffer)."
         (when (derived-mode-p 'ellm-mode)
           (ellm--rebuild-turn-rules win))))))
 
+(defvar-local ellm--was-narrowed-p nil
+  "Non-nil if this buffer was narrowed after the previous command.")
+
+(defun ellm--refresh-rules-after-widen ()
+  "Rebuild turn rule overlays after an interactive narrowing exit.
+Narrowed fontification can legitimately remove rule overlays whose anchor
+falls outside the accessible part of the buffer.  When the buffer is widened
+again, rebuild from the full buffer so those rulers come back even if no
+subsequent edit happens near them."
+  (let ((narrowed (buffer-narrowed-p)))
+    (when (and ellm--was-narrowed-p (not narrowed))
+      (ellm--rebuild-turn-rules))
+    (setq ellm--was-narrowed-p narrowed)))
+
 ;;;;;; Pretty separators
 
 (defvar-local ellm--revealed-separator-overlay nil
@@ -3195,6 +3209,7 @@ Implementations should stream into the assistant turn already appended by
   (add-hook 'before-change-functions #'ellm--before-change-function nil t)
   (add-hook 'after-change-functions #'ellm--after-change-function nil t)
   (add-hook 'window-size-change-functions #'ellm--update-rules nil t)
+  (add-hook 'post-command-hook #'ellm--refresh-rules-after-widen nil t)
   (add-hook 'post-command-hook #'ellm--reveal-separator-at-point nil t)
   (add-hook 'completion-at-point-functions #'ellm--frontmatter-capf nil t)
   (add-hook 'completion-at-point-functions #'ellm--slash-command-capf nil t)
@@ -3217,6 +3232,7 @@ Implementations should stream into the assistant turn already appended by
   ;; Cache
   (ellm--rebuild-fence-cache)
   (ellm--rebuild-turn-body-cache)
+  (setq ellm--was-narrowed-p (buffer-narrowed-p))
   ;; Collapse configured turns (tool calls / reasoning) in loaded
   ;; conversations.  Safe here because every turn is already complete.
   (ellm--fold-configured-turns))
