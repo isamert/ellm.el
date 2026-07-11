@@ -133,6 +133,17 @@ a whole category with `tools: [\"@shell\"]'."
   :type '(repeat (restricted-sexp :match-alternatives (ellm-tool-p)))
   :group 'ellm)
 
+(defcustom ellm-tools-transform-tool-result-functions
+  '(ellm-tools--coerce-tool-result-to-string
+    ellm-tools--escape-tool-result-turn-delimiters)
+  "Functions used to transform tool text before serializing it.
+Each function is called with TOOL, ARGS, ERROR and RESULT, and must return
+the next RESULT value.  Custom tools use this for returned results; ACP
+and backend renderers also use it for tool params/results before writing
+them into conversation buffers."
+  :type 'hook
+  :group 'ellm)
+
 (defcustom ellm-mcp-servers nil
   "Alist of MCP server configurations available to ellm buffers.
 
@@ -779,6 +790,39 @@ it."
                   (shade-end (min body-end end)))
               (font-lock-append-text-property
                shade-beg shade-end 'face shade))))))))
+
+;;;; Tools
+
+(defun ellm-tools--transform-tool-result (tool args error? raw)
+  "Return RAW after running tool result transformer functions.
+TOOL is a tool identifier, ARGS are the tool arguments when known, and
+ERROR is non-nil when RAW represents an error result."
+  (let ((result raw))
+    (dolist (fn ellm-tools-transform-tool-result-functions)
+      (setq result (funcall fn tool args error? result)))
+    result))
+
+(defun ellm-tools--coerce-tool-result-to-string (_tool _args _error? raw)
+  "Return RAW as a string suitable for serialized tool text."
+  (cond
+   ((null raw) "")
+   ((stringp raw) raw)
+   (t (format "%s" raw))))
+
+(defun ellm-tools--escape-tool-result-turn-delimiters (_tool _args _error? raw)
+  "Prevent RAW tool text from being parsed as ellm turn delimiters.
+Tool params and results are serialized directly into conversation buffers,
+so a raw line beginning with `>-|', `>>-|', or `>>>-|' would become
+structural on the next parse.  Prefix such lines with one space while
+leaving the rest of the output unchanged."
+  (replace-regexp-in-string
+   (concat "^\\("
+           (regexp-quote ellm-turn-header-3) "\\|"
+           (regexp-quote ellm-turn-header-2) "\\|"
+           (regexp-quote ellm-turn-header-1)
+           "\\) ")
+   " \\&"
+   raw))
 
 ;;;; Fontification
 
@@ -1575,6 +1619,12 @@ stored without their leading colon, e.g. `:id call_1' becomes
 
 (defvar-local ellm--frontmatter-cache-error nil
   "Cached parse error for `ellm--frontmatter-cache-body', or nil.")
+
+(defvar-local ellm--base-default-directory nil
+  "Buffer default directory before applying frontmatter `cwd:'.")
+
+(defvar-local ellm--frontmatter-cwd-directory nil
+  "Resolved directory from frontmatter `cwd:', or nil when unset.")
 
 (defun ellm--warn-frontmatter-parse-error (err)
   "Warn about frontmatter parse ERR."
@@ -2436,7 +2486,9 @@ as a nested `tool-param' turn so values remain visible and parseable."
   (dolist (param params)
     (ellm--insert-turn "tool-param" :pipe-arg (format "%s" (car param)))
     (insert (ellm--ensure-newline
-             (ellm--format-tool-param-value (cdr param))))))
+             (ellm-tools--transform-tool-result
+              name (list param) nil
+              (ellm--format-tool-param-value (cdr param)))))))
 
 ;;;;;; Outline / folding
 
@@ -3110,6 +3162,8 @@ Implementations should stream into the assistant turn already appended by
 (define-derived-mode ellm-mode text-mode "eLLM"
   "Major mode for LLM interaction buffers."
   (setq-local ellm-buffer-state (ellm--make-buffer-state))
+  (unless ellm--base-default-directory
+    (setq-local ellm--base-default-directory default-directory))
   (setq-local font-lock-defaults '(ellm-font-lock-keywords t))
   (setq-local font-lock-multiline t)
   (setq-local font-lock-fontify-region-function #'ellm--fontify-region)

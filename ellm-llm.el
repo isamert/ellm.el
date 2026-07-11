@@ -222,7 +222,8 @@ output.  ARGS is an alist of (ARG-SYM . VALUE)."
 (defun ellm-llm--insert-tool-result (id name result)
   "Insert a `tool-result' turn for NAME pairing call ID with RESULT body."
   (ellm--insert-turn "tool-result" :pipe-arg name :id id)
-  (insert (format "%s\n" result)))
+  (insert (ellm--ensure-newline
+           (ellm-tools--transform-tool-result name nil nil result))))
 
 (defun ellm-llm--render-tool-uses (tool-uses tool-results)
   "Insert `tool-call' / `tool-result' turns for TOOL-USES and TOOL-RESULTS.
@@ -369,17 +370,24 @@ is text-only, a fresh trailing `user' turn is appended."
 (defun ellm-llm--frontmatter-cwd (frontmatter)
   "Return FRONTMATTER's `cwd' as an absolute directory, or nil."
   (when-let* ((cwd (alist-get 'cwd frontmatter)))
-    (file-name-as-directory (expand-file-name cwd))))
+    (file-name-as-directory
+     (expand-file-name cwd (or ellm--base-default-directory
+                               default-directory)))))
 
 (defun ellm-llm--apply-cwd (frontmatter)
   "Apply FRONTMATTER `cwd:' to the current ellm buffer.
-This sets buffer-local `default-directory' instead of dynamically binding
+  This sets buffer-local `default-directory' instead of dynamically binding
 it so async callbacks and llm.el tool execution keep using the same cwd
 when they later re-enter the buffer."
-  (when-let* ((cwd (ellm-llm--frontmatter-cwd frontmatter)))
-    (unless (file-directory-p cwd)
-      (user-error "ellm: cwd does not exist: %s" cwd))
-    (setq-local default-directory cwd)))
+  (let ((base (or ellm--base-default-directory default-directory)))
+    (setq-local ellm--frontmatter-cwd-directory nil)
+    (if-let* ((cwd (ellm-llm--frontmatter-cwd frontmatter)))
+        (progn
+          (unless (file-directory-p cwd)
+            (user-error "ellm: cwd does not exist: %s" cwd))
+          (setq-local ellm--frontmatter-cwd-directory cwd)
+          (setq-local default-directory cwd))
+      (setq-local default-directory base))))
 
 (defun ellm-llm--backend-send (provider frontmatter buffer)
   "Send BUFFER through a normal `llm.el' PROVIDER."

@@ -1625,6 +1625,16 @@ objects otherwise look like malformed plists to `json-serialize'."
                 (format "\n[... truncated %d chars]\n"
                         (- (length text) limit)))))))
 
+(cl-defun ellm-acp--tool-result-detail-text (update &key skip-raw-input)
+  "Return transformed and limited body text for ACP tool result UPDATE."
+  (ellm-acp--limited-tool-detail-text
+   (ellm-tools--transform-tool-result
+    (or (plist-get update :title) 'ellm-acp-tool)
+    (and (plist-member update :rawInput)
+         (ellm-acp--raw-input-params (plist-get update :rawInput)))
+    nil
+    (ellm-acp--tool-update-text update :skip-raw-input skip-raw-input))))
+
 (defun ellm-acp--insert-tool-params (params)
   "Insert PARAMS as nested `tool-param' turns at point."
   (when (ellm-acp--tool-details-enabled-p)
@@ -1635,7 +1645,9 @@ objects otherwise look like malformed plists to `json-serialize'."
               "\n")
       (insert (ellm--ensure-newline
                (ellm-acp--limited-tool-detail-text
-                (ellm--format-tool-param-value (cdr param))))))))
+                (ellm-tools--transform-tool-result
+                 'ellm-acp-tool-param (list param) nil
+                 (ellm--format-tool-param-value (cdr param)))))))))
 
 (defun ellm-acp--tool-state (connection id)
   "Return CONNECTION's rendered tool state for ID, or nil."
@@ -1742,8 +1754,8 @@ objects otherwise look like malformed plists to `json-serialize'."
     (setq body-beg (point-marker))
     (set-marker-insertion-type body-beg nil)
     (when (ellm-acp--tool-details-enabled-p)
-      (insert (ellm-acp--limited-tool-detail-text
-               (ellm-acp--tool-update-text update :skip-raw-input t))))
+      (insert (ellm-acp--tool-result-detail-text
+               update :skip-raw-input t)))
     (setq result-end (point-marker))
     (set-marker-insertion-type result-end nil)
     (when (and connection id)
@@ -1764,8 +1776,8 @@ objects otherwise look like malformed plists to `json-serialize'."
     (ellm-acp--replace-region-with
      (ellm-acp-rendered-tool-result-body-beg state)
      (ellm-acp-rendered-tool-result-end state)
-     (ellm-acp--limited-tool-detail-text
-      (ellm-acp--tool-update-text update :skip-raw-input t)))))
+      (ellm-acp--tool-result-detail-text
+       update :skip-raw-input t))))
 
 (defun ellm-acp--insert-tool-update (update &optional connection)
   "Insert or update ACP tool call UPDATE as live rendered turns."

@@ -38,6 +38,7 @@
 
 (defgroup ellm-tools nil
   "Settings for `ellm-tools'."
+  :group 'ellm
   :link '(url-link "https://github.com/isamert/ellm.el"))
 
 (defcustom ellm-tools-current-project-function #'ellm-tools-current-project-root
@@ -45,6 +46,15 @@
 Some of the tools functionality depends on finding the root of the
 current project.  Default implementation simply finds the closest .git
 directories parent folder."
+  :type 'function
+  :group 'ellm-tools)
+
+(defcustom ellm-tools-default-timeout 60
+  "Default timeout in seconds for asynchronous ellm tools.
+Set to nil to disable the macro-level timeout.  Individual tools can
+override this with `:timeout' in `ellm-deftool' SPECS."
+  :type '(choice (const :tag "No timeout" nil)
+                 (number :tag "Seconds"))
   :group 'ellm-tools)
 
 ;;;; Variables
@@ -59,6 +69,20 @@ or `llm-make-tool' etc. via doing something like:
     (lambda (tool) (apply #\\='gptel-make-tool (symbol-value tool)))
     `ellm-tools-refs')")
 
+(defcustom ellm-tools-tool-call-start-hook nil
+  "Hook run before an ellm tool body starts.
+Each function is called with TOOL and ARGS, where TOOL is the tool
+definition symbol and ARGS is the positional argument list passed to it."
+  :type 'hook
+  :group 'ellm-tools)
+
+(defcustom ellm-tools-tool-call-end-hook nil
+  "Hook run after an ellm tool finishes.
+Each function is called with TOOL, ARGS, ERROR, RAW and RESULT.  RAW is
+the pre-transform result; RESULT is the value returned to the model."
+  :type 'hook
+  :group 'ellm-tools)
+
 ;;;; `ellm-deftool' macro
 
 (eval-and-compile
@@ -72,6 +96,20 @@ or `llm-make-tool' etc. via doing something like:
                (const-sym (intern (format "ellm-tools/%s-tool" tool-name-def)))
                (lambda-args (mapcar #'car arglist))
                (async? (plist-get specs :async))
+               (timeout-expr (if (plist-member specs :timeout)
+                                 (plist-get specs :timeout)
+                               'ellm-tools-default-timeout))
+               (callback-sym (gensym "callback-"))
+               (tool-sym (gensym "tool-"))
+               (tool-args-sym (gensym "tool-args-"))
+               (raw-sym (gensym "raw-"))
+               (result-sym (gensym "result-"))
+               (error-sym (gensym "error-"))
+               (err-sym (gensym "err-"))
+               (timer-sym (gensym "timer-"))
+               (timeout-sym (gensym "timeout-"))
+               (done-sym (gensym "done-"))
+               (cancel-sym (gensym "cancel-"))
                (param-name-replacements
                 (seq-mapn
                  #'cons
@@ -96,46 +134,86 @@ or `llm-make-tool' etc. via doing something like:
                                  param-name-replacements
                                  (nth 2 it))))
                         arglist)
-               :function #',const-sym
-               :category ,category)
-         ,(format "Tool definition plist for %s.\n%s" name doc))
-       ,(if async?
-            ;; TODO: Define timeouts for async functions and raise a
-            ;; timeout error. Users should be able to define :timeout
-            ;; through the SPECS and there should be a default value
-
-            ;; TODO: Fix lexical variables via gensym for hygine
-            `(defun ,const-sym (callback ,@lambda-args)
-               (let ((tool-args (list ,@lambda-args))
-                     (error? nil))
-                 (ellm-tools--tool-call-start-hook ',const-sym tool-args)
-                 (cl-flet ((callback (raw-result)
-                                     (let ((result (ellm-tools--transform-tool-result
-                                                    tool-args ',const-sym error? raw-result)))
-                                       (ellm-tools--tool-call-end-hook
-                                        ',const-sym tool-args error? raw-result result)
-                                       (funcall callback result))))
-                   (condition-case err
-                       (progn ,@body)
-                     (error
-                      (funcall callback (format "Error while calling the tool: %s" err)))))))
-          `(defun ,const-sym ,lambda-args
-             ,doc
-             (let ((tool-args (list ,@lambda-args)))
-               (ellm-tools--tool-call-start-hook ',const-sym tool-args)
-               (let* ((error? nil)
-                      (raw-result
-                       (condition-case err
-                           (progn ,@body)
-                         (error
-                          (setq error? t)
-                          (format "Error while calling the tool: %s" err))))
-                      (result (ellm-tools--transform-tool-result
-                               tool-args ',const-sym error? raw-result)))
-                 (ellm-tools--tool-call-end-hook
-                  ',const-sym tool-args error? raw-result result)
-                 result))))
-       (cl-pushnew ',const-sym ellm-tools-refs)
+                :function #',const-sym
+                :category ,category)
+          ,(format "Tool definition plist for %s.\n%s" name doc))
+        ,(if async?
+             `(defun ,const-sym (,callback-sym ,@lambda-args)
+                ,doc
+                (let* ((,tool-sym ',const-sym)
+                       (,tool-args-sym (list ,@lambda-args))
+                       (,timeout-sym ,timeout-expr)
+                       (,done-sym nil)
+                       (,timer-sym nil)
+                       (,cancel-sym nil)
+                       (callback
+                        (lambda (,raw-sym &optional ,error-sym)
+                          (unless ,done-sym
+                            (let ((,result-sym
+                                   (ellm-tools--transform-tool-result
+                                     ,tool-sym ,tool-args-sym ,error-sym ,raw-sym)))
+                              (setq ,done-sym t)
+                              (when ,timer-sym
+                                (cancel-timer ,timer-sym))
+                              (ellm-tools--tool-call-end-hook
+                               ,tool-sym ,tool-args-sym ,error-sym
+                               ,raw-sym ,result-sym)
+                              (funcall ,callback-sym ,result-sym))))))
+                  (condition-case ,err-sym
+                      (progn
+                        (ellm-tools--tool-call-start-hook
+                         ,tool-sym ,tool-args-sym)
+                        (when ,timeout-sym
+                          (setq ,timer-sym
+                                (run-at-time
+                                 ,timeout-sym nil
+                                 (lambda ()
+                                   (ellm-tools--cancel-async-handle
+                                    ,cancel-sym)
+                                   (funcall
+                                    callback
+                                    (format "Error while calling the tool: timed out after %s seconds"
+                                            ,timeout-sym)
+                                    t)))))
+                        (cl-flet ((callback (,raw-sym)
+                                            (funcall callback ,raw-sym)))
+                          (setq ,cancel-sym (progn ,@body))))
+                    (error
+                     (funcall callback
+                              (format "Error while calling the tool: %s"
+                                      ,err-sym)
+                              t)))
+                  ,cancel-sym))
+           `(defun ,const-sym ,lambda-args
+              ,doc
+              (let ((,tool-sym ',const-sym)
+                    (,tool-args-sym (list ,@lambda-args)))
+                (condition-case ,err-sym
+                    (progn
+                      (ellm-tools--tool-call-start-hook
+                       ,tool-sym ,tool-args-sym)
+                      (let* ((,error-sym nil)
+                             (,raw-sym (progn ,@body))
+                             (,result-sym
+                              (ellm-tools--transform-tool-result
+                               ,tool-sym ,tool-args-sym ,error-sym ,raw-sym)))
+                        (ellm-tools--tool-call-end-hook
+                         ,tool-sym ,tool-args-sym ,error-sym
+                         ,raw-sym ,result-sym)
+                        ,result-sym))
+                  (error
+                   (let* ((,error-sym t)
+                          (,raw-sym
+                           (format "Error while calling the tool: %s"
+                                   ,err-sym))
+                          (,result-sym
+                           (ellm-tools--transform-tool-result
+                            ,tool-sym ,tool-args-sym ,error-sym ,raw-sym)))
+                     (ellm-tools--tool-call-end-hook
+                      ,tool-sym ,tool-args-sym ,error-sym
+                      ,raw-sym ,result-sym)
+                     ,result-sym))))))
+        (cl-pushnew ',const-sym ellm-tools-refs)
        (setq ellm-tools-list
              (cl-remove-if (lambda (it) (equal (ellm-tool-name it) ,tool-name))
                            ellm-tools-list))
@@ -144,15 +222,31 @@ or `llm-make-tool' etc. via doing something like:
 
 ;;;; Tool lifecycle
 
-(defun ellm-tools--tool-call-start-hook (hook args)
-  (message "TODO: tool start hook"))
+(defun ellm-tools--tool-call-start-hook (tool args)
+  "Run `ellm-tools-tool-call-start-hook' for TOOL with ARGS."
+  (run-hook-with-args 'ellm-tools-tool-call-start-hook tool args))
 
-(defun ellm-tools--tool-call-end-hook (hook args error? raw result)
-  (message "TODO: tool start hook"))
+(defun ellm-tools--tool-call-end-hook (tool args error? raw result)
+  "Run `ellm-tools-tool-call-end-hook' for TOOL completion."
+  (condition-case err
+      (run-hook-with-args
+       'ellm-tools-tool-call-end-hook tool args error? raw result)
+    (error
+     (message "ellm-tools: tool end hook error: %s"
+              (error-message-string err)))))
 
-(defun ellm-tools--transform-tool-result (hook args error? raw)
-  (message "TODO: tool result transformer")
-  raw)
+(defun ellm-tools--cancel-async-handle (handle)
+  "Best-effort cancellation for async tool HANDLE."
+  (condition-case nil
+      (cond
+       ((processp handle)
+        (when (process-live-p handle)
+          (kill-process handle)))
+       ((timerp handle)
+        (cancel-timer handle))
+       ((functionp handle)
+        (funcall handle)))
+    (error nil)))
 
 (defun ellm-tools--error (reason &rest args)
   (if args
@@ -175,27 +269,31 @@ or `llm-make-tool' etc. via doing something like:
 The command is run via the system shell and the default directory is the
 root of the current project. The command has no stdin (EOF immediately)
 and is killed after 60 seconds if still running."
-  (let* ((default-directory (ellm-tools-current-project-root))
+  (let* ((default-directory (ellm-tools--default-directory))
          (process-connection-type nil)
          (buf (generate-new-buffer " *ellm-tools-shell*"))
          (proc (start-process-shell-command
                 "ellm-tools-shell" buf command)))
     (process-send-eof proc)
-    (let ((timer (run-at-time 60 nil
-                              (lambda ()
-                                (when (process-live-p proc)
-                                  (kill-process proc))))))
-      (set-process-sentinel
-       proc
-       (lambda (process _event)
-         (when (memq (process-status process) '(exit signal))
-           (cancel-timer timer)
-           (let ((output (with-current-buffer (process-buffer process)
-                           (buffer-string)))
-                 (exit-code (process-exit-status process)))
-             (kill-buffer (process-buffer process))
-             (funcall callback
-                      (format "Exit code: %d\n%s" exit-code output)))))))))
+    (set-process-sentinel
+     proc
+     (lambda (process _event)
+       (when (memq (process-status process) '(exit signal))
+         (let* ((process-buffer (process-buffer process))
+                (output (if (buffer-live-p process-buffer)
+                            (with-current-buffer process-buffer
+                              (buffer-string))
+                          ""))
+                (exit-code (process-exit-status process)))
+           (when (buffer-live-p process-buffer)
+             (kill-buffer process-buffer))
+           (funcall callback
+                    (format "Exit code: %d\n%s" exit-code output))))))
+    (lambda ()
+      (when (process-live-p proc)
+        (kill-process proc))
+      (when (buffer-live-p buf)
+        (kill-buffer buf)))))
 
 ;;;;; Files
 
@@ -207,7 +305,8 @@ and is killed after 60 seconds if still running."
   "Edit a file by replacing OLD-STRING with NEW-STRING.
 OLD-STRING must appear exactly once in the file unless REPLACE-ALL
 is non-nil, in which case all occurrences are replaced."
-  (ellm-tools--edit-tool file-path old-string new-string replace-all))
+  (let ((default-directory (ellm-tools--default-directory)))
+    (ellm-tools--edit-tool file-path old-string new-string replace-all)))
 
 (ellm-deftool files/read-file-lines ()
   ((file-path :string "Path to the file. Path is relative to the current project's root.")
@@ -219,15 +318,17 @@ is non-nil, in which case all occurrences are replaced."
             (< start-line 1)
             (< end-line start-line))
     (ellm-tools--error "invalid input"))
-  (let ((default-directory (funcall ellm-tools-current-project-function)))
+  (let ((default-directory (ellm-tools--default-directory)))
     (with-temp-buffer
       (insert-file-contents file-path)
       (let ((start-pos (progn (goto-char (point-min)) (forward-line (1- start-line)) (point)))
-            (end-pos (progn (goto-char (point-min)) (forward-line (1- end-line)) (point))))
-        (concat
-         (format "<file_lines start_line=%s end_line=%s>\n" start-line end-line)
-         (buffer-substring-no-properties start-pos end-pos)
-         "\n</file_lines>")))))
+            (end-pos (progn (goto-char (point-min)) (forward-line end-line) (point))))
+        (let ((content (buffer-substring-no-properties start-pos end-pos)))
+          (concat
+           (format "<file_lines start_line=%s end_line=%s>\n" start-line end-line)
+           content
+           (unless (string-suffix-p "\n" content) "\n")
+           "</file_lines>"))))))
 
 ;;;;; Buffers
 
@@ -239,11 +340,17 @@ is non-nil, in which case all occurrences are replaced."
   "Edit a buffer by replacing OLD-STRING with NEW-STRING.
 OLD-STRING must appear exactly once in the buffer unless REPLACE-ALL
 is non-nil, in which case all occurrences are replaced."
-  (ellm-tools--edit-tool (get-buffer buffer-name) old-string new-string replace-all))
+  (when (or (not (stringp buffer-name))
+            (string-empty-p buffer-name)
+            (not (get-buffer buffer-name)))
+    (ellm-tools--error "invalid buffer name"))
+  (ellm-tools--edit-tool (get-buffer buffer-name)
+                         old-string new-string replace-all))
 
 (ellm-deftool buffers/list-buffers ()
   ()
-  "List names of open buffers. Act directly on buffers if you know the name already, without listing."
+  "List names of open buffers.
+Act directly on buffers if you know the name already, without listing."
   (ellm-tools--success
    (concat
     "<buffers>\n"
@@ -262,9 +369,15 @@ is non-nil, in which case all occurrences are replaced."
    (end-line :integer "Ending line number (1-indexed). Optional." &optional))
   "Return the contents of the buffer with the given name (max 500 lines).
 Optionally specify a line range."
-  (when (or (string-empty-p buffer-name)
-            (not (get-buffer buffer-name)))
-    (ellm-tools--error "Operation failed: invalid input." ))
+  (when (or (not (stringp buffer-name))
+            (string-empty-p buffer-name)
+            (not (get-buffer buffer-name))
+            (and start-line
+                 (or (not (integerp start-line)) (< start-line 1)))
+            (and end-line
+                 (or (not (integerp end-line)) (< end-line 1)))
+            (and start-line end-line (< end-line start-line)))
+    (ellm-tools--error "Operation failed: invalid input" ))
   (with-current-buffer buffer-name
     (let* ((start-pos (if start-line
                           (save-excursion
@@ -296,8 +409,11 @@ Optionally specify a line range."
    (pattern :string "The search pattern to look for.")
    (regexp :boolean "If true, treat pattern as a regular expression. Default is false." &optional)
    (case-sensitive :boolean "If true, search is case-sensitive. By default does a case-insensitive search." &optional))
-  "Search for a PATTERN in buffer BUFFER-NAME and return matching lines with line numbers (max 50 matches)."
-  (when (or (string-empty-p buffer-name) (not (get-buffer buffer-name)))
+  "Search for PATTERN in BUFFER-NAME.
+Return matching lines with line numbers, capped at 50 matches."
+  (when (or (not (stringp buffer-name))
+            (string-empty-p buffer-name)
+            (not (get-buffer buffer-name)))
     (ellm-tools--error "invalid buffer name"))
   (when (s-blank? pattern)
     (ellm-tools--error "search pattern is empty"))
@@ -305,16 +421,24 @@ Optionally specify a line range."
     (let ((case-fold-search (not case-sensitive))
           (search-fn (if regexp #'re-search-forward #'search-forward))
           (matches '())
+          (done nil)
           (max-matches 50))
       (save-excursion
         (goto-char (point-min))
-        (while (and (< (length matches) max-matches)
+        (while (and (not done)
+                    (< (length matches) max-matches)
                     (funcall search-fn pattern nil t))
-          (let* ((line-num (line-number-at-pos (match-beginning 0)))
+          (let* ((match-beg (match-beginning 0))
+                 (match-end (match-end 0))
+                 (line-num (line-number-at-pos match-beg))
                  (line-content (buffer-substring-no-properties
                                 (line-beginning-position)
                                 (line-end-position))))
-            (push (format "%d: %s" line-num line-content) matches))))
+            (push (format "%d: %s" line-num line-content) matches)
+            (when (= match-beg match-end)
+              (if (eobp)
+                  (setq done t)
+                (forward-char 1))))))
       (if matches
           (concat
            (format "<search_results buffer=%S pattern=%S matches=%d%s>\n"
@@ -324,9 +448,22 @@ Optionally specify a line range."
            "\n</search_results>")
         (format "No matches found for %S in buffer %S." pattern buffer-name)))))
 
+
+(declare-function flymake-diagnostic-beg "flymake")
+(declare-function flymake-diagnostic-end "flymake")
+(declare-function flymake-diagnostic-type "flymake")
+(declare-function flymake-diagnostic-text "flymake")
+
+;; TODO: Make the issue backend configurable: flymake, flycheck, ...?
 (ellm-deftool buffers/get-buffer-issues ()
   ((buffer :string "Name of the buffer to get flymake diagnostics for."))
-  "List all current flymake diagnostics for given buffer with line-range:type:message."
+  "List current Flymake diagnostics for BUFFER.
+Each issue is returned as line-range:type:message."
+  (when (or (not (stringp buffer))
+            (string-empty-p buffer)
+            (not (get-buffer buffer)))
+    (ellm-tools--error "invalid buffer name"))
+  (require 'flymake)
   (with-current-buffer (get-buffer buffer)
     (let ((issues (flymake-diagnostics)))
       (if issues
@@ -350,6 +487,16 @@ Optionally specify a line range."
   (when-let* ((path (locate-dominating-file default-directory ".git")))
     (expand-file-name path)))
 
+(defun ellm-tools--default-directory ()
+  "Return the directory custom tools should use for relative paths."
+  (file-name-as-directory
+   (expand-file-name
+    (or (and ellm--frontmatter-cwd-directory
+             (file-directory-p ellm--frontmatter-cwd-directory)
+             ellm--frontmatter-cwd-directory)
+        (funcall ellm-tools-current-project-function)
+        default-directory))))
+
 ;;;;; Internal
 
 (defun ellm-tools--edit-tool (buffer-or-file old-string new-string &optional replace-all)
@@ -357,37 +504,44 @@ Optionally specify a line range."
 BUFFER-OR-FILE is either a buffer object or a file path string.
 If REPLACE-ALL is non-nil, replace all occurrences; otherwise replace
 exactly one occurrence."
+  (unless buffer-or-file
+    (ellm-tools--error "invalid target"))
+  (unless (stringp old-string)
+    (ellm-tools--error "`old_string' must be a string"))
+  (unless (stringp new-string)
+    (ellm-tools--error "`new_string' must be a string"))
   (when (string= old-string "")
     (ellm-tools--error "`old_string' cannot be empty"))
   (let* ((is-file? (not (bufferp buffer-or-file)))
-         (name (if is-file?
-                   (concat "file " buffer-or-file)
-                 (concat "buffer " (buffer-name buffer-or-file))))
-         (file-path (when is-file? (expand-file-name buffer-or-file)))
-         (existing-buffer (when file-path (find-buffer-visiting file-path))))
-    (if (bufferp buffer-or-file)
-        (with-current-buffer buffer-or-file
-          (ellm-tools--do-edit old-string new-string replace-all name))
-      (if existing-buffer
-          ;; There's an existing buffer; edit in temp buffer, write file, revert existing buffer
-          (let ((temp-buf (generate-new-buffer " *temp*")))
+          (name (if is-file?
+                    (concat "file " buffer-or-file)
+                  (concat "buffer " (buffer-name buffer-or-file))))
+          (file-path (when is-file? (expand-file-name buffer-or-file)))
+          (existing-buffer (when file-path (find-buffer-visiting file-path))))
+    (cond
+     ((bufferp buffer-or-file)
+      (with-current-buffer buffer-or-file
+        (ellm-tools--do-edit old-string new-string replace-all name)))
+     (existing-buffer
+      (when (buffer-modified-p existing-buffer)
+        (ellm-tools--error
+         "Refusing to edit %s because it has unsaved changes" name))
+      (with-current-buffer existing-buffer
+        (let ((result (ellm-tools--do-edit
+                       old-string new-string replace-all name)))
+          (save-buffer)
+          result)))
+     (t
+      (let ((temp-buf (generate-new-buffer " *ellm-tools-edit*")))
+        (unwind-protect
             (with-current-buffer temp-buf
               (insert-file-contents file-path)
-              (ellm-tools--do-edit old-string new-string replace-all name)
-              (write-file file-path))
-            (with-current-buffer existing-buffer
-              (revert-buffer t t))
-            (kill-buffer temp-buf)
-            (format "Successfully edited %s" name))
-        ;; No existing buffer, edit in temp buffer and write file
-        (let ((temp-buf (generate-new-buffer " *temp*"))
-              (result nil))
-          (with-current-buffer temp-buf
-            (insert-file-contents file-path)
-            (setq result (ellm-tools--do-edit old-string new-string replace-all name))
-            (write-file file-path))
-          (kill-buffer temp-buf)
-          (ellm-tools--success result))))))
+              (let ((result (ellm-tools--do-edit
+                             old-string new-string replace-all name)))
+                (write-region (point-min) (point-max) file-path nil 'silent)
+                result))
+          (when (buffer-live-p temp-buf)
+            (kill-buffer temp-buf))))))))
 
 (defun ellm-tools--do-edit (old-string new-string replace-all name)
   "Perform the replacement of OLD-STRING with NEW-STRING in the current buffer.
