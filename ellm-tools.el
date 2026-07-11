@@ -31,8 +31,12 @@
 ;;; Code:
 
 (require 'ellm)
+(require 'cl-lib)
 (require 'seq)
 (require 's)
+(require 'subr-x)
+(require 'url)
+(require 'url-util)
 
 ;;;; Customization
 
@@ -55,6 +59,56 @@ Set to nil to disable the macro-level timeout.  Individual tools can
 override this with `:timeout' in `ellm-deftool' SPECS."
   :type '(choice (const :tag "No timeout" nil)
                  (number :tag "Seconds"))
+  :group 'ellm-tools)
+
+(defconst ellm-tools--default-glob-options
+  '("--hidden" "--follow" "--exclude" ".git" "--exclude" "node_modules" "--glob")
+  "Default value for `ellm-tools-glob-options'.")
+
+(defcustom ellm-tools-glob-program "fd"
+  "Executable used by the `glob' tool."
+  :type 'string
+  :group 'ellm-tools)
+
+(defcustom ellm-tools-glob-options ellm-tools--default-glob-options
+  "Command line options used by the `glob' tool.
+By default these are options for fd.  If an option contains `%p' or `%d',
+they are replaced with the search pattern and path, respectively, and no
+implicit pattern/path arguments are appended.  This makes non-fd commands
+possible, for example:
+
+  (setq ellm-tools-glob-program \"find\"
+        ellm-tools-glob-options \='(\"%d\" \"-name\" \"%p\" \"-type\" \"f\"))"
+  :type '(repeat string)
+  :group 'ellm-tools)
+
+(defcustom ellm-tools-grep-program "rg"
+  "Executable used by the `grep' tool."
+  :type 'string
+  :group 'ellm-tools)
+
+(defcustom ellm-tools-grep-options
+  '("--vimgrep" "--hidden" "--glob" "!.git" "--color=never")
+  "Command line options used by the `grep' tool.
+By default these are options for ripgrep and include `--vimgrep'.  If an
+option contains `%p' or `%d', they are replaced with the regex pattern and
+path, respectively, and no implicit pattern/path arguments are appended."
+  :type '(repeat string)
+  :group 'ellm-tools)
+
+(defcustom ellm-tools-search-result-limit 200
+  "Default maximum number of lines returned by file search tools."
+  :type 'integer
+  :group 'ellm-tools)
+
+(defcustom ellm-tools-websearch-url "https://html.duckduckgo.com/html/"
+  "DuckDuckGo HTML endpoint used by the `websearch' tool."
+  :type 'string
+  :group 'ellm-tools)
+
+(defcustom ellm-tools-websearch-result-limit 5
+  "Default maximum number of results returned by the `websearch' tool."
+  :type 'integer
   :group 'ellm-tools)
 
 ;;;; Variables
@@ -82,6 +136,10 @@ Each function is called with TOOL, ARGS, ERROR, RAW and RESULT.  RAW is
 the pre-transform result; RESULT is the value returned to the model."
   :type 'hook
   :group 'ellm-tools)
+
+(defvar-local ellm-tools-todo-list nil
+  "Buffer-local todo list managed by the `todowrite' tool.
+Each item is a plist with `:content', `:status' and `:priority'.")
 
 ;;;; `ellm-deftool' macro
 
@@ -134,86 +192,86 @@ the pre-transform result; RESULT is the value returned to the model."
                                  param-name-replacements
                                  (nth 2 it))))
                         arglist)
-                :function #',const-sym
-                :category ,category)
-          ,(format "Tool definition plist for %s.\n%s" name doc))
-        ,(if async?
-             `(defun ,const-sym (,callback-sym ,@lambda-args)
-                ,doc
-                (let* ((,tool-sym ',const-sym)
-                       (,tool-args-sym (list ,@lambda-args))
-                       (,timeout-sym ,timeout-expr)
-                       (,done-sym nil)
-                       (,timer-sym nil)
-                       (,cancel-sym nil)
-                       (callback
-                        (lambda (,raw-sym &optional ,error-sym)
-                          (unless ,done-sym
-                            (let ((,result-sym
-                                   (ellm-tools--transform-tool-result
-                                     ,tool-sym ,tool-args-sym ,error-sym ,raw-sym)))
-                              (setq ,done-sym t)
-                              (when ,timer-sym
-                                (cancel-timer ,timer-sym))
-                              (ellm-tools--tool-call-end-hook
-                               ,tool-sym ,tool-args-sym ,error-sym
-                               ,raw-sym ,result-sym)
-                              (funcall ,callback-sym ,result-sym))))))
-                  (condition-case ,err-sym
-                      (progn
-                        (ellm-tools--tool-call-start-hook
-                         ,tool-sym ,tool-args-sym)
-                        (when ,timeout-sym
-                          (setq ,timer-sym
-                                (run-at-time
-                                 ,timeout-sym nil
-                                 (lambda ()
-                                   (ellm-tools--cancel-async-handle
-                                    ,cancel-sym)
-                                   (funcall
-                                    callback
-                                    (format "Error while calling the tool: timed out after %s seconds"
-                                            ,timeout-sym)
-                                    t)))))
-                        (cl-flet ((callback (,raw-sym)
-                                            (funcall callback ,raw-sym)))
-                          (setq ,cancel-sym (progn ,@body))))
-                    (error
-                     (funcall callback
-                              (format "Error while calling the tool: %s"
-                                      ,err-sym)
-                              t)))
-                  ,cancel-sym))
-           `(defun ,const-sym ,lambda-args
-              ,doc
-              (let ((,tool-sym ',const-sym)
-                    (,tool-args-sym (list ,@lambda-args)))
-                (condition-case ,err-sym
-                    (progn
-                      (ellm-tools--tool-call-start-hook
-                       ,tool-sym ,tool-args-sym)
-                      (let* ((,error-sym nil)
-                             (,raw-sym (progn ,@body))
-                             (,result-sym
-                              (ellm-tools--transform-tool-result
-                               ,tool-sym ,tool-args-sym ,error-sym ,raw-sym)))
-                        (ellm-tools--tool-call-end-hook
-                         ,tool-sym ,tool-args-sym ,error-sym
-                         ,raw-sym ,result-sym)
-                        ,result-sym))
-                  (error
-                   (let* ((,error-sym t)
-                          (,raw-sym
-                           (format "Error while calling the tool: %s"
-                                   ,err-sym))
-                          (,result-sym
-                           (ellm-tools--transform-tool-result
-                            ,tool-sym ,tool-args-sym ,error-sym ,raw-sym)))
-                     (ellm-tools--tool-call-end-hook
-                      ,tool-sym ,tool-args-sym ,error-sym
-                      ,raw-sym ,result-sym)
-                     ,result-sym))))))
-        (cl-pushnew ',const-sym ellm-tools-refs)
+               :function #',const-sym
+               :category ,category)
+         ,(format "Tool definition plist for %s.\n%s" name doc))
+       ,(if async?
+            `(defun ,const-sym (,callback-sym ,@lambda-args)
+               ,doc
+               (let* ((,tool-sym ',const-sym)
+                      (,tool-args-sym (list ,@lambda-args))
+                      (,timeout-sym ,timeout-expr)
+                      (,done-sym nil)
+                      (,timer-sym nil)
+                      (,cancel-sym nil)
+                      (callback
+                       (lambda (,raw-sym &optional ,error-sym)
+                         (unless ,done-sym
+                           (let ((,result-sym
+                                  (ellm-tools--transform-tool-result
+                                   ,tool-sym ,tool-args-sym ,error-sym ,raw-sym)))
+                             (setq ,done-sym t)
+                             (when ,timer-sym
+                               (cancel-timer ,timer-sym))
+                             (ellm-tools--tool-call-end-hook
+                              ,tool-sym ,tool-args-sym ,error-sym
+                              ,raw-sym ,result-sym)
+                             (funcall ,callback-sym ,result-sym))))))
+                 (condition-case ,err-sym
+                     (progn
+                       (ellm-tools--tool-call-start-hook
+                        ,tool-sym ,tool-args-sym)
+                       (when ,timeout-sym
+                         (setq ,timer-sym
+                               (run-at-time
+                                ,timeout-sym nil
+                                (lambda ()
+                                  (ellm-tools--cancel-async-handle
+                                   ,cancel-sym)
+                                  (funcall
+                                   callback
+                                   (format "Error while calling the tool: timed out after %s seconds"
+                                           ,timeout-sym)
+                                   t)))))
+                       (cl-flet ((callback (,raw-sym)
+                                           (funcall callback ,raw-sym)))
+                         (setq ,cancel-sym (progn ,@body))))
+                   (error
+                    (funcall callback
+                             (format "Error while calling the tool: %s"
+                                     ,err-sym)
+                             t)))
+                 ,cancel-sym))
+          `(defun ,const-sym ,lambda-args
+             ,doc
+             (let ((,tool-sym ',const-sym)
+                   (,tool-args-sym (list ,@lambda-args)))
+               (condition-case ,err-sym
+                   (progn
+                     (ellm-tools--tool-call-start-hook
+                      ,tool-sym ,tool-args-sym)
+                     (let* ((,error-sym nil)
+                            (,raw-sym (progn ,@body))
+                            (,result-sym
+                             (ellm-tools--transform-tool-result
+                              ,tool-sym ,tool-args-sym ,error-sym ,raw-sym)))
+                       (ellm-tools--tool-call-end-hook
+                        ,tool-sym ,tool-args-sym ,error-sym
+                        ,raw-sym ,result-sym)
+                       ,result-sym))
+                 (error
+                  (let* ((,error-sym t)
+                         (,raw-sym
+                          (format "Error while calling the tool: %s"
+                                  ,err-sym))
+                         (,result-sym
+                          (ellm-tools--transform-tool-result
+                           ,tool-sym ,tool-args-sym ,error-sym ,raw-sym)))
+                    (ellm-tools--tool-call-end-hook
+                     ,tool-sym ,tool-args-sym ,error-sym
+                     ,raw-sym ,result-sym)
+                    ,result-sym))))))
+       (cl-pushnew ',const-sym ellm-tools-refs)
        (setq ellm-tools-list
              (cl-remove-if (lambda (it) (equal (ellm-tool-name it) ,tool-name))
                            ellm-tools-list))
@@ -296,6 +354,49 @@ and is killed after 60 seconds if still running."
         (kill-buffer buf)))))
 
 ;;;;; Files
+
+(ellm-deftool files/glob (:async t)
+  ((pattern :string "File glob pattern to match, for example `*.el' or `src/**/*.ts'.")
+   (path :string "Directory to search. Relative paths are resolved from the current project root or frontmatter `cwd'. Defaults to `.'." &optional)
+   (max-results :integer "Maximum number of matching paths to return. Defaults to `ellm-tools-search-result-limit'." &optional))
+  "Find files matching PATTERN under PATH.
+Uses `ellm-tools-glob-program' (fd by default) with
+`ellm-tools-glob-options'."
+  (ellm-tools--validate-pattern pattern "pattern")
+  (let* ((default-directory (ellm-tools--default-directory))
+         (search-path (ellm-tools--search-path path))
+         (limit (ellm-tools--normalized-limit
+                 max-results ellm-tools-search-result-limit))
+         (command (ellm-tools--glob-command pattern search-path)))
+    (ellm-tools--start-command
+     "ellm-tools-glob" (car command) (cdr command)
+     (lambda (exit-code stdout stderr)
+       (ellm-tools--format-line-command-result
+        "glob" pattern search-path exit-code stdout stderr limit
+        "No files matched"))
+     callback)))
+
+(ellm-deftool files/grep (:async t)
+  ((pattern :string "Regular expression pattern to search for.")
+   (path :string "File or directory to search. Relative paths are resolved from the current project root or frontmatter `cwd'. Defaults to `.'." &optional)
+   (max-results :integer "Maximum number of matching lines to return. Defaults to `ellm-tools-search-result-limit'." &optional))
+  "Search file contents for PATTERN under PATH.
+Uses `ellm-tools-grep-program' (ripgrep by default) with
+`ellm-tools-grep-options'.  The default ripgrep options include
+`--vimgrep', so matches are returned as file:line:column:text lines."
+  (ellm-tools--validate-pattern pattern "pattern")
+  (let* ((default-directory (ellm-tools--default-directory))
+         (search-path (ellm-tools--search-path path))
+         (limit (ellm-tools--normalized-limit
+                 max-results ellm-tools-search-result-limit))
+         (command (ellm-tools--grep-command pattern search-path)))
+    (ellm-tools--start-command
+     "ellm-tools-grep" (car command) (cdr command)
+     (lambda (exit-code stdout stderr)
+       (ellm-tools--format-line-command-result
+        "grep" pattern search-path exit-code stdout stderr limit
+        "No matches found" 1))
+     callback)))
 
 (ellm-deftool files/file-edit ()
   ((file-path :string "The absolute or relative path to the file to edit.")
@@ -448,7 +549,6 @@ Return matching lines with line numbers, capped at 50 matches."
            "\n</search_results>")
         (format "No matches found for %S in buffer %S." pattern buffer-name)))))
 
-
 (declare-function flymake-diagnostic-beg "flymake")
 (declare-function flymake-diagnostic-end "flymake")
 (declare-function flymake-diagnostic-type "flymake")
@@ -478,6 +578,28 @@ Each issue is returned as line-range:type:message."
            "\n")
         "No flymake issues found."))))
 
+;;;;; Tasks
+
+(ellm-deftool tasks/todowrite ()
+  ((todos :array "The complete todo list. Each item must have `content' and `status' (`pending', `in_progress', `completed', or `cancelled'); `priority' may be `high', `medium', or `low'."))
+  "Replace the current buffer's todo list with TODOS.
+This is a classic LLM todo tracker: always pass the full current list, not
+just incremental changes.  The normalized list is stored in the
+buffer-local variable `ellm-tools-todo-list'."
+  (setq ellm-tools-todo-list (ellm-tools--normalize-todos todos))
+  (ellm-tools--format-todos ellm-tools-todo-list))
+
+;;;;; Web
+
+(ellm-deftool web/websearch (:async t)
+  ((query :string "Search query.")
+   (max-results :integer "Maximum number of web results to return. Defaults to `ellm-tools-websearch-result-limit'." &optional))
+  "Search the web using DuckDuckGo's HTML endpoint and return parsed results."
+  (ellm-tools--validate-pattern query "query")
+  (let ((limit (ellm-tools--normalized-limit
+                max-results ellm-tools-websearch-result-limit)))
+    (ellm-tools--start-websearch query limit callback)))
+
 ;;;; Tool helpers
 
 ;;;;; Public
@@ -499,6 +621,497 @@ Each issue is returned as line-range:type:message."
 
 ;;;;; Internal
 
+;;;;;; General validation
+
+(defun ellm-tools--validate-pattern (pattern name)
+  "Signal an error unless PATTERN is a non-blank string named NAME."
+  (when (or (not (stringp pattern))
+            (s-blank? pattern))
+    (ellm-tools--error "%s must be a non-empty string" name)))
+
+(defun ellm-tools--search-path (path)
+  "Return PATH or `.' for file search tools."
+  (if (and (stringp path) (not (s-blank? path)))
+      path
+    "."))
+
+(defun ellm-tools--normalized-limit (limit default)
+  "Return LIMIT normalized against DEFAULT."
+  (let ((value (or limit default)))
+    (unless (and (integerp value) (> value 0))
+      (ellm-tools--error "limit must be a positive integer"))
+    value))
+
+;;;;;; Find & grep
+
+(defun ellm-tools--command-template-p (args)
+  "Return non-nil when ARGS contain `%p' or `%d' placeholders."
+  (cl-some (lambda (arg)
+             (and (stringp arg)
+                  (or (string-match-p "%p" arg)
+                      (string-match-p "%d" arg))))
+           args))
+
+(defun ellm-tools--expand-command-template (args pattern path)
+  "Replace `%p' and `%d' in ARGS with PATTERN and PATH."
+  (mapcar (lambda (arg)
+            (if (stringp arg)
+                (string-replace "%d" path
+                                (string-replace "%p" pattern arg))
+              arg))
+          args))
+
+(defun ellm-tools--find-program-p (program)
+  "Return non-nil when PROGRAM looks like find."
+  (member (file-name-nondirectory program) '("find" "gfind")))
+
+(defun ellm-tools--glob-command (pattern path)
+  "Return command list for running the glob tool with PATTERN under PATH."
+  (let ((program ellm-tools-glob-program)
+        (options ellm-tools-glob-options))
+    (cons program
+          (cond
+           ((ellm-tools--command-template-p options)
+            (ellm-tools--expand-command-template options pattern path))
+           ((ellm-tools--find-program-p program)
+            (append (list path)
+                    (unless (equal options ellm-tools--default-glob-options)
+                      options)
+                    (list "-name" pattern "-type" "f")))
+           (t
+            (append options (list "--" pattern path)))))))
+
+(defun ellm-tools--grep-command (pattern path)
+  "Return command list for running the grep tool with PATTERN under PATH."
+  (let ((program ellm-tools-grep-program)
+        (options ellm-tools-grep-options))
+    (cons program
+          (if (ellm-tools--command-template-p options)
+              (ellm-tools--expand-command-template options pattern path)
+            (append options (list "--" pattern path))))))
+
+;;;;;; External command handling
+
+(defun ellm-tools--start-command (name program args formatter callback)
+  "Start PROGRAM with ARGS asynchronously.
+FORMATTER is called with EXIT-CODE, STDOUT and STDERR, and its return value
+is passed to CALLBACK.  Return a cancellation function."
+  (unless (and (stringp program) (not (s-blank? program)))
+    (ellm-tools--error "invalid command program"))
+  (unless (executable-find program)
+    (ellm-tools--error "program not found: %s" program))
+  (dolist (arg args)
+    (unless (stringp arg)
+      (ellm-tools--error "command argument is not a string: %S" arg)))
+  (let* ((stdout-buffer (generate-new-buffer (format " *%s-stdout*" name)))
+         (stderr-buffer (generate-new-buffer (format " *%s-stderr*" name)))
+         (finished nil)
+         process)
+    (cl-labels
+        ((buffer-text (buffer)
+                      (if (buffer-live-p buffer)
+                          (with-current-buffer buffer
+                            (buffer-string))
+                        ""))
+         (cleanup ()
+                  (when (buffer-live-p stdout-buffer)
+                    (kill-buffer stdout-buffer))
+                  (when (buffer-live-p stderr-buffer)
+                    (kill-buffer stderr-buffer))))
+      (setq process
+            (make-process
+             :name name
+             :buffer stdout-buffer
+             :command (cons program args)
+             :connection-type 'pipe
+             :noquery t
+             :stderr stderr-buffer
+             :sentinel
+             (lambda (proc _event)
+               (when (and (not finished)
+                          (memq (process-status proc) '(exit signal)))
+                 (setq finished t)
+                 (let ((exit-code (process-exit-status proc))
+                       (stdout (buffer-text stdout-buffer))
+                       (stderr (buffer-text stderr-buffer)))
+                   (cleanup)
+                   (condition-case err
+                       (funcall callback
+                                (funcall formatter exit-code stdout stderr))
+                     (error
+                      (funcall callback
+                               (format "Error while processing command output: %s"
+                                       err)))))))))
+      (lambda ()
+        (unless finished
+          (setq finished t)
+          (when (process-live-p process)
+            (kill-process process))
+          (cleanup))))))
+
+(defun ellm-tools--format-command-error (kind exit-code stdout stderr)
+  "Return a command failure string for KIND with EXIT-CODE, STDOUT and STDERR."
+  (let ((stdout (string-trim-right stdout))
+        (stderr (string-trim-right stderr)))
+    (concat
+     (format "%s command exited with code %d" kind exit-code)
+     (unless (string-empty-p stderr)
+       (concat "\n<stderr>\n" stderr "\n</stderr>"))
+     (unless (string-empty-p stdout)
+       (concat "\n<stdout>\n" stdout "\n</stdout>")))))
+
+(defun ellm-tools--format-line-command-result
+    (kind pattern path exit-code stdout stderr limit no-match-message
+          &optional no-match-exit-code)
+  "Format file search command output.
+KIND is the XML-ish wrapper tag.  PATTERN and PATH describe the search.
+EXIT-CODE, STDOUT and STDERR are process results.  LIMIT caps output lines.
+NO-MATCH-MESSAGE is used when no lines are returned.  NO-MATCH-EXIT-CODE,
+when non-nil, is treated as success if STDOUT is empty."
+  (let* ((stdout (string-trim-right stdout))
+         (stderr (string-trim-right stderr))
+         (no-output (string-empty-p stdout)))
+    (cond
+     ((and (not (= exit-code 0))
+           (not (and no-match-exit-code
+                     (= exit-code no-match-exit-code)
+                     no-output)))
+      (ellm-tools--format-command-error kind exit-code stdout stderr))
+     (no-output
+      (format "%s for %S in %S." no-match-message pattern path))
+     (t
+      (let* ((lines (split-string stdout "\n" t))
+             (total (length lines))
+             (shown (seq-take lines limit))
+             (truncated (> total limit)))
+        (concat
+         (format "<%s pattern=%S path=%S matches=%d%s>\n"
+                 kind pattern path total
+                 (if truncated " truncated=true" ""))
+         (string-join shown "\n")
+         (when truncated
+           (format "\n[... truncated, showing first %d of %d lines ...]"
+                   limit total))
+         (unless (string-empty-p stderr)
+           (concat "\n<warnings>\n" stderr "\n</warnings>"))
+         (format "\n</%s>" kind)))))))
+
+;;;;;; TodoTool
+
+(defun ellm-tools--todo-field (item field)
+  "Return FIELD from todo ITEM.
+FIELD is a symbol such as `content'."
+  (let ((keyword (intern (concat ":" (symbol-name field))))
+        (string-name (symbol-name field)))
+    (cond
+     ((hash-table-p item)
+      (or (gethash field item)
+          (gethash keyword item)
+          (gethash string-name item)))
+     ((and (listp item) (keywordp (car item)))
+      (plist-get item keyword))
+     ((listp item)
+      (or (alist-get field item)
+          (alist-get keyword item)
+          (alist-get string-name item nil nil #'equal))))))
+
+(defun ellm-tools--todo-string (value)
+  "Return VALUE as a todo string field."
+  (cond
+   ((stringp value) value)
+   ((null value) nil)
+   ((symbolp value) (symbol-name value))
+   (t (format "%s" value))))
+
+(defun ellm-tools--normalize-todo (item index)
+  "Normalize todo ITEM at INDEX into a plist."
+  (let* ((content (ellm-tools--todo-string
+                   (ellm-tools--todo-field item 'content)))
+         (status (ellm-tools--todo-string
+                  (ellm-tools--todo-field item 'status)))
+         (priority (or (ellm-tools--todo-string
+                        (ellm-tools--todo-field item 'priority))
+                       "medium")))
+    (when (or (not content) (s-blank? content))
+      (ellm-tools--error "todo item %d has no content" index))
+    (unless (member status '("pending" "in_progress" "completed" "cancelled"))
+      (ellm-tools--error "todo item %d has invalid status: %S" index status))
+    (unless (member priority '("high" "medium" "low"))
+      (ellm-tools--error "todo item %d has invalid priority: %S" index priority))
+    (list :content content :status status :priority priority)))
+
+(defun ellm-tools--normalize-todos (todos)
+  "Normalize TODOS into a list of todo plists."
+  (let ((items (cond
+                ((vectorp todos) (append todos nil))
+                ((listp todos) todos)
+                (t (ellm-tools--error "todos must be an array")))))
+    (cl-loop for item in items
+             for index from 1
+             collect (ellm-tools--normalize-todo item index))))
+
+(defun ellm-tools--todo-count (todos status)
+  "Return number of TODOS with STATUS."
+  (cl-count status todos :key (lambda (todo) (plist-get todo :status))
+            :test #'equal))
+
+(defun ellm-tools--format-todos (todos)
+  "Return a model-readable summary of TODOS."
+  (let ((total (length todos)))
+    (concat
+     (format "<todo_list total=%d pending=%d in_progress=%d completed=%d cancelled=%d>\n"
+             total
+             (ellm-tools--todo-count todos "pending")
+             (ellm-tools--todo-count todos "in_progress")
+             (ellm-tools--todo-count todos "completed")
+             (ellm-tools--todo-count todos "cancelled"))
+     (if todos
+         (mapconcat
+          (lambda (todo)
+            (format "- [%s] (%s) %s"
+                    (plist-get todo :status)
+                    (plist-get todo :priority)
+                    (plist-get todo :content)))
+          todos
+          "\n")
+       "No todos.")
+     "\n</todo_list>")))
+
+;;;;;; Websearch
+
+(defun ellm-tools--start-websearch (query limit callback)
+  "Search DuckDuckGo HTML for QUERY and pass formatted LIMIT results to CALLBACK."
+  (let* ((url-request-method "GET")
+         (url (concat ellm-tools-websearch-url
+                      (if (string-match-p "[?&]\\'" ellm-tools-websearch-url)
+                          ""
+                        (if (string-match-p "\\?" ellm-tools-websearch-url)
+                            "&"
+                          "?"))
+                      "q=" (url-hexify-string query)))
+         (buffer
+          (url-retrieve
+           url
+           (lambda (status)
+             (let ((buf (current-buffer)))
+               (unwind-protect
+                   (condition-case err
+                       (if-let* ((url-error (plist-get status :error)))
+                           (funcall callback
+                                    (format "DuckDuckGo search failed: %s"
+                                            url-error))
+                         (goto-char (point-min))
+                         (if (not (re-search-forward "\r?\n\r?\n" nil t))
+                             (funcall callback
+                                      "DuckDuckGo search failed: malformed HTTP response")
+                           (let ((html (buffer-substring-no-properties
+                                        (point) (point-max))))
+                             (funcall
+                              callback
+                              (ellm-tools--format-websearch-results
+                               query
+                               (ellm-tools--parse-duckduckgo-html
+                                html limit))))))
+                     (error
+                      (funcall callback
+                               (format "Error while parsing DuckDuckGo results: %s"
+                                       err))))
+                 (when (buffer-live-p buf)
+                   (kill-buffer buf))))))))
+    (unless buffer
+      (ellm-tools--error "failed to start DuckDuckGo request"))
+    (lambda ()
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(defun ellm-tools--dom-node-p (node)
+  "Return non-nil when NODE is an XML/HTML DOM node."
+  (and (consp node) (symbolp (car node))))
+
+(defun ellm-tools--dom-attr (node attr)
+  "Return NODE's ATTR value."
+  (cdr (assq attr (cadr node))))
+
+(defun ellm-tools--dom-class-p (node class)
+  "Return non-nil when NODE has CSS CLASS."
+  (member class
+          (split-string (or (ellm-tools--dom-attr node 'class) "")
+                        "[[:space:]]+" t)))
+
+(defun ellm-tools--dom-descendants-with-class (node class)
+  "Return descendants of NODE that have CSS CLASS."
+  (let (result)
+    (cl-labels ((walk (child)
+                      (when (ellm-tools--dom-node-p child)
+                        (when (ellm-tools--dom-class-p child class)
+                          (push child result))
+                        (dolist (grandchild (cddr child))
+                          (walk grandchild)))))
+      (walk node))
+    (nreverse result)))
+
+(defun ellm-tools--dom-text (node)
+  "Return textual contents of DOM NODE."
+  (cond
+   ((stringp node) node)
+   ((ellm-tools--dom-node-p node)
+    (mapconcat #'ellm-tools--dom-text (cddr node) ""))
+   (t "")))
+
+(defun ellm-tools--clean-text (text)
+  "Normalize whitespace in TEXT."
+  (string-trim (replace-regexp-in-string
+                "[[:space:]\n\r]+" " " (or text ""))))
+
+(defun ellm-tools--decode-html-entities (text)
+  "Decode common HTML entities in TEXT."
+  (let ((decoded (s-replace-all '(("&amp;" . "&")
+                                  ("&lt;" . "<")
+                                  ("&gt;" . ">")
+                                  ("&quot;" . "\"")
+                                  ("&#39;" . "'")
+                                  ("&apos;" . "'"))
+                                (or text ""))))
+    (setq decoded
+          (replace-regexp-in-string
+           "&#x\\([0-9a-fA-F]+\\);"
+           (lambda (match)
+             (if (string-match "\\`&#x\\([0-9a-fA-F]+\\);\\'" match)
+                 (char-to-string (string-to-number (match-string 1 match) 16))
+               match))
+           decoded t t))
+    (replace-regexp-in-string
+     "&#\\([0-9]+\\);"
+     (lambda (match)
+       (if (string-match "\\`&#\\([0-9]+\\);\\'" match)
+           (char-to-string (string-to-number (match-string 1 match)))
+         match))
+     decoded t t)))
+
+(defun ellm-tools--strip-html-tags (html)
+  "Return HTML with tags stripped and entities decoded."
+  (ellm-tools--clean-text
+   (ellm-tools--decode-html-entities
+    (replace-regexp-in-string "<[^>]+>" " " (or html "")))))
+
+(defun ellm-tools--duckduckgo-result-url (href)
+  "Return the destination URL for a DuckDuckGo result HREF."
+  (when (and href (not (s-blank? href)))
+    (let ((url (ellm-tools--decode-html-entities href)))
+      (when (string-prefix-p "//" url)
+        (setq url (concat "https:" url)))
+      (if (string-match "[?&]uddg=\\([^&]+\\)" url)
+          (url-unhex-string (match-string 1 url))
+        (if (string-prefix-p "/" url)
+            (concat "https://duckduckgo.com" url)
+          url)))))
+
+(defun ellm-tools--parse-duckduckgo-html-with-libxml (html limit)
+  "Parse DuckDuckGo HTML using libxml and return up to LIMIT result plists."
+  (when (and (fboundp 'libxml-parse-html-region)
+             (or (not (fboundp 'libxml-available-p))
+                 (libxml-available-p)))
+    (with-temp-buffer
+      (insert html)
+      (let* ((dom (libxml-parse-html-region (point-min) (point-max)))
+             (nodes (ellm-tools--dom-descendants-with-class dom "result"))
+             (seen (make-hash-table :test 'equal))
+             results)
+        (dolist (node nodes)
+          (when (< (length results) limit)
+            (when-let* ((anchor (car (ellm-tools--dom-descendants-with-class
+                                      node "result__a")))
+                        (title (ellm-tools--clean-text
+                                (ellm-tools--dom-text anchor)))
+                        (href (ellm-tools--dom-attr anchor 'href))
+                        (url (ellm-tools--duckduckgo-result-url href)))
+              (unless (or (s-blank? title)
+                          (gethash url seen))
+                (puthash url t seen)
+                (push (list :title title
+                            :url url
+                            :snippet
+                            (let ((snippet-node
+                                   (car (ellm-tools--dom-descendants-with-class
+                                         node "result__snippet"))))
+                              (ellm-tools--clean-text
+                               (and snippet-node
+                                    (ellm-tools--dom-text snippet-node)))))
+                      results)))))
+        (nreverse results)))))
+
+(defun ellm-tools--html-attr (attrs attr)
+  "Return ATTR from an HTML attribute string ATTRS."
+  (when (string-match (format "%s=[\"']\\([^\"']+\\)[\"']" attr) attrs)
+    (match-string 1 attrs)))
+
+(defun ellm-tools--parse-duckduckgo-html-with-regexp (html limit)
+  "Parse DuckDuckGo HTML with regex fallback and return LIMIT result plists."
+  (let ((pos 0)
+        (seen (make-hash-table :test 'equal))
+        results)
+    (while (and (< (length results) limit)
+                (string-match
+                 "<a\\([^>]*\\)>\\(\\(?:.\\|\n\\)*?\\)</a>" html pos))
+      (let* ((attrs (match-string 1 html))
+             (body (match-string 2 html))
+             (end (match-end 0))
+             (class (ellm-tools--html-attr attrs "class"))
+             (href (ellm-tools--html-attr attrs "href")))
+        (setq pos end)
+        (when (and class
+                   (member "result__a" (split-string class "[[:space:]]+" t))
+                   href)
+          (let* ((title (ellm-tools--strip-html-tags body))
+                 (url (ellm-tools--duckduckgo-result-url href))
+                 (next (or (string-match
+                            "<a[^>]*class=[\"'][^\"']*result__a" html end)
+                           (length html)))
+                 (block (substring html end (min next (+ end 5000))))
+                 (snippet
+                  (when (string-match
+                         "class=[\"'][^\"']*result__snippet[^\"']*[\"'][^>]*>\\(\\(?:.\\|\n\\)*?\\)</\\(?:a\\|div\\)>"
+                         block)
+                    (ellm-tools--strip-html-tags (match-string 1 block)))))
+            (unless (or (not url) (s-blank? title) (gethash url seen))
+              (puthash url t seen)
+              (push (list :title title :url url :snippet (or snippet ""))
+                    results))))))
+    (nreverse results)))
+
+(defun ellm-tools--parse-duckduckgo-html (html limit)
+  "Parse DuckDuckGo HTML and return up to LIMIT result plists."
+  (or (condition-case nil
+          (ellm-tools--parse-duckduckgo-html-with-libxml html limit)
+        (error nil))
+      (ellm-tools--parse-duckduckgo-html-with-regexp html limit)))
+
+(defun ellm-tools--format-websearch-results (query results)
+  "Return a model-readable websearch result string for QUERY and RESULTS."
+  (if results
+      (concat
+       (format "<websearch query=%S results=%d>\n" query (length results))
+       (mapconcat
+        (lambda (indexed)
+          (let ((index (car indexed))
+                (result (cdr indexed)))
+            (concat
+             (format "%d. %s\nURL: %s"
+                     index
+                     (plist-get result :title)
+                     (plist-get result :url))
+             (let ((snippet (plist-get result :snippet)))
+               (unless (s-blank? snippet)
+                 (concat "\nSnippet: " snippet))))))
+        (cl-loop for result in results
+                 for index from 1
+                 collect (cons index result))
+        "\n\n")
+       "\n</websearch>")
+    (format "No web search results found for %S." query)))
+
+;;;;;; Edit tool
+
 (defun ellm-tools--edit-tool (buffer-or-file old-string new-string &optional replace-all)
   "Replace occurrence(s) of OLD-STRING with NEW-STRING.
 BUFFER-OR-FILE is either a buffer object or a file path string.
@@ -513,11 +1126,11 @@ exactly one occurrence."
   (when (string= old-string "")
     (ellm-tools--error "`old_string' cannot be empty"))
   (let* ((is-file? (not (bufferp buffer-or-file)))
-          (name (if is-file?
-                    (concat "file " buffer-or-file)
-                  (concat "buffer " (buffer-name buffer-or-file))))
-          (file-path (when is-file? (expand-file-name buffer-or-file)))
-          (existing-buffer (when file-path (find-buffer-visiting file-path))))
+         (name (if is-file?
+                   (concat "file " buffer-or-file)
+                 (concat "buffer " (buffer-name buffer-or-file))))
+         (file-path (when is-file? (expand-file-name buffer-or-file)))
+         (existing-buffer (when file-path (find-buffer-visiting file-path))))
     (cond
      ((bufferp buffer-or-file)
       (with-current-buffer buffer-or-file
