@@ -268,13 +268,27 @@ a continuation for visual nesting (no horizontal rule above it)."
 
 ;;;;; Regexpes
 
-(defconst ellm-turn-regexp
-  (concat "^\\("
+(defconst ellm--turn-header-regexp
+  (concat "\\(?:"
           ;; Order matters: longest first so the regex engine prefers
           ;; the most-specific header (`>>>-|') over its prefixes.
           (regexp-quote ellm-turn-header-3) "\\|"
           (regexp-quote ellm-turn-header-2) "\\|"
           (regexp-quote ellm-turn-header-1)
+          "\\)")
+  "Regexp matching any turn header token, without surrounding anchors.")
+
+(defun ellm--turn-header-prefix-regexp (header)
+  "Return regexp matching HEADER followed by its separator space."
+  (concat (regexp-quote header) " "))
+
+(defconst ellm--turn-delimiter-prefix-regexp
+  (concat ellm--turn-header-regexp " ")
+  "Regexp matching any turn header followed by its separator space.")
+
+(defconst ellm-turn-regexp
+  (concat "^\\("
+          ellm--turn-header-regexp
           "\\) \\([a-zA-Z-]+\\)\\(?: | \\)?\\(.*\\)$")
   "Regexp matching turn delimiter lines.
 Group 1: header (`ellm-turn-header-1', `ellm-turn-header-2', or
@@ -282,8 +296,7 @@ Group 1: header (`ellm-turn-header-1', `ellm-turn-header-2', or
 
 (defconst ellm-page-delimiter-regexp
   (concat "^"
-          (regexp-quote ellm-turn-header-1)
-          " ")
+          (ellm--turn-header-prefix-regexp ellm-turn-header-1))
   "Regexp matching top-level turn delimiter lines only.
 These are exactly the lines that get a horizontal rule drawn above them
 by `ellm--make-rule-overlay'.  Used as the buffer-local `page-delimiter'
@@ -809,20 +822,34 @@ ERROR is non-nil when RAW represents an error result."
    ((stringp raw) raw)
    (t (format "%s" raw))))
 
+(defun ellm-tools--escaped-tool-body-prefix-regexp ()
+  "Return regexp matching reversible tool-body escape sequences."
+  (concat "^\\\\\\(\\\\\\|"
+          ellm--turn-delimiter-prefix-regexp
+          "\\)"))
+
 (defun ellm-tools--escape-tool-result-turn-delimiters (_tool _args _error? raw)
   "Prevent RAW tool text from being parsed as ellm turn delimiters.
 Tool params and results are serialized directly into conversation buffers,
 so a raw line beginning with `>-|', `>>-|', or `>>>-|' would become
-structural on the next parse.  Prefix such lines with one space while
-leaving the rest of the output unchanged."
+structural on the next parse.  Prefix such lines with a backslash.  Lines
+already beginning with a backslash are also escaped so the transform is
+reversible via `ellm-tools--unescape-tool-body'."
   (replace-regexp-in-string
-   (concat "^\\("
-           (regexp-quote ellm-turn-header-3) "\\|"
-           (regexp-quote ellm-turn-header-2) "\\|"
-           (regexp-quote ellm-turn-header-1)
-           "\\) ")
-   " \\&"
-   raw))
+   (concat "^\\(?:\\\\\\|"
+           ellm--turn-delimiter-prefix-regexp
+           "\\)")
+   (lambda (match) (concat "\\" match))
+   raw nil t))
+
+(defun ellm-tools--unescape-tool-body (body)
+  "Decode reversible tool-body escaping in BODY.
+Only encoded prefixes produced by
+`ellm-tools--escape-tool-result-turn-delimiters' are decoded."
+  (replace-regexp-in-string
+   (ellm-tools--escaped-tool-body-prefix-regexp)
+   (lambda (match) (substring match 1))
+   body nil t))
 
 ;;;; Fontification
 
@@ -2501,11 +2528,7 @@ as a nested `tool-param' turn so values remain visible and parseable."
   "Return the outline heading regexp for `ellm-mode'.
 Matches turn delimiter lines (longest first) and Markdown heading lines.
 Used unanchored — outline prepends \"^\" internally."
-  (concat "\\(?:"
-          (regexp-quote ellm-turn-header-3) "\\|"
-          (regexp-quote ellm-turn-header-2) "\\|"
-          (regexp-quote ellm-turn-header-1)
-          "\\) .*\\|#+\\ .*$"))
+  (concat ellm--turn-delimiter-prefix-regexp ".*\\|#+\\ .*$"))
 
 (defun ellm--outline-level ()
   "Return the outline level for the heading matched at point.
@@ -2520,9 +2543,8 @@ Level mapping:
   (save-match-data
     (let ((text (or (match-string 0) "")))
       (cond
-       ((string-prefix-p (concat ellm-turn-header-3 " ") text) 3)
-       ((string-prefix-p (concat ellm-turn-header-2 " ") text) 2)
-       ((string-prefix-p (concat ellm-turn-header-1 " ") text) 1)
+       ((string-match (concat "\\`\\(" ellm--turn-header-regexp "\\) ") text)
+        (ellm--turn-header-depth (match-string 1 text)))
        ((string-match "^\\(#+\\) " text)
         (+ 3 (length (match-string 1 text))))
        (t 1)))))

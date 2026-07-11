@@ -129,7 +129,9 @@ turns across re-parses."
                        (eql (ellm-turn-depth nx) 3))))
       (let* ((p (car rest))
              (pname (alist-get "arg" (ellm-turn-attrs p) nil nil #'equal)))
-        (push (cons (intern (or pname "_")) (ellm-turn-content p))
+        (push (cons (intern (or pname "_"))
+                    (ellm-tools--unescape-tool-body
+                     (ellm-turn-content p)))
               params))
       (setq rest (cdr rest))
       (cl-incf consumed))
@@ -156,9 +158,10 @@ turns across re-parses."
                                      (and (ellm-tool-args tool)
                                           (plist-get (car (ellm-tool-args tool))
                                                      :name))))))
-               (when arg-name
-                 (list (cons (intern arg-name)
-                             (ellm-turn-content tool-call-turn))))))
+                (when arg-name
+                  (list (cons (intern arg-name)
+                              (ellm-tools--unescape-tool-body
+                               (ellm-turn-content tool-call-turn)))))))
             (t nil))))
       (cons args consumed))))
 
@@ -194,9 +197,10 @@ turns across re-parses."
                      (id (alist-get "id" attrs nil nil #'equal))
                      (name (alist-get "arg" attrs nil nil #'equal)))
                 (push (make-llm-chat-prompt-tool-result
-                       :call-id id :tool-name name
-                       :result (ellm-turn-content tr))
-                      results)
+                        :call-id id :tool-name name
+                        :result (ellm-tools--unescape-tool-body
+                                 (ellm-turn-content tr)))
+                       results)
                 (setq rest (cdr rest))))
             (llm-provider-utils-append-to-prompt
              prompt nil (nreverse results))))
@@ -301,10 +305,12 @@ FRONTMATTER, when supplied, is the already parsed YAML frontmatter alist."
           (insert (substring new-text prefix-length)))
         (when (and (not (string-empty-p new-text))
                    (save-excursion
-                     (goto-char start)
-                     (re-search-forward
-                      (concat "^" (regexp-quote ellm-turn-header-2) " ")
-                      end t)))
+                      (goto-char start)
+                      (re-search-forward
+                       (concat "^"
+                               (ellm--turn-header-prefix-regexp
+                                ellm-turn-header-2))
+                       end t)))
           (ellm--flush-pending-fold 2))
         (when (and ellm-fold-reasoning-blocks
                    reasoning (not (string-empty-p reasoning))
@@ -409,7 +415,9 @@ when they later re-enter the buffer."
   (save-excursion
     (goto-char start)
     (when (re-search-forward
-           (concat "^" (regexp-quote ellm-turn-header-2) " reasoning\\b")
+           (concat "^"
+                   (ellm--turn-header-prefix-regexp ellm-turn-header-2)
+                   "reasoning\\b")
            end t)
       (ellm--fold-subtree-at (match-beginning 0)))))
 
