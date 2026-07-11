@@ -167,26 +167,36 @@ value may be:
   :group 'ellm)
 
 (defconst ellm--heading-specs
-  '((ellm-heading-1 1.6 outline-1)
-    (ellm-heading-2 1.4 outline-2)
-    (ellm-heading-3 1.25 outline-3)
-    (ellm-heading-4 1.15 outline-4)
-    (ellm-heading-5 1.1 outline-5)
-    (ellm-heading-6 1.05 outline-6))
+  '((ellm-heading-1 1.3 outline-1)
+    (ellm-heading-2 1.2 outline-2)
+    (ellm-heading-3 1.1 outline-3)
+    (ellm-heading-4 1 outline-4)
+    (ellm-heading-5 1 outline-5)
+    (ellm-heading-6 1 outline-6))
   "List of (FACE HEIGHT INHERIT) specs for heading faces.")
 
+(defconst ellm--turn-heading-specs
+  '((ellm-turn-heading-1 1.4)
+    (ellm-turn-heading-2 1.3)
+    (ellm-turn-heading-3 1.2))
+  "List of (FACE HEIGHT) specs for turn heading faces.")
+
 (defun ellm--apply-heading-rescale (val)
-  "Apply heading rescale setting VAL to the heading faces.
+  "Apply heading rescale setting VAL to heading faces.
 No-op for any face that hasn't been defined yet (so this is safe to
 call from a defcustom :set before the faces' `defface' forms have run)."
   (pcase-dolist (`(,face ,height ,inherit) ellm--heading-specs)
     (when (facep face)
       (set-face-attribute face nil
-                          :height (if val height 'unspecified)
-                          :inherit inherit :weight 'bold))))
+                           :height (if val height 'unspecified)
+                           :inherit inherit :weight 'bold)))
+  (pcase-dolist (`(,face ,height) ellm--turn-heading-specs)
+    (when (facep face)
+      (set-face-attribute face nil
+                          :height (if val height 'unspecified)))))
 
-(defcustom ellm-heading-rescale nil
-  "When non-nil, heading faces use different sizes for each level.
+(defcustom ellm-heading-rescale t
+  "When non-nil, Markdown and turn headings use sizes for each level.
 Set to nil to make all headings the same size."
   :type 'boolean
   :group 'ellm-visuals
@@ -495,6 +505,21 @@ and `set-face-attribute' calls safe in non-graphical contexts."
 (defface ellm-turn-delimiter
   '((t :inherit font-lock-keyword-face :weight bold))
   "Face for turn delimiter lines."
+  :group 'ellm)
+
+(defface ellm-turn-heading-1
+  '((t :height unspecified))
+  "Face controlling height for top-level turn headers."
+  :group 'ellm)
+
+(defface ellm-turn-heading-2
+  '((t :height unspecified))
+  "Face controlling height for continuation turn headers."
+  :group 'ellm)
+
+(defface ellm-turn-heading-3
+  '((t :height unspecified))
+  "Face controlling height for nested turn headers."
   :group 'ellm)
 
 (defface ellm-role-user
