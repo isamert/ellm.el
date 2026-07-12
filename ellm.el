@@ -895,6 +895,40 @@ ERROR is non-nil when RAW represents an error result."
           ellm--turn-delimiter-prefix-regexp
           "\\)"))
 
+(defun ellm--escape-turn-delimiters (text)
+  "Reversibly escape turn delimiters and backslashes at line starts in TEXT."
+  (replace-regexp-in-string
+   (concat "^\\(?:\\\\\\|"
+           ellm--turn-delimiter-prefix-regexp
+           "\\)")
+   (lambda (match) (concat "\\" match))
+   text nil t))
+
+(defun ellm--escape-turn-delimiters-for-insertion (text at-bol)
+  "Escape TEXT for insertion, treating its start as a line start when AT-BOL."
+  (if at-bol
+      (ellm--escape-turn-delimiters text)
+    (substring (ellm--escape-turn-delimiters (concat "x" text)) 1)))
+
+(defun ellm--escape-turn-delimiters-in-region (beg end)
+  "Escape unprotected turn delimiter lines between BEG and END.
+This catches delimiters assembled across streaming chunk boundaries."
+  (save-excursion
+    (goto-char beg)
+    (forward-line 0)
+    (while (re-search-forward
+            (concat "^" ellm--turn-delimiter-prefix-regexp) end t)
+      (goto-char (match-beginning 0))
+      (insert "\\")
+      (forward-char 1))))
+
+(defun ellm--unescape-turn-delimiters (text)
+  "Decode reversible line-prefix escaping in TEXT."
+  (replace-regexp-in-string
+   (ellm-tools--escaped-tool-body-prefix-regexp)
+   (lambda (match) (substring match 1))
+   text nil t))
+
 (defun ellm-tools--escape-tool-result-turn-delimiters (_tool _args _error? raw)
   "Prevent RAW tool text from being parsed as ellm turn delimiters.
 Tool params and results are serialized directly into conversation buffers,
@@ -902,21 +936,13 @@ so a raw line beginning with `>-|', `>>-|', or `>>>-|' would become
 structural on the next parse.  Prefix such lines with a backslash.  Lines
 already beginning with a backslash are also escaped so the transform is
 reversible via `ellm-tools--unescape-tool-body'."
-  (replace-regexp-in-string
-   (concat "^\\(?:\\\\\\|"
-           ellm--turn-delimiter-prefix-regexp
-           "\\)")
-   (lambda (match) (concat "\\" match))
-   raw nil t))
+  (ellm--escape-turn-delimiters raw))
 
 (defun ellm-tools--unescape-tool-body (body)
   "Decode reversible tool-body escaping in BODY.
 Only encoded prefixes produced by
 `ellm-tools--escape-tool-result-turn-delimiters' are decoded."
-  (replace-regexp-in-string
-   (ellm-tools--escaped-tool-body-prefix-regexp)
-   (lambda (match) (substring match 1))
-   body nil t))
+  (ellm--unescape-turn-delimiters body))
 
 ;;;; Fontification
 

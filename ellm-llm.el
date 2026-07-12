@@ -209,9 +209,13 @@ turns across re-parses."
          (t
           (setf (llm-chat-prompt-interactions prompt)
                 (append (llm-chat-prompt-interactions prompt)
-                        (list (make-llm-chat-prompt-interaction
-                               :role (intern role)
-                               :content (ellm-turn-content turn)))))
+                         (list (make-llm-chat-prompt-interaction
+                                :role (intern role)
+                                :content
+                                (if (equal role "assistant")
+                                    (ellm--unescape-turn-delimiters
+                                     (ellm-turn-content turn))
+                                  (ellm-turn-content turn))))))
           (setq rest (cdr rest)))))))
   prompt)
 
@@ -284,8 +288,12 @@ FRONTMATTER, when supplied, is the already parsed YAML frontmatter alist."
   (ellm-llm--ensure-buffer buf request)
   (with-current-buffer buf
     (ellm--preserve-user-position
-      (let* ((reasoning (plist-get result :reasoning))
-             (text      (plist-get result :text))
+      (let* ((reasoning-raw (plist-get result :reasoning))
+             (text-raw      (plist-get result :text))
+             (reasoning (and reasoning-raw
+                             (ellm--escape-turn-delimiters reasoning-raw)))
+             (text      (and text-raw
+                             (ellm--escape-turn-delimiters text-raw)))
              (new-text
               (concat
                (when (and reasoning (not (string-empty-p reasoning)))
@@ -352,14 +360,16 @@ is text-only, a fresh trailing `user' turn is appended."
                     (when ellm-fold-reasoning-blocks
                       (ellm-llm--fold-reasoning-in-region start end))
                     (ellm--persistence-checkpoint)
-                    (when recurse
-                      (ellm-llm--send-once provider prompt buf)))))))
+                    (if recurse
+                        (ellm-llm--send-once provider prompt buf)
+                      (ellm--notify-request-finished)))))))
            (on-error
              (lambda (type msg)
                (ellm-llm--ensure-buffer buf request)
                (with-current-buffer buf
                  (ellm--set-active-request nil)
-                 (ellm--persistence-checkpoint))
+                 (ellm--persistence-checkpoint)
+                 (ellm--notify-request-finished))
                (signal type (list msg)))))
       (ellm--set-active-request ellm--request-starting)
       (condition-case err
@@ -373,7 +383,8 @@ is text-only, a fresh trailing `user' turn is appended."
         (error
          (when (eq ellm--active-request ellm--request-starting)
            (ellm--set-active-request nil)
-           (ellm--persistence-checkpoint))
+           (ellm--persistence-checkpoint)
+           (ellm--notify-request-finished))
          (signal (car err) (cdr err)))))))
 
 (defun ellm-llm--frontmatter-cwd (frontmatter)

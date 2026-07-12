@@ -1489,7 +1489,16 @@ being merged into the same ellm turn."
                          (list :message-id message-id)))))
       (setf (ellm-acp--connection-last-message-key connection)
             (cons role message-id))
-      (insert text))))
+      (if (not (member role '("assistant" "reasoning")))
+          (insert text)
+        (let ((beg (copy-marker (point) nil))
+              (escaped (ellm--escape-turn-delimiters-for-insertion
+                        text (bolp))))
+          (insert escaped)
+          (let ((end (copy-marker (point) t)))
+            (ellm--escape-turn-delimiters-in-region beg end)
+            (set-marker end nil))
+          (set-marker beg nil))))))
 
 (defun ellm-acp--inside-open-message-p (connection role message-id)
   "Return non-nil when point is in ROLE's current ACP message."
