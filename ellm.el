@@ -2937,12 +2937,22 @@ Headings inside fenced code blocks do not count."
 When point is itself on such a turn, preserve plain `outline-cycle'
 behaviour so the turn can still be cycled directly."
   (interactive (list last-nonmenu-event))
-  (let ((blank-heading (save-excursion
-                         (when (mouse-event-p event)
-                           (mouse-set-point event))
-                         (ellm--blank-separator-heading-at-point-p))))
-    (outline-cycle event)
-    (unless blank-heading
+  (let* ((mouse-event (and (mouse-event-p event) event))
+         (heading (save-excursion
+                    (when mouse-event
+                      (mouse-set-point mouse-event))
+                    (forward-line 0)
+                    (and (ellm--outline-search-function nil nil nil t)
+                         (if (looking-at ellm-turn-regexp)
+                             (if (ellm--blank-separator-p
+                                  (match-string-no-properties 2)
+                                  (ellm--continuation-header-p
+                                   (match-string-no-properties 1)))
+                                 'blank-turn
+                               'turn)
+                           'markdown)))))
+    (outline-cycle mouse-event)
+    (when (eq heading 'turn)
       (ellm--show-visible-blank-separator-subtrees))))
 
 (defun ellm-outline-cycle-buffer (&optional level)
@@ -3474,6 +3484,11 @@ Implementations should stream into the assistant turn already appended by
   (let ((map (make-sparse-keymap)))
     (define-key map [remap outline-cycle] #'ellm-outline-cycle)
     (define-key map [remap outline-cycle-buffer] #'ellm-outline-cycle-buffer)
+    (define-key map (kbd "<tab>")
+                '(menu-item "" ellm-outline-cycle
+                            :filter (lambda (command)
+                                      (and (ellm--heading-at-point-p)
+                                           command))))
     (define-key map (kbd "<backtab>") #'ellm-outline-cycle-buffer)
     (define-key map (kbd "C-c C-c")   #'ellm-send)
     (define-key map (kbd "C-c C-k")   #'ellm-cancel)
