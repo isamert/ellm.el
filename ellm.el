@@ -5,7 +5,7 @@
 ;; Author: Isa Mert Gurbuz <isamertgurbuz@gmail.com>
 ;; URL: https://github.com/isamert/ellm.el
 ;; Version: 0.0.1
-;; Package-Requires: ((emacs "29.1") (yaml "0.5.5"))
+;; Package-Requires: ((emacs "29.1") (yaml "0.5.5") (s "1.13.1") (llm "0.31.1"))
 ;; Keywords: TODO
 
 ;; This file is not part of GNU Emacs.
