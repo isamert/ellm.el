@@ -2146,6 +2146,14 @@ accepted."
 Set by `ellm-send' to the object returned by `ellm-backend-send'.
 Cleared on completion, error, or cancellation.")
 
+(defvar-local ellm-request-finished-hook nil
+  "Hook run when the current request fully finishes.
+This runs after success, cancellation, or failure, but not between internal
+backend request legs such as recursive tool-call handling.")
+
+(defvar-local ellm--request-finished-notified-p nil
+  "Non-nil when the current request has fired `ellm-request-finished-hook'.")
+
 (defvar-local ellm--request-read-only-state nil
   "Saved `buffer-read-only' value before the current request locked the buffer.")
 
@@ -2169,6 +2177,12 @@ streaming backend insertions.  Nil REQUEST restores the previous
             ellm--request-read-only-state nil
             ellm--request-read-only-state-saved-p nil)))
   request)
+
+(defun ellm--notify-request-finished ()
+  "Run `ellm-request-finished-hook' once for the current request."
+  (unless ellm--request-finished-notified-p
+    (setq ellm--request-finished-notified-p t)
+    (run-hooks 'ellm-request-finished-hook)))
 
 (defconst ellm--frontmatter-keys
   '(("provider"    :ann "provider"
@@ -3132,6 +3146,7 @@ Errors during streaming are signalled normally."
     (user-error "ellm: a request is already in flight; M-x ellm-cancel"))
   (ellm--ensure-trailing-user-turn)
   (ellm--persistence-checkpoint)
+  (setq ellm--request-finished-notified-p nil)
   (let* ((fm       (ellm--parse-frontmatter))
          (provider (ellm--resolve-provider fm))
          (buf      (current-buffer))
@@ -3147,10 +3162,12 @@ Errors during streaming are signalled normally."
           (when (eq ellm--active-request ellm--request-starting)
             (ellm--set-active-request request))
           (unless ellm--active-request
-            (ellm--persistence-checkpoint)))
+            (ellm--persistence-checkpoint)
+            (ellm--notify-request-finished)))
       (error
        (ellm--set-active-request nil)
        (ellm--persistence-checkpoint)
+       (ellm--notify-request-finished)
        (signal (car err) (cdr err))))))
 
 (defun ellm-cancel (&optional quiet)
@@ -3163,6 +3180,7 @@ If QUIET is non-nil, then do not print any messages."
     (ellm-backend-cancel ellm--active-request)
     (ellm--set-active-request nil)
     (ellm--persistence-checkpoint)
+    (ellm--notify-request-finished)
     (unless quiet
       (message "ellm: request cancelled"))))
 
@@ -3460,6 +3478,7 @@ Implementations should stream into the assistant turn already appended by
   (add-hook 'completion-at-point-functions #'ellm--slash-command-capf nil t)
   (add-hook 'kill-buffer-hook #'ellm--close-session-on-kill nil t)
   (add-hook 'kill-buffer-hook #'ellm--persistence-before-kill nil t)
+  (add-hook 'kill-buffer-hook #'ellm--notify-request-finished nil t)
   (setq-local outline-regexp (ellm--outline-regexp))
   (setq-local outline-search-function #'ellm--outline-search-function)
   (setq-local outline-level #'ellm--outline-level)

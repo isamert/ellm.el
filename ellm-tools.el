@@ -638,14 +638,14 @@ global `ellm-subagents' variable when selecting profiles."
   "List subagents launched from the current ellm buffer."
   (ellm-tools--format-subagent-history ellm-subagent-history))
 
-(ellm-deftool agents/wait-subagent ()
+(ellm-deftool agents/wait-subagent (:async t :timeout nil)
   ((subagent :string "Subagent id from `list_subagents' or the subagent buffer name.")
    (timeout :integer "Maximum seconds to wait. Defaults to `ellm-subagent-wait-default-timeout'." &optional)
    (max-lines :integer "Maximum lines to return from the last assistant turn and buffer tail. Defaults to `ellm-subagent-wait-result-line-limit'." &optional))
   "Wait for SUBAGENT to finish and return its latest result.
 If SUBAGENT is still running after TIMEOUT seconds, return a timeout result
 without cancelling it."
-  (ellm-tools--wait-subagent subagent timeout max-lines))
+  (ellm-tools--wait-subagent subagent timeout max-lines callback))
 
 (ellm-deftool buffers/send-ellm-buffer ()
   ((buffer-name :string "Name of the ellm buffer to send.")
@@ -1482,22 +1482,40 @@ SUBAGENT may be a remembered id or a live buffer name."
          (ellm-tools--limited-lines tail max-lines))))
      "</subagent>")))
 
-(defun ellm-tools--wait-subagent (subagent timeout max-lines)
-  "Implementation for the `wait_subagent' tool."
+(defun ellm-tools--wait-subagent (subagent timeout max-lines callback)
+  "Wait asynchronously for SUBAGENT, then call CALLBACK with its result."
   (let* ((target (ellm-tools--subagent-target subagent))
          (buffer (plist-get target :buffer))
          (seconds (ellm-tools--normalize-wait-timeout timeout))
          (line-limit (ellm-tools--normalize-wait-line-limit max-lines))
-         (deadline (+ (float-time) seconds))
-         timed-out)
-    (while (and (buffer-live-p buffer)
-                (with-current-buffer buffer ellm--active-request)
-                (< (float-time) deadline))
-      (accept-process-output nil 0.05))
-    (setq timed-out
-          (and (buffer-live-p buffer)
-               (with-current-buffer buffer ellm--active-request)))
-    (ellm-tools--format-subagent-wait-result target timed-out line-limit)))
+         timer listener done)
+    (cl-labels
+        ((running-p ()
+           (and (buffer-live-p buffer)
+                (with-current-buffer buffer ellm--active-request)))
+         (cleanup ()
+           (when timer
+             (cancel-timer timer)
+             (setq timer nil))
+           (when (and listener (buffer-live-p buffer))
+             (with-current-buffer buffer
+               (remove-hook 'ellm-request-finished-hook listener t))))
+         (finish (timed-out)
+           (unless done
+             (setq done t)
+             (cleanup)
+             (funcall callback
+                      (ellm-tools--format-subagent-wait-result
+                       target timed-out line-limit)))))
+      (setq listener (lambda () (finish nil)))
+      (if (not (running-p))
+          (finish nil)
+        (with-current-buffer buffer
+          (add-hook 'ellm-request-finished-hook listener nil t))
+        (setq timer (run-at-time seconds nil (lambda () (finish t)))))
+      (lambda ()
+        (setq done t)
+        (cleanup)))))
 
 (defun ellm-tools--ellm-buffer (buffer-name)
   "Return live ellm buffer named BUFFER-NAME, or signal an error."

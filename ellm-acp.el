@@ -414,6 +414,7 @@ OpenCode's ACP `effort' config option."
         (with-current-buffer buffer
           (when ellm--active-request
             (ellm--set-active-request nil)
+            (ellm--notify-request-finished)
             (message "ellm ACP: process exited: %s" (string-trim event))))))))
 
 (defun ellm-acp--dispatch-notification (connection method params)
@@ -1959,14 +1960,16 @@ If the matched turn has nested child turns, delete those children too."
                   (equal (ellm-turn-role last-turn) "user"))
           (ellm--insert-turn "user"))
         (ellm--set-active-request nil)
-        (ellm--persistence-checkpoint)))))
+        (ellm--persistence-checkpoint)
+        (ellm--notify-request-finished)))))
 
 (defun ellm-acp--finish-with-error (buffer error-object)
   "Finish ACP request in BUFFER by signalling ERROR-OBJECT."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
       (ellm--set-active-request nil)
-      (ellm--persistence-checkpoint)))
+      (ellm--persistence-checkpoint)
+      (ellm--notify-request-finished)))
   (error "ellm ACP: %s"
          (or (plist-get error-object :message)
              "request failed")))
