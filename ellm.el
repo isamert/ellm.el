@@ -389,6 +389,13 @@ Each entry is `(ROLE-SYM . PLIST)' where PLIST may include:
   "Return face for ROLE string."
   (or (ellm--role-prop role :face) 'ellm-turn-delimiter))
 
+(defun ellm--turn-heading-face (header)
+  "Return heading-scale face for turn delimiter HEADER."
+  (pcase (ellm--turn-header-depth header)
+    (1 'ellm-turn-heading-1)
+    (2 'ellm-turn-heading-2)
+    (3 'ellm-turn-heading-3)))
+
 (defun ellm--role-glyph (role)
   "Return the display glyph string for ROLE.
 ROLE is the string captured from `ellm-turn-regexp'."
@@ -899,7 +906,9 @@ jumps to that body's end so large tool outputs are skipped in one step."
 (defconst ellm-font-lock-keywords
   `(;; Turn delimiters
     (,ellm-turn-regexp
-     (0 'ellm-turn-delimiter t)
+     (0 (list 'ellm-turn-delimiter
+              (ellm--turn-heading-face (match-string 1)))
+        t)
      (2 (ellm--role-face (match-string 2)) t))
     ;; Frontmatter delimiter lines (`---' open and close) and YAML body
     ;; are handled by `ellm--fontify-code-blocks'.
