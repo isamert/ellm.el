@@ -141,6 +141,36 @@ the pre-transform result; RESULT is the value returned to the model."
   "Buffer-local todo list managed by the `todowrite' tool.
 Each item is a plist with `:content', `:status' and `:priority'.")
 
+(defcustom ellm-subagent-buffer-name-format "*ellm subagent:%s*"
+  "Format string used for generated subagent buffer names.
+It receives one `%s' argument: the subagent display name or id."
+  :type 'string
+  :group 'ellm-tools)
+
+(defcustom ellm-subagent-wait-default-timeout 60
+  "Default maximum seconds `wait_subagent' waits for a subagent."
+  :type 'number
+  :group 'ellm-tools)
+
+(defcustom ellm-subagent-wait-result-line-limit 120
+  "Default maximum lines returned by `wait_subagent' result sections."
+  :type 'integer
+  :group 'ellm-tools)
+
+(defvar-local ellm-subagent-history nil
+  "Buffer-local history of subagents launched from this ellm buffer.
+Each entry is a plist with serializable values such as `:id',
+`:buffer-name', `:name', `:created', `:profile', and `:prompt'.")
+
+(defvar-local ellm-subagent-counter 0
+  "Buffer-local counter used to allocate subagent ids.")
+
+(defvar-local ellm-subagent-id nil
+  "Subagent id for this ellm buffer, or nil when this buffer is not a subagent.")
+
+(defvar-local ellm-subagent-parent-buffer nil
+  "Name of the parent buffer that launched this subagent, or nil.")
+
 ;;;; `ellm-deftool' macro
 
 (eval-and-compile
@@ -589,6 +619,47 @@ buffer-local variable `ellm-tools-todo-list'."
   (setq ellm-tools-todo-list (ellm-tools--normalize-todos todos))
   (ellm-tools--format-todos ellm-tools-todo-list))
 
+;;;;; Agents
+
+(ellm-deftool agents/launch-subagent ()
+  ((prompt :string "Prompt to put in the new subagent's initial user turn.")
+   (profile :string "Optional subagent profile name from frontmatter `subagents.profiles' or global `ellm-subagents'." &optional)
+   (name :string "Optional display name for the subagent buffer and history entry." &optional)
+   (provider :string "Optional provider name from `ellm-provider-alist'. Overrides inherited/profile provider." &optional)
+   (model :string "Optional model name. Validated against configured model candidates when available." &optional)
+   (tools :array "Optional complete tool list for the child buffer, for example [`@files', `@buffers']. Overrides inherited/profile tools." &optional)
+   (system :string "Optional system prompt for the child buffer. Overrides inherited/profile system." &optional)
+   (cwd :string "Optional working directory for the child buffer. Overrides inherited/profile cwd." &optional))
+  "Launch a subagent in a new `ellm-mode' buffer and start it.
+The child buffer inherits the current buffer's frontmatter, then applies
+the selected subagent profile, then applies explicit PROVIDER/MODEL/TOOLS/
+SYSTEM/CWD overrides.  Frontmatter `subagents:' takes precedence over the
+global `ellm-subagents' variable when selecting profiles."
+  (ellm-tools--launch-subagent
+   prompt profile name provider model tools system cwd))
+
+(ellm-deftool agents/list-subagents ()
+  ()
+  "List subagents launched from the current ellm buffer."
+  (ellm-tools--format-subagent-history ellm-subagent-history))
+
+(ellm-deftool agents/wait-subagent ()
+  ((subagent :string "Subagent id from `list_subagents' or the subagent buffer name.")
+   (timeout :integer "Maximum seconds to wait. Defaults to `ellm-subagent-wait-default-timeout'." &optional)
+   (max-lines :integer "Maximum lines to return from the last assistant turn and buffer tail. Defaults to `ellm-subagent-wait-result-line-limit'." &optional))
+  "Wait for SUBAGENT to finish and return its latest result.
+If SUBAGENT is still running after TIMEOUT seconds, return a timeout result
+without cancelling it."
+  (ellm-tools--wait-subagent subagent timeout max-lines))
+
+(ellm-deftool buffers/send-ellm-buffer ()
+  ((buffer-name :string "Name of the ellm buffer to send.")
+   (prompt :string "Optional prompt to add as a new trailing user turn before sending." &optional))
+  "Send an existing ellm buffer, optionally appending PROMPT first.
+This is useful for continuing a subagent after inspecting or editing its
+conversation buffer."
+  (ellm-tools--send-ellm-buffer buffer-name prompt))
+
 ;;;;; Web
 
 (ellm-deftool web/websearch (:async t)
@@ -872,10 +943,524 @@ FIELD is a symbol such as `content'."
                     (plist-get todo :status)
                     (plist-get todo :priority)
                     (plist-get todo :content)))
-          todos
+           todos
           "\n")
        "No todos.")
      "\n</todo_list>")))
+
+;;;;;; Subagents
+
+(defun ellm-tools--present-string (value)
+  "Return VALUE as a non-blank string, or nil."
+  (when (and (stringp value) (not (s-blank? value)))
+    value))
+
+(defun ellm-tools--key-name (key)
+  "Return KEY as a normalized string."
+  (cond
+   ((keywordp key) (substring (symbol-name key) 1))
+   ((symbolp key) (symbol-name key))
+   ((stringp key) key)
+   (t (format "%s" key))))
+
+(defun ellm-tools--key-symbol (key)
+  "Return KEY as a symbol suitable for YAML frontmatter alists."
+  (intern (ellm-tools--key-name key)))
+
+(defun ellm-tools--same-key-p (left right)
+  "Return non-nil when LEFT and RIGHT name the same frontmatter key."
+  (equal (ellm-tools--key-name left)
+         (ellm-tools--key-name right)))
+
+(defun ellm-tools--alist-delete-nested (alist keys)
+  "Return ALIST without nested KEYS.
+KEYS may be a single key or a list of keys.  Empty parent maps are removed."
+  (let ((keys (if (listp keys) keys (list keys))))
+    (if (null keys)
+        alist
+      (let ((key (car keys)))
+        (delq
+         nil
+         (mapcar
+          (lambda (cell)
+            (cond
+             ((not (consp cell)) cell)
+             ((not (ellm-tools--same-key-p (car cell) key)) cell)
+             ((null (cdr keys)) nil)
+             ((listp (cdr cell))
+              (let ((child (ellm-tools--alist-delete-nested
+                            (cdr cell) (cdr keys))))
+                (and child (cons (car cell) child))))
+             (t cell)))
+          alist))))))
+
+(defun ellm-tools--map-entries (object)
+  "Return OBJECT as a list of (KEY . VALUE) frontmatter entries.
+OBJECT may be a YAML-style alist or an Elisp plist."
+  (cond
+   ((null object) nil)
+   ((and (listp object) (keywordp (car object)))
+    (let ((rest object)
+          entries)
+      (while rest
+        (let ((key (pop rest))
+              (value (pop rest)))
+          (push (cons (ellm-tools--key-symbol key) value) entries)))
+      (nreverse entries)))
+   ((listp object)
+    (cl-loop for cell in object
+             when (consp cell)
+             collect (cons (ellm-tools--key-symbol (car cell))
+                           (cdr cell))))
+   (t
+    (ellm-tools--error "subagent profile must be a map: %S" object))))
+
+(defun ellm-tools--frontmatter-set (frontmatter key value)
+  "Return FRONTMATTER with top-level KEY set to VALUE."
+  (append (ellm-tools--alist-delete-nested frontmatter key)
+          (list (cons (ellm-tools--key-symbol key) value))))
+
+(defun ellm-tools--merge-frontmatter-map (frontmatter map)
+  "Return FRONTMATTER with every entry from MAP set at the top level."
+  (let ((result frontmatter))
+    (dolist (entry (ellm-tools--map-entries map) result)
+      (setq result (ellm-tools--frontmatter-set
+                    result (car entry) (cdr entry))))))
+
+(defun ellm-tools--subagent-config (frontmatter)
+  "Return subagent config from FRONTMATTER or global `ellm-subagents'."
+  (if-let* ((cell (and frontmatter
+                       (ellm--alist-get-nested-cell frontmatter 'subagents))))
+      (cdr cell)
+    ellm-subagents))
+
+(defun ellm-tools--subagent-profile-name (value)
+  "Return VALUE as a subagent profile name, or nil."
+  (cond
+   ((null value) nil)
+   ((symbolp value) (symbol-name value))
+   ((stringp value) (ellm-tools--present-string value))
+   (t nil)))
+
+(defun ellm-tools--resolve-subagent-profile (config profile)
+  "Return (PROFILE-NAME . PROFILE-MAP) selected from CONFIG.
+PROFILE may be nil.  CONFIG `default' may name a profile or be an inline
+map; when no profile/default map is selected, both parts are nil."
+  (let* ((requested (ellm-tools--present-string profile))
+         (default (ellm--plistish-get config 'default))
+         (profile-name (or requested
+                           (ellm-tools--subagent-profile-name default)))
+         (default-map (and (not profile-name)
+                           (listp default)
+                           default)))
+    (if profile-name
+        (let* ((profiles (ellm--plistish-get config 'profiles))
+               (profile-map (ellm--plistish-get profiles profile-name)))
+          (unless profile-map
+            (ellm-tools--error "subagent profile not found: %s" profile-name))
+          (cons profile-name profile-map))
+      (cons nil default-map))))
+
+(defun ellm-tools--normalize-tool-list (tools)
+  "Return TOOLS normalized for frontmatter."
+  (cond
+   ((eq tools t) t)
+   ((null tools) nil)
+   ((stringp tools)
+    (let ((tool (ellm-tools--present-string tools)))
+      (and tool (list tool))))
+   ((vectorp tools)
+    (mapcar (lambda (tool)
+              (format "%s" tool))
+            (append tools nil)))
+   ((listp tools)
+    (mapcar (lambda (tool)
+              (format "%s" tool))
+            tools))
+   (t
+    (ellm-tools--error "tools must be a string or array"))))
+
+(defun ellm-tools--provider-name (provider)
+  "Return PROVIDER as a provider name string, or nil."
+  (cond
+   ((null provider) nil)
+   ((symbolp provider) (symbol-name provider))
+   ((stringp provider) (ellm-tools--present-string provider))
+   (t nil)))
+
+(defun ellm-tools--provider-entry (provider)
+  "Return `ellm-provider-alist' entry for PROVIDER name, or nil."
+  (when-let* ((name (ellm-tools--provider-name provider)))
+    (alist-get (intern name) ellm-provider-alist)))
+
+(defun ellm-tools--model-name (model)
+  "Return MODEL as a model name string, or nil."
+  (cond
+   ((null model) nil)
+   ((symbolp model) (symbol-name model))
+   ((stringp model) (ellm-tools--present-string model))
+   (t nil)))
+
+(defun ellm-tools--model-candidates (entry provider)
+  "Return configured model candidates from ENTRY or PROVIDER."
+  (or (and entry (ellm--provider-entry-models entry))
+      (and provider (ellm-provider-model-candidates provider))))
+
+(defun ellm-tools--validate-subagent-frontmatter (frontmatter fallback-provider)
+  "Validate provider/model selections in FRONTMATTER.
+FALLBACK-PROVIDER is used when FRONTMATTER has no `provider:' key."
+  (let* ((provider-name (ellm-tools--provider-name
+                         (ellm--plistish-get frontmatter 'provider)))
+         (entry (and provider-name
+                     (ellm-tools--provider-entry provider-name))))
+    (when (and provider-name (not entry))
+      (ellm-tools--error "subagent provider not configured: %s" provider-name))
+    (let* ((provider (if entry
+                         (ellm--provider-entry-provider entry)
+                       fallback-provider))
+           (model (ellm-tools--model-name
+                   (ellm--plistish-get frontmatter 'model)))
+           (candidates (ellm-tools--model-candidates entry provider)))
+      (unless provider
+        (ellm-tools--error "subagent has no provider configured"))
+      (when (and model candidates
+                 (not (member model candidates)))
+        (ellm-tools--error
+         "subagent model `%s' is not configured for provider `%s'"
+         model (or provider-name "<fallback>"))))))
+
+(defun ellm-tools--sanitize-subagent-frontmatter (frontmatter)
+  "Return FRONTMATTER copied and safe for a fresh child buffer."
+  (let ((result (copy-tree frontmatter)))
+    (dolist (path '((acp session-id)
+                    (acp title)
+                    (acp updated-at)
+                    (subagent)))
+      (setq result (ellm-tools--alist-delete-nested result path)))
+    result))
+
+(defun ellm-tools--subagent-frontmatter
+    (parent-frontmatter id parent-name prompt profile provider model tools system cwd
+                        fallback-provider)
+  "Return (FRONTMATTER . PROFILE-NAME) for a new subagent."
+  (let* ((config (ellm-tools--subagent-config parent-frontmatter))
+         (profile-entry (ellm-tools--resolve-subagent-profile config profile))
+         (profile-name (car profile-entry))
+         (profile-map (cdr profile-entry))
+         (frontmatter (ellm-tools--sanitize-subagent-frontmatter
+                       parent-frontmatter)))
+    (when profile-map
+      (setq frontmatter
+            (ellm-tools--merge-frontmatter-map frontmatter profile-map)))
+    (when-let* ((value (ellm-tools--provider-name provider)))
+      (setq frontmatter (ellm-tools--frontmatter-set frontmatter 'provider value)))
+    (when-let* ((value (ellm-tools--model-name model)))
+      (setq frontmatter (ellm-tools--frontmatter-set frontmatter 'model value)))
+    (when (or tools (vectorp tools))
+      (setq frontmatter
+            (ellm-tools--frontmatter-set
+             frontmatter 'tools (ellm-tools--normalize-tool-list tools))))
+    (when-let* ((value (ellm-tools--present-string system)))
+      (setq frontmatter (ellm-tools--frontmatter-set frontmatter 'system value)))
+    (when-let* ((value (ellm-tools--present-string cwd)))
+      (setq frontmatter (ellm-tools--frontmatter-set frontmatter 'cwd value)))
+    (setq frontmatter
+          (ellm-tools--frontmatter-set
+           frontmatter 'created (ellm--timestamp)))
+    (setq frontmatter
+          (ellm-tools--frontmatter-set
+           frontmatter 'subagent
+           (list (cons 'id id)
+                 (cons 'parent-buffer parent-name)
+                 (cons 'prompt (ellm-tools--prompt-summary prompt)))))
+    (ellm-tools--validate-subagent-frontmatter frontmatter fallback-provider)
+    (cons frontmatter profile-name)))
+
+(defun ellm-tools--next-subagent-id ()
+  "Return the next subagent id for the current parent buffer."
+  (setq ellm-subagent-counter (1+ (or ellm-subagent-counter 0)))
+  (format "subagent_%d" ellm-subagent-counter))
+
+(defun ellm-tools--prompt-summary (prompt)
+  "Return a short one-line summary of PROMPT."
+  (truncate-string-to-width
+   (car (split-string (string-trim (or prompt "")) "\n"))
+   120 nil nil t))
+
+(defun ellm-tools--subagent-buffer-name (id name profile)
+  "Return a generated subagent buffer name for ID, NAME and PROFILE."
+  (let ((label (or (ellm-tools--present-string name)
+                   (ellm-tools--present-string profile)
+                   id)))
+    (format ellm-subagent-buffer-name-format label)))
+
+(defun ellm-tools--create-subagent-buffer
+    (id name profile prompt frontmatter fallback-provider parent-default-directory
+        parent-buffer-name)
+  "Create, initialize, and send a subagent buffer."
+  (let ((buf (generate-new-buffer
+              (ellm-tools--subagent-buffer-name id name profile))))
+    (condition-case err
+        (with-current-buffer buf
+          (setq default-directory parent-default-directory)
+          (when fallback-provider
+            (setq-local ellm-provider fallback-provider))
+          (insert "---\n" (ellm--ensure-newline (yaml-encode frontmatter))
+                  "---\n\n")
+          (ellm-mode)
+          (setq-local ellm-subagent-id id)
+          (setq-local ellm-subagent-parent-buffer parent-buffer-name)
+          (ellm--insert-turn "user" :ts (ellm--timestamp))
+          (insert (ellm--ensure-newline prompt))
+          (ellm-send)
+          buf)
+      (error
+       (when (buffer-live-p buf)
+         (kill-buffer buf))
+       (signal (car err) (cdr err))))))
+
+(defun ellm-tools--ellm-buffer-status (buffer)
+  "Return BUFFER status as a short string."
+  (cond
+   ((not (buffer-live-p buffer)) "dead")
+   ((with-current-buffer buffer ellm--active-request) "running")
+   (t "idle")))
+
+(defun ellm-tools--record-subagent
+    (id buffer name profile prompt frontmatter)
+  "Record a launched subagent in the current buffer's history."
+  (let ((entry (list :id id
+                     :buffer-name (buffer-name buffer)
+                     :name (ellm-tools--present-string name)
+                     :profile profile
+                     :created (ellm--timestamp)
+                     :prompt (ellm-tools--prompt-summary prompt)
+                     :frontmatter (copy-tree frontmatter))))
+    (push entry ellm-subagent-history)
+    entry))
+
+(defun ellm-tools--format-subagent-entry (entry)
+  "Return a model-readable line for subagent history ENTRY."
+  (let* ((buffer-name (plist-get entry :buffer-name))
+         (buffer (and buffer-name (get-buffer buffer-name)))
+         (status (ellm-tools--ellm-buffer-status buffer)))
+    (format "- id=%s status=%s buffer=%S name=%S profile=%S created=%S prompt=%S"
+            (plist-get entry :id)
+            status
+            buffer-name
+            (plist-get entry :name)
+            (plist-get entry :profile)
+            (plist-get entry :created)
+            (plist-get entry :prompt))))
+
+(defun ellm-tools--format-subagent-history (history)
+  "Return model-readable HISTORY for launched subagents."
+  (concat
+   (format "<subagents total=%d>\n" (length history))
+   (if history
+       (string-join
+        (mapcar #'ellm-tools--format-subagent-entry (reverse history))
+        "\n")
+     "No subagents.")
+   "\n</subagents>"))
+
+(defun ellm-tools--format-subagent-launch-result (entry buffer)
+  "Return model-readable launch result for ENTRY and BUFFER."
+  (format (concat "<subagent id=%S buffer=%S status=%S>\n"
+                  "Use read_buffer_lines, search_buffer, buffer_edit, or send_ellm_buffer to inspect or continue this buffer when those tools are enabled.\n"
+                  "</subagent>")
+          (plist-get entry :id)
+          (buffer-name buffer)
+          (ellm-tools--ellm-buffer-status buffer)))
+
+(defun ellm-tools--launch-subagent
+    (prompt profile name provider model tools system cwd)
+  "Implementation for the `launch_subagent' tool."
+  (ellm-tools--validate-pattern prompt "prompt")
+  (let* ((parent-buffer (current-buffer))
+         (parent-buffer-name (buffer-name parent-buffer))
+         (parent-frontmatter (if (derived-mode-p 'ellm-mode)
+                                 (ellm--parse-frontmatter)
+                               nil))
+         (fallback-provider ellm-provider)
+         (parent-default-directory default-directory)
+         (id (ellm-tools--next-subagent-id))
+         (frontmatter-entry
+          (ellm-tools--subagent-frontmatter
+           parent-frontmatter id parent-buffer-name prompt profile provider model
+           tools system cwd fallback-provider))
+         (frontmatter (car frontmatter-entry))
+         (profile-name (cdr frontmatter-entry))
+         (buffer (ellm-tools--create-subagent-buffer
+                  id name profile-name prompt frontmatter fallback-provider
+                  parent-default-directory parent-buffer-name))
+         (entry (ellm-tools--record-subagent
+                 id buffer name profile-name prompt frontmatter)))
+    (ellm-tools--format-subagent-launch-result entry buffer)))
+
+(defun ellm-tools--normalize-wait-timeout (timeout)
+  "Return TIMEOUT normalized for `wait_subagent'."
+  (let ((value (or timeout ellm-subagent-wait-default-timeout)))
+    (unless (and (numberp value) (>= value 0))
+      (ellm-tools--error "timeout must be a non-negative number"))
+    value))
+
+(defun ellm-tools--normalize-wait-line-limit (max-lines)
+  "Return MAX-LINES normalized for `wait_subagent'."
+  (ellm-tools--normalized-limit
+   max-lines ellm-subagent-wait-result-line-limit))
+
+(defun ellm-tools--subagent-target (subagent)
+  "Return plist describing SUBAGENT from current buffer history.
+SUBAGENT may be a remembered id or a live buffer name."
+  (let* ((key (ellm-tools--present-string subagent))
+         (entry (and key
+                     (cl-find-if
+                      (lambda (entry)
+                        (or (equal key (plist-get entry :id))
+                            (equal key (plist-get entry :buffer-name))))
+                      ellm-subagent-history)))
+         (buffer-name (or (plist-get entry :buffer-name) key))
+         (buffer (and buffer-name (get-buffer buffer-name))))
+    (unless key
+      (ellm-tools--error "subagent must be a non-empty id or buffer name"))
+    (unless (or entry buffer)
+      (ellm-tools--error "unknown subagent: %s" key))
+    (when buffer
+      (with-current-buffer buffer
+        (unless (derived-mode-p 'ellm-mode)
+          (ellm-tools--error "buffer is not an ellm buffer: %s" buffer-name))))
+    (list :id (or (plist-get entry :id)
+                  (and buffer
+                       (with-current-buffer buffer ellm-subagent-id))
+                  key)
+          :buffer-name buffer-name
+          :buffer buffer
+          :entry entry)))
+
+(defun ellm-tools--limited-lines (text max-lines)
+  "Return TEXT limited to its last MAX-LINES lines as a plist."
+  (let* ((lines (split-string (or text "") "\n"))
+         (total (length lines))
+         (drop (max 0 (- total max-lines)))
+         (shown (nthcdr drop lines)))
+    (list :text (string-join shown "\n")
+          :total total
+          :shown (length shown)
+          :truncated (> drop 0))))
+
+(defun ellm-tools--last-assistant-content (buffer)
+  "Return BUFFER's last assistant turn content, or nil."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (when-let* ((turn (cl-find-if
+                         (lambda (turn)
+                           (equal (ellm-turn-role turn) "assistant"))
+                         (reverse (ellm--parse-turns)))))
+        (ellm-turn-content turn)))))
+
+(defun ellm-tools--buffer-text (buffer)
+  "Return BUFFER text without properties, or nil when it is not live."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (buffer-substring-no-properties (point-min) (point-max)))))
+
+(defun ellm-tools--format-limited-section (tag attrs limited)
+  "Return TAG section with ATTRS and LIMITED line data."
+  (format "<%s%s lines=%d total-lines=%d%s>\n%s\n</%s>\n"
+          tag
+          (if attrs (concat " " attrs) "")
+          (plist-get limited :shown)
+          (plist-get limited :total)
+          (if (plist-get limited :truncated) " truncated=true" "")
+          (plist-get limited :text)
+          tag))
+
+(defun ellm-tools--format-subagent-wait-result (target timed-out max-lines)
+  "Return model-readable wait result for TARGET."
+  (let* ((buffer (plist-get target :buffer))
+         (buffer-name (plist-get target :buffer-name))
+         (status (ellm-tools--ellm-buffer-status buffer))
+         (last-assistant (and buffer
+                              (ellm-tools--last-assistant-content buffer)))
+         (tail (and buffer (ellm-tools--buffer-text buffer))))
+    (concat
+     (format "<subagent id=%S buffer=%S status=%S%s>\n"
+             (plist-get target :id)
+             buffer-name
+             status
+             (if timed-out " timed-out=true" ""))
+     (if (not (buffer-live-p buffer))
+         "Buffer is not live.\n"
+       (concat
+        (if last-assistant
+            (ellm-tools--format-limited-section
+             "last_assistant" nil
+             (ellm-tools--limited-lines last-assistant max-lines))
+          "No assistant turn found.\n")
+        (ellm-tools--format-limited-section
+         "buffer_tail" nil
+         (ellm-tools--limited-lines tail max-lines))))
+     "</subagent>")))
+
+(defun ellm-tools--wait-subagent (subagent timeout max-lines)
+  "Implementation for the `wait_subagent' tool."
+  (let* ((target (ellm-tools--subagent-target subagent))
+         (buffer (plist-get target :buffer))
+         (seconds (ellm-tools--normalize-wait-timeout timeout))
+         (line-limit (ellm-tools--normalize-wait-line-limit max-lines))
+         (deadline (+ (float-time) seconds))
+         timed-out)
+    (while (and (buffer-live-p buffer)
+                (with-current-buffer buffer ellm--active-request)
+                (< (float-time) deadline))
+      (accept-process-output nil 0.05))
+    (setq timed-out
+          (and (buffer-live-p buffer)
+               (with-current-buffer buffer ellm--active-request)))
+    (ellm-tools--format-subagent-wait-result target timed-out line-limit)))
+
+(defun ellm-tools--ellm-buffer (buffer-name)
+  "Return live ellm buffer named BUFFER-NAME, or signal an error."
+  (unless (and (stringp buffer-name)
+               (not (string-empty-p buffer-name)))
+    (ellm-tools--error "invalid buffer name"))
+  (let ((buffer (get-buffer buffer-name)))
+    (unless buffer
+      (ellm-tools--error "invalid buffer name"))
+    (with-current-buffer buffer
+      (unless (derived-mode-p 'ellm-mode)
+        (ellm-tools--error "buffer is not an ellm buffer: %s" buffer-name)))
+    buffer))
+
+(defun ellm-tools--append-ellm-prompt (prompt)
+  "Append PROMPT to the current ellm buffer as the next user turn."
+  (when-let* ((text (ellm-tools--present-string prompt)))
+    (let* ((turns (ellm--parse-turns))
+           (last-turn (car (last turns))))
+      (if (and last-turn
+               (equal (ellm-turn-role last-turn) "user")
+               (s-blank? (ellm-turn-content last-turn)))
+          (progn
+            (goto-char (ellm-turn-beg last-turn))
+            (delete-region (ellm-turn-beg last-turn)
+                           (ellm-turn-end last-turn))
+            (insert (ellm--ensure-newline text)))
+        (ellm--insert-turn "user" :ts (ellm--timestamp))
+        (insert (ellm--ensure-newline text))))))
+
+(defun ellm-tools--send-ellm-buffer (buffer-name prompt)
+  "Implementation for the `send_ellm_buffer' tool."
+  (let ((buffer (ellm-tools--ellm-buffer buffer-name)))
+    (with-current-buffer buffer
+      (when ellm--active-request
+        (ellm-tools--error "ellm buffer already has a request in flight: %s"
+                           buffer-name))
+      (ellm-tools--append-ellm-prompt prompt)
+      (ellm-send)
+      (format "<ellm_buffer buffer=%S status=%S>\nSent.\n</ellm_buffer>"
+              (buffer-name buffer)
+              (ellm-tools--ellm-buffer-status buffer)))))
 
 ;;;;;; Websearch
 

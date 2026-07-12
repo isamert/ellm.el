@@ -80,7 +80,25 @@ buffer's frontmatter, and by `ellm--frontmatter-capf' for completion."
                 :value-type
                 (choice (restricted-sexp :match-alternatives (recordp))
                         (plist :options ((:provider sexp)
-                                         (:models (repeat string))))))
+                                          (:models (repeat string))))))
+  :group 'ellm)
+
+(defcustom ellm-subagents nil
+  "Global defaults and profiles for subagent buffers.
+This has the same shape as frontmatter `subagents:'.  A buffer-local
+frontmatter `subagents:' map takes precedence when present.
+
+The common shape is:
+
+  ((default . \"cheap\")
+   (profiles . ((cheap . ((model . \"small\")))
+                (reviewer . ((model . \"large\")
+                             (tools . (\"@files\" \"@buffers\")))))))
+
+`default' may be a profile name or a map of settings.  Profile maps may
+set any frontmatter key useful to a child buffer, most commonly `provider',
+`model', `tools', `system', and `cwd'."
+  :type 'sexp
   :group 'ellm)
 
 (defun ellm--provider-entry-provider (entry)
@@ -1983,6 +2001,12 @@ streaming backend insertions.  Nil REQUEST restores the previous
      :desc "MCP servers enabled for this buffer; true means all, names come from `ellm-mcp-servers', and `@CATEGORY' expands categories."
      :values (("true" :desc "Enable every MCP server in `ellm-mcp-servers'."))
      :items ellm--capf-mcp-candidates)
+    ("subagents"   :ann "map"
+     :desc "Subagent defaults and named profiles. Buffer-local `subagents:' overrides `ellm-subagents'."
+     :children (("default" :ann "profile|map"
+                 :desc "Default subagent profile name or inline settings map.")
+                ("profiles" :ann "map"
+                 :desc "Named subagent profile maps. Each profile may set provider, model, tools, system, cwd, and related frontmatter.")))
     ("acp" :ann "acp"
      :desc "ACP related configurations."
      :children (("session-id" :ann "string"
