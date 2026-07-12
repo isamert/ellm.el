@@ -1401,7 +1401,8 @@ When SELECT is non-nil, choose a session from `session/list'."
       (goto-char (point-max))
       (unless (and (ellm--parse-turns)
                    (equal (ellm-turn-role (car (last (ellm--parse-turns)))) "user"))
-        (ellm--insert-turn "user")))
+        (ellm--insert-turn "user"))
+      (ellm--persistence-checkpoint))
     (switch-to-buffer buf)
     buf))
 
@@ -1957,13 +1958,15 @@ If the matched turn has nested child turns, delete those children too."
                            (last-turn (car (last turns))))
                   (equal (ellm-turn-role last-turn) "user"))
           (ellm--insert-turn "user"))
-        (ellm--set-active-request nil)))))
+        (ellm--set-active-request nil)
+        (ellm--persistence-checkpoint)))))
 
 (defun ellm-acp--finish-with-error (buffer error-object)
   "Finish ACP request in BUFFER by signalling ERROR-OBJECT."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
-      (ellm--set-active-request nil)))
+      (ellm--set-active-request nil)
+      (ellm--persistence-checkpoint)))
   (error "ellm ACP: %s"
          (or (plist-get error-object :message)
              "request failed")))

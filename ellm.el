@@ -101,6 +101,48 @@ set any frontmatter key useful to a child buffer, most commonly `provider',
   :type 'sexp
   :group 'ellm)
 
+(defcustom ellm-current-project-function #'ellm-current-project-root
+  "Function used to return the current project root.
+The function is called without arguments with `default-directory' set to
+the ellm buffer's base directory.  The default implementation finds the
+closest parent containing a `.git' directory."
+  :type 'function
+  :group 'ellm)
+
+(defcustom ellm-persistence-enabled nil
+  "When non-nil, automatically persist ellm conversation buffers.
+New main conversations receive a session directory and `main.ellm' file.
+Subagents are stored below that directory in `subagents/'."
+  :type 'boolean
+  :group 'ellm)
+
+(defcustom ellm-persistence-location 'global
+  "Where automatically persisted ellm sessions are stored.
+`global' uses `ellm-persistence-directory'.  `project' uses the directory
+named by `ellm-persistence-project-directory' below the current project
+root, falling back to `ellm-persistence-directory' outside a project.  A
+function value is called without arguments in the ellm buffer and should
+return a directory name; nil means not to persist that buffer."
+  :type '(choice (const :tag "Global directory" global)
+                 (const :tag "Current project" project)
+                 (function :tag "Directory function"))
+  :group 'ellm)
+
+(defcustom ellm-persistence-directory (expand-file-name "~/ellm/")
+  "Directory used for globally persisted ellm sessions."
+  :type 'directory
+  :group 'ellm)
+
+(defcustom ellm-persistence-project-directory ".ellm"
+  "Directory below a project root used for project-local sessions."
+  :type 'string
+  :group 'ellm)
+
+(defun ellm-current-project-root ()
+  "Return the current project root, or nil outside a Git repository."
+  (when-let* ((path (locate-dominating-file default-directory ".git")))
+    (expand-file-name path)))
+
 (defun ellm--provider-entry-provider (entry)
   "Return the provider object from an `ellm-provider-alist' ENTRY value.
 ENTRY is either a provider object directly or a plist with a
@@ -1694,6 +1736,18 @@ stored without their leading colon, e.g. `:id call_1' becomes
 (defvar-local ellm--frontmatter-cwd-directory nil
   "Resolved directory from frontmatter `cwd:', or nil when unset.")
 
+(defvar-local ellm--persistence-ephemeral-p nil
+  "Non-nil when this ellm buffer must not be automatically persisted.")
+
+(defvar-local ellm--session-directory nil
+  "Directory containing this conversation and its subagent files.")
+
+(put 'ellm--persistence-ephemeral-p 'permanent-local t)
+(put 'ellm--session-directory 'permanent-local t)
+
+(defvar-local ellm--persistence-saving-p nil
+  "Non-nil while ellm is assigning or saving this buffer's persistence file.")
+
 (defun ellm--warn-frontmatter-parse-error (err)
   "Warn about frontmatter parse ERR."
   (lwarn 'ellm :warning "Failed to parse frontmatter: %S" err))
@@ -1770,6 +1824,138 @@ request-time read-only protection."
          (concat (unless beg "---\n")
                  (yaml-encode (ellm--alist-set-nested fm key value))
                  (unless beg "\n---\n\n")))))))
+
+;;;;; Persistence
+
+(defun ellm--persistence-root ()
+  "Return the automatic persistence root for the current buffer."
+  (let ((root
+         (pcase ellm-persistence-location
+           ('global ellm-persistence-directory)
+           ('project
+            (if-let* ((default-directory
+                        (or ellm--base-default-directory default-directory))
+                      (project-root
+                       (funcall ellm-current-project-function)))
+                (expand-file-name ellm-persistence-project-directory
+                                  project-root)
+              ellm-persistence-directory))
+           ((pred functionp)
+            (funcall ellm-persistence-location))
+           (_ nil))))
+    (and root (file-name-as-directory (expand-file-name root)))))
+
+(defun ellm--new-session-id ()
+  "Return a new session id suitable for a directory name."
+  (format "%s-%06x"
+          (format-time-string "%Y%m%dT%H%M%S")
+          (random #x1000000)))
+
+(defun ellm--persistence-session-role ()
+  "Return the persistence role of the current ellm buffer."
+  (if (ellm--frontmatter-value '(subagent id))
+      "subagent"
+    (or (ellm--frontmatter-value '(ellm role)) "main")))
+
+(defun ellm--persistence-session-directory-from-file (role)
+  "Return the session directory implied by `buffer-file-name' and ROLE."
+  (when buffer-file-name
+    (let ((directory (file-name-directory buffer-file-name)))
+      (if (and (equal role "subagent")
+               (equal (file-name-nondirectory
+                       (directory-file-name directory))
+                      "subagents"))
+          (file-name-directory (directory-file-name directory))
+        directory))))
+
+(defun ellm--persistence-target-file (role)
+  "Return the file name for ROLE in `ellm--session-directory'."
+  (if (equal role "subagent")
+      (when-let* ((id (ellm--frontmatter-value '(subagent id))))
+        (expand-file-name (concat (format "%s" id) ".ellm")
+                          (expand-file-name "subagents/"
+                                            ellm--session-directory)))
+    (expand-file-name "main.ellm" ellm--session-directory)))
+
+(defun ellm--persistence-set-frontmatter-value (key value)
+  "Set frontmatter KEY to VALUE only when it differs."
+  (unless (equal (ellm--frontmatter-value key) value)
+    (ellm--set-frontmatter-value key value)))
+
+(defun ellm--persistence-recognize-buffer ()
+  "Restore persistence state from an already visited ellm file."
+  (when (and buffer-file-name
+             (ellm--frontmatter-value '(ellm session-id)))
+    (setq-local
+     ellm--session-directory
+     (ellm--persistence-session-directory-from-file
+      (ellm--persistence-session-role)))))
+
+(defun ellm--persistence-setup-buffer ()
+  "Assign persistence metadata and a visited file to the current buffer."
+  (when (and ellm-persistence-enabled
+             (not ellm--persistence-ephemeral-p)
+             (not ellm--persistence-saving-p))
+    (let* ((ellm--persistence-saving-p t)
+           (role (ellm--persistence-session-role))
+           (session-id (or (ellm--frontmatter-value '(ellm session-id))
+                           (ellm--new-session-id))))
+      (unless ellm--session-directory
+        (setq-local
+         ellm--session-directory
+         (or (ellm--persistence-session-directory-from-file role)
+             (when-let* ((root (ellm--persistence-root)))
+               (expand-file-name (concat session-id "/") root)))))
+      (when ellm--session-directory
+        (make-directory ellm--session-directory t)
+        (ellm--persistence-set-frontmatter-value '(ellm session-id) session-id)
+        (ellm--persistence-set-frontmatter-value '(ellm role) role)
+        (unless buffer-file-name
+          (when-let* ((file (ellm--persistence-target-file role)))
+            (make-directory (file-name-directory file) t)
+            (let ((name (buffer-name)))
+              (set-visited-file-name file t)
+              (rename-buffer name t))))))))
+
+(defun ellm--persistence-checkpoint ()
+  "Persist the current ellm buffer at a stable conversation boundary."
+  (when (and ellm-persistence-enabled
+             (not ellm--persistence-ephemeral-p)
+             (not ellm--persistence-saving-p))
+    (condition-case err
+        (progn
+          (ellm--persistence-setup-buffer)
+          (when buffer-file-name
+            (let ((ellm--persistence-saving-p t)
+                  (save-silently t)
+                  (inhibit-message t))
+              (save-buffer)))
+          buffer-file-name)
+      (error
+       (lwarn 'ellm :warning "Failed to persist conversation: %s"
+              (error-message-string err))
+       nil))))
+
+(defun ellm--persistence-before-kill ()
+  "Save the current conversation before backend session cleanup."
+  (ellm--persistence-checkpoint))
+
+(defun ellm-open-session ()
+  "Open a persisted main conversation from the current persistence root."
+  (interactive)
+  (let* ((root (or (ellm--persistence-root)
+                   (user-error "ellm: persistence has no directory here")))
+         (files (and (file-directory-p root)
+                     (directory-files-recursively root "main\\.ellm\\'")))
+         (choices (mapcar (lambda (file)
+                            (cons (file-relative-name
+                                   (file-name-directory file) root)
+                                  file))
+                          files)))
+    (unless choices
+      (user-error "ellm: no persisted sessions in %s" root))
+    (find-file (cdr (assoc (completing-read "Ellm session: " choices nil t)
+                           choices)))))
 
 ;;;;; Provider resolution
 
@@ -2016,6 +2202,12 @@ streaming backend insertions.  Nil REQUEST restores the previous
                  :desc "Default subagent profile name or inline settings map.")
                 ("profiles" :ann "map"
                  :desc "Named subagent profile maps. Each profile may set provider, model, tools, system, cwd, and related frontmatter.")))
+    ("ellm"        :ann "metadata"
+     :desc "Persistence metadata maintained by ellm."
+     :children (("session-id" :ann "string"
+                 :desc "Stable id shared by a conversation and its subagents.")
+                ("role" :ann "main|subagent"
+                 :desc "File role within a persisted session.")))
     ("acp" :ann "acp"
      :desc "ACP related configurations."
      :children (("session-id" :ann "string"
@@ -2445,13 +2637,14 @@ Completes:
 
 ;;;;;; Insertion
 
-(defun ellm-new-buffer ()
-  "Create a new ellm conversation buffer with optional MODEL."
-  (interactive)
+(defun ellm--new-buffer (ephemeral)
+  "Create a new ellm conversation buffer.
+When EPHEMERAL is non-nil, do not automatically persist it."
   (let ((buf (generate-new-buffer "*ellm*"))
         (provider-name (caar ellm-provider-alist))
         (provider (cdar ellm-provider-alist)))
     (with-current-buffer buf
+      (setq-local ellm--persistence-ephemeral-p ephemeral)
       (insert (format "---\nprovider: %s\nmodel: %s\ncreated: %s\n---\n\n"
                       (or provider-name "null")
                       (or (ellm-provider-current-model
@@ -2462,6 +2655,19 @@ Completes:
       (ellm-mode))
     (switch-to-buffer buf)
     buf))
+
+(defun ellm-new-buffer ()
+  "Create a new ellm conversation buffer."
+  (interactive)
+  (ellm--new-buffer nil))
+
+(defun ellm-new-temp-buffer ()
+  "Create an ephemeral ellm conversation buffer.
+This is equivalent to `ellm-new-buffer' when automatic persistence is
+disabled.  When persistence is enabled, neither this buffer nor subagents
+launched from it receive automatic files."
+  (interactive)
+  (ellm--new-buffer 'ephemeral))
 
 (defun ellm--timestamp ()
   "Return current ISO 8601 timestamp."
@@ -2925,6 +3131,7 @@ Errors during streaming are signalled normally."
   (when ellm--active-request
     (user-error "ellm: a request is already in flight; M-x ellm-cancel"))
   (ellm--ensure-trailing-user-turn)
+  (ellm--persistence-checkpoint)
   (let* ((fm       (ellm--parse-frontmatter))
          (provider (ellm--resolve-provider fm))
          (buf      (current-buffer))
@@ -2938,9 +3145,12 @@ Errors during streaming are signalled normally."
           ;; still on the stack.  In that case completion already cleared
           ;; `ellm--active-request'; do not resurrect a stale request handle here.
           (when (eq ellm--active-request ellm--request-starting)
-            (ellm--set-active-request request)))
+            (ellm--set-active-request request))
+          (unless ellm--active-request
+            (ellm--persistence-checkpoint)))
       (error
        (ellm--set-active-request nil)
+       (ellm--persistence-checkpoint)
        (signal (car err) (cdr err))))))
 
 (defun ellm-cancel (&optional quiet)
@@ -2952,6 +3162,7 @@ If QUIET is non-nil, then do not print any messages."
         (message "ellm: no active request"))
     (ellm-backend-cancel ellm--active-request)
     (ellm--set-active-request nil)
+    (ellm--persistence-checkpoint)
     (unless quiet
       (message "ellm: request cancelled"))))
 
@@ -3224,6 +3435,7 @@ Implementations should stream into the assistant turn already appended by
     (define-key map (kbd "C-c C-k")   #'ellm-cancel)
     (define-key map (kbd "C-c C-s")   #'ellm-start-session)
     (define-key map (kbd "C-c C-l")   #'ellm-load-session)
+    (define-key map (kbd "C-c C-o")   #'ellm-open-session)
     map)
   "Keymap for `ellm-mode'.")
 
@@ -3247,6 +3459,7 @@ Implementations should stream into the assistant turn already appended by
   (add-hook 'completion-at-point-functions #'ellm--frontmatter-capf nil t)
   (add-hook 'completion-at-point-functions #'ellm--slash-command-capf nil t)
   (add-hook 'kill-buffer-hook #'ellm--close-session-on-kill nil t)
+  (add-hook 'kill-buffer-hook #'ellm--persistence-before-kill nil t)
   (setq-local outline-regexp (ellm--outline-regexp))
   (setq-local outline-search-function #'ellm--outline-search-function)
   (setq-local outline-level #'ellm--outline-level)
@@ -3268,7 +3481,9 @@ Implementations should stream into the assistant turn already appended by
   (setq ellm--was-narrowed-p (buffer-narrowed-p))
   ;; Collapse configured turns (tool calls / reasoning) in loaded
   ;; conversations.  Safe here because every turn is already complete.
-  (ellm--fold-configured-turns))
+  (ellm--fold-configured-turns)
+  (ellm--persistence-recognize-buffer)
+  (ellm--persistence-checkpoint))
 
 ;;;###autoload
 (add-to-list 'auto-mode-alist '("\\.ellm\\'" . ellm-mode))

@@ -45,14 +45,6 @@
   :group 'ellm
   :link '(url-link "https://github.com/isamert/ellm.el"))
 
-(defcustom ellm-tools-current-project-function #'ellm-tools-current-project-root
-  "Function for getting the root of the current project.
-Some of the tools functionality depends on finding the root of the
-current project.  Default implementation simply finds the closest .git
-directories parent folder."
-  :type 'function
-  :group 'ellm-tools)
-
 (defcustom ellm-tools-default-timeout 60
   "Default timeout in seconds for asynchronous ellm tools.
 Set to nil to disable the macro-level timeout.  Individual tools can
@@ -170,6 +162,9 @@ Each entry is a plist with serializable values such as `:id',
 
 (defvar-local ellm-subagent-parent-buffer nil
   "Name of the parent buffer that launched this subagent, or nil.")
+
+(put 'ellm-subagent-id 'permanent-local t)
+(put 'ellm-subagent-parent-buffer 'permanent-local t)
 
 ;;;; `ellm-deftool' macro
 
@@ -673,13 +668,6 @@ conversation buffer."
 
 ;;;; Tool helpers
 
-;;;;; Public
-
-(defun ellm-tools-current-project-root ()
-  "Return the root path of current project."
-  (when-let* ((path (locate-dominating-file default-directory ".git")))
-    (expand-file-name path)))
-
 (defun ellm-tools--default-directory ()
   "Return the directory custom tools should use for relative paths."
   (file-name-as-directory
@@ -687,7 +675,7 @@ conversation buffer."
     (or (and ellm--frontmatter-cwd-directory
              (file-directory-p ellm--frontmatter-cwd-directory)
              ellm--frontmatter-cwd-directory)
-        (funcall ellm-tools-current-project-function)
+        (funcall ellm-current-project-function)
         default-directory))))
 
 ;;;;; Internal
@@ -1135,13 +1123,14 @@ FALLBACK-PROVIDER is used when FRONTMATTER has no `provider:' key."
     (dolist (path '((acp session-id)
                     (acp title)
                     (acp updated-at)
+                    (ellm role)
                     (subagent)))
       (setq result (ellm-tools--alist-delete-nested result path)))
     result))
 
 (defun ellm-tools--subagent-frontmatter
-    (parent-frontmatter id parent-name prompt profile provider model tools system cwd
-                        fallback-provider)
+    (parent-frontmatter id parent-id parent-name parent-file name prompt profile
+                        provider model tools system cwd fallback-provider)
   "Return (FRONTMATTER . PROFILE-NAME) for a new subagent."
   (let* ((config (ellm-tools--subagent-config parent-frontmatter))
          (profile-entry (ellm-tools--resolve-subagent-profile config profile))
@@ -1170,16 +1159,22 @@ FALLBACK-PROVIDER is used when FRONTMATTER has no `provider:' key."
     (setq frontmatter
           (ellm-tools--frontmatter-set
            frontmatter 'subagent
-           (list (cons 'id id)
-                 (cons 'parent-buffer parent-name)
-                 (cons 'prompt (ellm-tools--prompt-summary prompt)))))
+           (delq nil
+                 (list (cons 'id id)
+                       (and parent-id (cons 'parent-id parent-id))
+                       (cons 'parent-buffer parent-name)
+                       (and parent-file (cons 'parent-file parent-file))
+                       (and (ellm-tools--present-string name)
+                            (cons 'name name))
+                       (and profile-name (cons 'profile profile-name))
+                       (cons 'prompt (ellm-tools--prompt-summary prompt))))))
     (ellm-tools--validate-subagent-frontmatter frontmatter fallback-provider)
     (cons frontmatter profile-name)))
 
 (defun ellm-tools--next-subagent-id ()
   "Return the next subagent id for the current parent buffer."
   (setq ellm-subagent-counter (1+ (or ellm-subagent-counter 0)))
-  (format "subagent_%d" ellm-subagent-counter))
+  (format "%s_%d" (or ellm-subagent-id "subagent") ellm-subagent-counter))
 
 (defun ellm-tools--prompt-summary (prompt)
   "Return a short one-line summary of PROMPT."
@@ -1196,20 +1191,22 @@ FALLBACK-PROVIDER is used when FRONTMATTER has no `provider:' key."
 
 (defun ellm-tools--create-subagent-buffer
     (id name profile prompt frontmatter fallback-provider parent-default-directory
-        parent-buffer-name)
+        parent-buffer-name parent-session-directory parent-ephemeral-p)
   "Create, initialize, and send a subagent buffer."
   (let ((buf (generate-new-buffer
               (ellm-tools--subagent-buffer-name id name profile))))
     (condition-case err
         (with-current-buffer buf
           (setq default-directory parent-default-directory)
+          (setq-local ellm--session-directory parent-session-directory)
+          (setq-local ellm--persistence-ephemeral-p parent-ephemeral-p)
+          (setq-local ellm-subagent-id id)
+          (setq-local ellm-subagent-parent-buffer parent-buffer-name)
           (when fallback-provider
             (setq-local ellm-provider fallback-provider))
           (insert "---\n" (ellm--ensure-newline (yaml-encode frontmatter))
                   "---\n\n")
           (ellm-mode)
-          (setq-local ellm-subagent-id id)
-          (setq-local ellm-subagent-parent-buffer parent-buffer-name)
           (ellm--insert-turn "user" :ts (ellm--timestamp))
           (insert (ellm--ensure-newline prompt))
           (ellm-send)
@@ -1235,6 +1232,7 @@ FALLBACK-PROVIDER is used when FRONTMATTER has no `provider:' key."
                      :profile profile
                      :created (ellm--timestamp)
                      :prompt (ellm-tools--prompt-summary prompt)
+                     :file (buffer-file-name buffer)
                      :frontmatter (copy-tree frontmatter))))
     (push entry ellm-subagent-history)
     entry))
@@ -1243,11 +1241,15 @@ FALLBACK-PROVIDER is used when FRONTMATTER has no `provider:' key."
   "Return a model-readable line for subagent history ENTRY."
   (let* ((buffer-name (plist-get entry :buffer-name))
          (buffer (and buffer-name (get-buffer buffer-name)))
-         (status (ellm-tools--ellm-buffer-status buffer)))
-    (format "- id=%s status=%s buffer=%S name=%S profile=%S created=%S prompt=%S"
+         (file (plist-get entry :file))
+         (status (if (and (not buffer) file (file-exists-p file))
+                     "saved"
+                   (ellm-tools--ellm-buffer-status buffer))))
+    (format "- id=%s status=%s buffer=%S file=%S name=%S profile=%S created=%S prompt=%S"
             (plist-get entry :id)
             status
             buffer-name
+            file
             (plist-get entry :name)
             (plist-get entry :profile)
             (plist-get entry :created)
@@ -1277,23 +1279,33 @@ FALLBACK-PROVIDER is used when FRONTMATTER has no `provider:' key."
     (prompt profile name provider model tools system cwd)
   "Implementation for the `launch_subagent' tool."
   (ellm-tools--validate-pattern prompt "prompt")
+  (ellm--persistence-checkpoint)
   (let* ((parent-buffer (current-buffer))
          (parent-buffer-name (buffer-name parent-buffer))
+         (parent-id ellm-subagent-id)
+         (parent-session-directory ellm--session-directory)
+         (parent-file
+          (and buffer-file-name parent-session-directory
+               (file-relative-name
+                buffer-file-name
+                (expand-file-name "subagents/" parent-session-directory))))
          (parent-frontmatter (if (derived-mode-p 'ellm-mode)
                                  (ellm--parse-frontmatter)
                                nil))
          (fallback-provider ellm-provider)
          (parent-default-directory default-directory)
+         (parent-ephemeral-p ellm--persistence-ephemeral-p)
          (id (ellm-tools--next-subagent-id))
          (frontmatter-entry
           (ellm-tools--subagent-frontmatter
-           parent-frontmatter id parent-buffer-name prompt profile provider model
-           tools system cwd fallback-provider))
+           parent-frontmatter id parent-id parent-buffer-name parent-file name prompt
+           profile provider model tools system cwd fallback-provider))
          (frontmatter (car frontmatter-entry))
          (profile-name (cdr frontmatter-entry))
          (buffer (ellm-tools--create-subagent-buffer
                   id name profile-name prompt frontmatter fallback-provider
-                  parent-default-directory parent-buffer-name))
+                  parent-default-directory parent-buffer-name
+                  parent-session-directory parent-ephemeral-p))
          (entry (ellm-tools--record-subagent
                  id buffer name profile-name prompt frontmatter)))
     (ellm-tools--format-subagent-launch-result entry buffer)))
@@ -1320,12 +1332,18 @@ SUBAGENT may be a remembered id or a live buffer name."
                         (or (equal key (plist-get entry :id))
                             (equal key (plist-get entry :buffer-name))))
                       ellm-subagent-history)))
+         (file (plist-get entry :file))
          (buffer-name (or (plist-get entry :buffer-name) key))
-         (buffer (and buffer-name (get-buffer buffer-name))))
+         (buffer (or (and buffer-name (get-buffer buffer-name))
+                     (and file (file-readable-p file)
+                          (find-file-noselect file)))))
     (unless key
       (ellm-tools--error "subagent must be a non-empty id or buffer name"))
     (unless (or entry buffer)
       (ellm-tools--error "unknown subagent: %s" key))
+    (when (and entry buffer)
+      (setf (plist-get entry :buffer-name) (buffer-name buffer))
+      (setq buffer-name (buffer-name buffer)))
     (when buffer
       (with-current-buffer buffer
         (unless (derived-mode-p 'ellm-mode)
@@ -1337,6 +1355,67 @@ SUBAGENT may be a remembered id or a live buffer name."
           :buffer-name buffer-name
           :buffer buffer
           :entry entry)))
+
+(defun ellm-tools--persisted-subagent-entry (file frontmatter)
+  "Return a history entry for persisted subagent FILE and FRONTMATTER."
+  (list :id (ellm--alist-get-nested frontmatter '(subagent id))
+        :buffer-name (and-let* ((buffer (find-buffer-visiting file)))
+                       (buffer-name buffer))
+        :file file
+        :name (ellm--alist-get-nested frontmatter '(subagent name))
+        :profile (ellm--alist-get-nested frontmatter '(subagent profile))
+        :created (alist-get 'created frontmatter)
+        :prompt (ellm--alist-get-nested frontmatter '(subagent prompt))
+        :frontmatter frontmatter))
+
+(defun ellm-tools--read-persisted-subagent (file session-id parent-id)
+  "Return a history entry for FILE when it belongs to SESSION-ID and PARENT-ID."
+  (with-temp-buffer
+    (insert-file-contents file)
+    (when-let* ((frontmatter (ellm--parse-frontmatter t))
+                (id (ellm--alist-get-nested frontmatter '(subagent id)))
+                ((equal (ellm--alist-get-nested frontmatter '(ellm session-id))
+                        session-id))
+                ((equal (ellm--alist-get-nested frontmatter '(subagent parent-id))
+                        parent-id)))
+      (ellm-tools--persisted-subagent-entry file frontmatter))))
+
+(defun ellm-tools--restore-persisted-subagents ()
+  "Restore subagent identity and direct-child history from persisted files."
+  (when (derived-mode-p 'ellm-mode)
+    (let* ((frontmatter (ellm--parse-frontmatter t))
+           (session-id (ellm--alist-get-nested frontmatter '(ellm session-id)))
+           (id (ellm--alist-get-nested frontmatter '(subagent id)))
+           (parent-file (ellm--alist-get-nested
+                         frontmatter '(subagent parent-file))))
+      (when id
+        (setq-local ellm-subagent-id id)
+        (when (and buffer-file-name parent-file)
+          (when-let* ((parent (find-buffer-visiting
+                               (expand-file-name parent-file
+                                                 (file-name-directory
+                                                  buffer-file-name)))))
+            (setq-local ellm-subagent-parent-buffer (buffer-name parent)))))
+      (when-let* ((directory ellm--session-directory)
+                  (subagents-directory (expand-file-name "subagents/" directory))
+                  ((file-directory-p subagents-directory)))
+        (setq-local
+         ellm-subagent-history
+         (delq nil
+               (mapcar (lambda (file)
+                         (ellm-tools--read-persisted-subagent
+                          file session-id id))
+                       (directory-files subagents-directory t "\\.ellm\\'" t))))
+        (let ((prefix (concat "\\`" (regexp-quote (or id "subagent"))
+                              "_\\([0-9]+\\)\\'")))
+          (setq-local
+           ellm-subagent-counter
+           (cl-loop for entry in ellm-subagent-history
+                    for child-id = (plist-get entry :id)
+                    when (and child-id (string-match prefix child-id))
+                    maximize (string-to-number (match-string 1 child-id))
+                    into maximum
+                    finally return (or maximum 0))))))))
 
 (defun ellm-tools--limited-lines (text max-lines)
   "Return TEXT limited to its last MAX-LINES lines as a plist."
@@ -1774,6 +1853,8 @@ exactly one occurrence.  NAME is used for error and status messages."
           (format "Successfully edited %s" name)))))))
 
 ;;;; Footer
+
+(add-hook 'ellm-mode-hook #'ellm-tools--restore-persisted-subagents)
 
 (provide 'ellm-tools)
 ;;; ellm-tools.el ends here

@@ -24,11 +24,48 @@ Useful commands:
 | `C-c C-c` | `ellm-send`           | Send the final `user` turn.                                      |
 | `C-c C-k` | `ellm-cancel`         | Cancel the active request.                                       |
 | `C-c C-l` | `ellm-load-session`   | Pick and load a backend session, when supported.                 |
+| `C-c C-o` | `ellm-open-session`   | Open a locally persisted conversation.                           |
 | none      | `ellm-close-session`  | Close the current backend session, when supported.               |
 | none      | `ellm-delete-session` | Delete the current backend session from history, when supported. |
 
 Create a new conversation with `M-x ellm-new-buffer`, edit the final
 `user` turn, then run `ellm-send`.
+
+### Automatic Persistence
+
+Automatic persistence is opt-in.  Global storage creates one directory per
+conversation below `~/ellm/`:
+
+```elisp
+(setq ellm-persistence-enabled t)
+```
+
+Use project-local storage instead:
+
+```elisp
+(setq ellm-persistence-enabled t
+      ellm-persistence-location 'project)
+```
+
+Project-local sessions are stored below `.ellm/`.  Outside a recognized
+project this setting falls back to `ellm-persistence-directory`.  Both the
+global directory and project directory name are customizable.
+
+Each main conversation and all subagents share a session directory:
+
+```text
+20260712T143012-a1b2c3/
+  main.ellm
+  subagents/
+    subagent_1.ellm
+    subagent_2.ellm
+```
+
+Ellm checkpoints the files when a user turn is sent, when an assistant turn
+finishes, and on cancellation, error, or buffer kill.  Reopening `main.ellm`
+restores its subagent history; saved subagents are opened lazily when a tool
+needs them.  Use `M-x ellm-new-temp-buffer` for a deliberately ephemeral
+conversation and ephemeral subagents even when persistence is enabled.
 
 ### llm.el Backend
 

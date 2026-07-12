@@ -351,13 +351,15 @@ is text-only, a fresh trailing `user' turn is appended."
                     ;; stable boundary; covers reasoning-only responses too.
                     (when ellm-fold-reasoning-blocks
                       (ellm-llm--fold-reasoning-in-region start end))
+                    (ellm--persistence-checkpoint)
                     (when recurse
                       (ellm-llm--send-once provider prompt buf)))))))
            (on-error
              (lambda (type msg)
                (ellm-llm--ensure-buffer buf request)
                (with-current-buffer buf
-                 (ellm--set-active-request nil))
+                 (ellm--set-active-request nil)
+                 (ellm--persistence-checkpoint))
                (signal type (list msg)))))
       (ellm--set-active-request ellm--request-starting)
       (condition-case err
@@ -370,7 +372,8 @@ is text-only, a fresh trailing `user' turn is appended."
               (ellm--set-active-request (ellm-llm--make-request :raw request))))
         (error
          (when (eq ellm--active-request ellm--request-starting)
-           (ellm--set-active-request nil))
+           (ellm--set-active-request nil)
+           (ellm--persistence-checkpoint))
          (signal (car err) (cdr err)))))))
 
 (defun ellm-llm--frontmatter-cwd (frontmatter)
