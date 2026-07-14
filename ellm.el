@@ -2677,6 +2677,16 @@ Completes:
 
 ;;;;;; Insertion
 
+(defun ellm--defer-call (function &rest args)
+  "Call FUNCTION with ARGS from a timer when no minibuffer is active."
+  (run-at-time 0 nil #'ellm--call-when-minibuffer-free function args))
+
+(defun ellm--call-when-minibuffer-free (function args)
+  "Call FUNCTION with ARGS, waiting while another minibuffer is active."
+  (if (active-minibuffer-window)
+      (run-at-time 0.1 nil #'ellm--call-when-minibuffer-free function args)
+    (apply function args)))
+
 (defun ellm--new-buffer (ephemeral &optional select-provider-model)
   "Create a new ellm conversation buffer.
 When EPHEMERAL is non-nil, do not automatically persist it.
@@ -2699,22 +2709,46 @@ When SELECT-PROVIDER-MODEL is non-nil, prompt for the provider and model."
                           "null")
                       (ellm--timestamp)))
       (ellm--insert-turn "user" :ts (ellm--timestamp))
-      (ellm-mode)
-      (when select-provider-model
-        (when (and provider
-                   (not (ellm--provider-entry-models provider-entry))
-                   (not (ellm-provider-buffer-model-candidates provider buf))
-                   (ellm-provider-model-completion-session-start-p provider buf))
-          (ellm-provider-start-session provider (ellm--parse-frontmatter) buf))
-        (when-let* ((models (or (ellm--provider-entry-models provider-entry)
-                                (and provider
-                                     (ellm-provider-buffer-model-candidates
-                                      provider buf))))
-                    (model (completing-read "Model: " models nil t)))
-          (ellm--set-frontmatter-value 'model model)
-          (ellm-provider-configure-new-buffer
-           provider (ellm--parse-frontmatter) buf))))
+      (ellm-mode))
     (switch-to-buffer buf)
+    (when select-provider-model
+      (cl-labels
+          ((on-error
+            (error-object)
+            (message "ellm: new buffer configuration failed: %s"
+                     (or (plist-get error-object :message)
+                         (condition-case nil
+                             (error-message-string error-object)
+                           (error (format "%s" error-object))))))
+           (select-model
+            ()
+            (when (buffer-live-p buf)
+              (with-current-buffer buf
+                (when-let* ((models
+                             (or (ellm--provider-entry-models provider-entry)
+                                 (and provider
+                                      (ellm-provider-buffer-model-candidates
+                                       provider buf))))
+                            (model (completing-read "Model: " models nil t)))
+                  (ellm--set-frontmatter-value 'model model)
+                  (ellm-provider-configure-new-buffer
+                   provider (ellm--parse-frontmatter) buf
+                   (lambda ()
+                     (message "ellm: new buffer configuration complete"))
+                   #'on-error))))))
+        (if (and provider
+                 (not (ellm--provider-entry-models provider-entry))
+                 (not (ellm-provider-buffer-model-candidates provider buf))
+                 (ellm-provider-model-completion-session-start-p provider buf))
+            (progn
+              (message "ellm: starting provider session...")
+              (ellm-provider-prepare-new-buffer
+               provider (with-current-buffer buf (ellm--parse-frontmatter)) buf
+               (lambda ()
+                 (message "ellm: provider session ready; select a model")
+                 (ellm--defer-call #'select-model))
+               #'on-error))
+          (select-model))))
     buf))
 
 (defun ellm-new-buffer (&optional select-provider-model)
@@ -3340,13 +3374,26 @@ session metadata over static provider configuration.")
   "Default model setter for unknown PROVIDER types."
   provider)
 
-(cl-defgeneric ellm-provider-configure-new-buffer (provider frontmatter buffer)
-  "Interactively configure PROVIDER after model selection in a new BUFFER.
-FRONTMATTER is the parsed YAML frontmatter after the selected model was saved.")
+(cl-defgeneric ellm-provider-prepare-new-buffer
+    (provider frontmatter buffer on-ready on-error)
+  "Asynchronously prepare PROVIDER for interactive setup in BUFFER.
+Call ON-READY when model candidates are available, or ON-ERROR on failure.")
 
-(cl-defmethod ellm-provider-configure-new-buffer (_provider _frontmatter _buffer)
+(cl-defmethod ellm-provider-prepare-new-buffer
+    (_provider _frontmatter _buffer on-ready _on-error)
+  "Default preparation for providers without session setup."
+  (funcall on-ready))
+
+(cl-defgeneric ellm-provider-configure-new-buffer
+    (provider frontmatter buffer on-ready on-error)
+  "Interactively configure PROVIDER after model selection in a new BUFFER.
+FRONTMATTER is the parsed YAML frontmatter after the selected model was saved.
+Implementations call ON-READY when complete, or ON-ERROR on failure.")
+
+(cl-defmethod ellm-provider-configure-new-buffer
+    (_provider _frontmatter _buffer on-ready _on-error)
   "Default new-buffer configuration for providers without dynamic options."
-  nil)
+  (funcall on-ready))
 
 (cl-defgeneric ellm-provider-slash-command-candidates (provider buffer)
   "Return slash command completion candidates for PROVIDER and BUFFER.

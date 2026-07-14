@@ -171,22 +171,60 @@ an optional list of model candidates used for frontmatter completion."
     (setf (ellm-acp-provider-model copy) model)
     copy))
 
-(cl-defmethod ellm-provider-configure-new-buffer
-  ((_provider ellm-acp-provider) frontmatter buffer)
-  "Apply BUFFER's model, then prompt for advertised model configuration."
+(cl-defmethod ellm-provider-prepare-new-buffer
+  ((provider ellm-acp-provider) frontmatter buffer on-ready on-error)
+  "Asynchronously start PROVIDER's session for BUFFER."
   (with-current-buffer buffer
-    (let ((connection (ellm-acp--buffer-connection buffer)))
-      (when connection
-        (when-let* ((model (alist-get 'model frontmatter)))
-          (ellm-acp--set-model-sync
-           connection
-           (or (ellm-acp--connection-model-config-id connection) "model")
-           model))
-        (dolist (option (ellm-acp--connection-config-options connection))
-          (unless (or (equal (plist-get option :category) "model")
-                      (equal (plist-get option :id)
-                             (ellm-acp--connection-model-config-id connection)))
-            (ellm-acp-set-config connection option)))))))
+    (let ((connection (ellm-acp--ensure-connection provider buffer)))
+      (ellm-acp--ensure-session connection provider frontmatter on-ready on-error))))
+
+(cl-defmethod ellm-provider-configure-new-buffer
+  ((_provider ellm-acp-provider) frontmatter buffer on-ready on-error)
+  "Asynchronously apply BUFFER's model and prompt for session configuration."
+  (with-current-buffer buffer
+    (let* ((connection (ellm-acp--buffer-connection buffer))
+           (model (alist-get 'model frontmatter))
+           (config-id (or (ellm-acp--connection-model-config-id connection)
+                          "model")))
+      (message "ellm ACP: applying model %s..." model)
+      (ellm-acp--set-model
+       connection config-id model
+       (lambda ()
+         (message "ellm ACP: model %s ready; select session options" model)
+         (let ((ids
+                (cl-loop for option in (ellm-acp--connection-config-options
+                                        connection)
+                         unless (or (equal (plist-get option :category) "model")
+                                    (equal (plist-get option :id) config-id))
+                         collect (plist-get option :id))))
+           (ellm--defer-call
+            #'ellm-acp--configure-new-buffer-options
+            connection buffer ids on-ready on-error)))
+       on-error))))
+
+(defun ellm-acp--configure-new-buffer-options
+    (connection buffer config-ids on-ready on-error)
+  "Prompt for CONFIG-IDS sequentially, applying each on CONNECTION for BUFFER."
+  (cond
+   ((not (buffer-live-p buffer))
+    (funcall on-error '(:message "conversation buffer was killed")))
+   ((null config-ids)
+    (funcall on-ready))
+   (t
+    (let ((option (ellm-acp--config-option connection (car config-ids))))
+      (if (not option)
+          (ellm-acp--configure-new-buffer-options
+           connection buffer (cdr config-ids) on-ready on-error)
+        (with-current-buffer buffer
+          (message "ellm ACP: select %s"
+                   (or (plist-get option :name) (plist-get option :id)))
+          (ellm-acp-set-config
+           connection option
+           (lambda ()
+             (ellm--defer-call
+              #'ellm-acp--configure-new-buffer-options
+              connection buffer (cdr config-ids) on-ready on-error))
+           on-error)))))))
 
 (cl-defmethod ellm-provider-slash-command-candidates ((_provider ellm-acp-provider) buffer)
   "Return slash command candidates advertised by BUFFER's ACP session."
@@ -1942,8 +1980,9 @@ nil, causing a cancelled outcome."
 
 ;;;; Interactive helpers
 
-(defun ellm-acp-set-config (connection option)
-  "Interactively select value for OPTION and set, for current provider and model."
+(defun ellm-acp-set-config (connection option &optional on-ready on-error)
+  "Interactively select and asynchronously set OPTION on CONNECTION.
+Call ON-READY after applying the value, or ON-ERROR on failure."
   (interactive
    (let* ((connection (ellm-acp--buffer-connection (current-buffer)))
           (options (ellm-acp--connection-config-options connection))
@@ -1960,9 +1999,15 @@ nil, causing a cancelled outcome."
                                   (capitalize (plist-get option :id)))))
                    options)))
      (list connection option)))
-  (when-let* ((path (list 'acp 'config (intern (plist-get option :id))))
-              (values (ellm-acp--config-option-value-candidates option)))
-    (let* ((config-id (plist-get option :id))
+  (unless (and connection option)
+    (user-error "ellm ACP: no live session config option selected"))
+  (let ((path (list 'acp 'config (intern (plist-get option :id))))
+        (values (ellm-acp--config-option-value-candidates option)))
+    (if (not values)
+        (when on-ready
+          (funcall on-ready))
+      (let* ((buffer (current-buffer))
+           (config-id (plist-get option :id))
            (current (and (plist-member option :currentValue)
                          (ellm-acp--config-value-label
                           (plist-get option :currentValue))))
@@ -1973,10 +2018,24 @@ nil, causing a cancelled outcome."
                       current))
            (value (completing-read
                    (ellm-acp--config-value-prompt option default current)
-                   values nil t nil nil default)))
-      (ellm-acp--set-config-option-sync
-       connection config-id value option)
-      (ellm--set-frontmatter-value path value))))
+                   values nil t nil nil default))
+           (name (or (plist-get option :name) config-id)))
+      (message "ellm ACP: applying %s=%s..." name value)
+      (ellm-acp--set-config-option
+       connection config-id value
+       (lambda ()
+         (when (buffer-live-p buffer)
+           (with-current-buffer buffer
+             (ellm--set-frontmatter-value path value)))
+         (message "ellm ACP: %s set to %s" name value)
+         (when on-ready
+           (funcall on-ready)))
+       (or on-error
+           (lambda (error-object)
+             (message "ellm ACP: failed to set %s: %s"
+                      name (or (plist-get error-object :message)
+                               error-object))))
+       option)))))
 
 (defun ellm-acp--config-value-label (value)
   "Return VALUE as a human-readable ACP config value."
