@@ -1554,18 +1554,28 @@ A continuation `assistant' line collapses to a blank row so it flows
 visually from the preceding turn.  All other roles display their glyph."
   (and continuation (equal role "assistant")))
 
-(defun ellm--apply-pretty-separator (ov role continuation)
+(defun ellm--turn-pipe-title (tail)
+  "Return the pipe-delimited title from raw turn delimiter TAIL."
+  (when (string-prefix-p " | " tail)
+    (let* ((value (substring tail 3))
+           (attrs-beg (string-match " :[[:alnum:]-]+ [^[:space:]]+" value))
+           (title (string-trim-right
+                   (if attrs-beg (substring value 0 attrs-beg) value))))
+      (unless (string-empty-p title)
+        title))))
+
+(defun ellm--apply-pretty-separator (ov role continuation &optional title)
   "Configure overlay OV as a pretty separator for ROLE.
 CONTINUATION is non-nil when the delimiter line uses
 `ellm-turn-header-2' (i.e. the turn is a continuation of the preceding
-top-level turn).
+top-level turn).  TITLE is the optional pipe-delimited turn title.
 
 For continuation `assistant' lines, the overlay blanks the line text by
 displaying the empty string, but leaves the trailing newline intact so
 the delimiter line still occupies one (blank) row.  The user can move
 point onto that row to trigger `ellm-reveal-separator-at-point' and edit
 it.  For other roles, the overlay covers just the line text and displays
-the role's glyph."
+the role's glyph followed by TITLE when present."
   (let ((line-beg (save-excursion
                     (goto-char (overlay-start ov))
                     (line-beginning-position)))
@@ -1580,8 +1590,9 @@ the role's glyph."
     (if (ellm--blank-separator-p role continuation)
         (overlay-put ov 'display "")
       (let* ((glyph (ellm--role-glyph role))
-             (face (ellm--role-face role)))
-        (overlay-put ov 'display (propertize glyph 'face face))))))
+             (face (ellm--role-face role))
+             (label (if title (concat glyph " | " title) glyph)))
+        (overlay-put ov 'display (propertize label 'face face))))))
 
 (defun ellm--put-pretty-separators (beg end)
   "Place pretty separator overlays on turn delimiter lines between BEG and END.
@@ -1612,11 +1623,15 @@ the user can edit it without the glyph reappearing on every keystroke."
                         (and revealed-beg revealed-end
                              (<= revealed-beg line-beg)
                              (<= line-beg revealed-end)))
-              (let* ((header (match-string-no-properties 1))
-                     (role (match-string-no-properties 2))
-                     (continuation (ellm--continuation-header-p header))
-                     (ov (make-overlay line-beg line-end nil t nil)))
-                (ellm--apply-pretty-separator ov role continuation)))))))))
+               (let* ((header (match-string-no-properties 1))
+                      (role (match-string-no-properties 2))
+                      (title (ellm--turn-pipe-title
+                              (buffer-substring-no-properties
+                               (match-end 2) (match-end 0))))
+                      (continuation (ellm--continuation-header-p header))
+                      (ov (make-overlay line-beg line-end nil t nil)))
+                 (ellm--apply-pretty-separator
+                  ov role continuation title)))))))))
 
 (defun ellm--reveal-separator-at-point ()
   "Temporarily reveal the raw turn delimiter line under point."
@@ -1637,7 +1652,10 @@ the user can edit it without the glyph reappearing on every keystroke."
                    ov
                    (match-string-no-properties 2)
                    (ellm--continuation-header-p
-                    (match-string-no-properties 1)))
+                    (match-string-no-properties 1))
+                   (ellm--turn-pipe-title
+                    (buffer-substring-no-properties
+                     (match-end 2) (match-end 0))))
                 ;; Line no longer matches a turn delimiter; drop overlay.
                 (delete-overlay ov)))))
         (setq ellm--revealed-separator-overlay nil)
