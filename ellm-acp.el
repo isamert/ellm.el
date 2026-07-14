@@ -62,6 +62,11 @@ Each ACP connection gets its own log buffer derived from this name."
   :type 'string
   :group 'ellm-acp)
 
+(defcustom ellm-acp-stderr-buffer-name "*ellm-acp-stderr*"
+  "Buffer name used for ACP agent diagnostics written to stderr."
+  :type 'string
+  :group 'ellm-acp)
+
 (defcustom ellm-acp-tool-detail-limit nil
   "Maximum characters to render for each ACP tool detail body.
 Nil renders full tool parameters and results.  Zero inserts only
@@ -367,6 +372,7 @@ an optional list of model candidates used for frontmatter completion."
                      :command (cons command args)
                      :coding 'utf-8
                      :connection-type 'pipe
+                     :stderr (get-buffer-create ellm-acp-stderr-buffer-name)
                      :noquery t))
            (connection (ellm-acp-connection
                         :name (format "ellm-acp-%s" command)
