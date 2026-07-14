@@ -79,9 +79,8 @@ command-line arguments.  ENV is an alist of environment overrides.  CWD,
 when non-nil, is the session working directory; otherwise `default-directory'
 is used.  MODEL is the default model written to new buffers and, when the
 ACP agent exposes a model config option, selected for the session.  MODELS is
-an optional list of model candidates used for frontmatter completion.
-CONFIG-ALIASES maps friendly frontmatter keys to ACP config option ids."
-  command args env cwd model models config-aliases)
+an optional list of model candidates used for frontmatter completion."
+  command args env cwd model models)
 
 (defclass ellm-acp-connection (jsonrpc-connection)
   ((process
@@ -145,29 +144,6 @@ CONFIG-ALIASES maps friendly frontmatter keys to ACP config option ids."
 (defvar ellm-acp--inhibit-frontmatter-persist nil
   "When non-nil, do not persist ACP session metadata into frontmatter.")
 
-;;;;; Support per ACP provider
-
-(defconst ellm-acp-opencode-config-aliases
-  '((variant . (:config-id "effort"
-                :ann "variant"
-                :desc "OpenCode model variant / effort.")))
-  "Friendly frontmatter aliases for OpenCode's ACP config options.")
-
-(defun ellm-make-opencode-acp-provider (&rest args)
-  "Return an OpenCode ACP provider with sensible defaults.
-ARGS are keyword arguments accepted by `ellm-make-acp-provider'.  Unless
-overridden, this uses `opencode acp' and maps top-level `variant:' to
-OpenCode's ACP `effort' config option."
-  (apply #'ellm-make-acp-provider
-         (append (unless (plist-member args :command)
-                   (list :command "opencode"))
-                 (unless (plist-member args :args)
-                   (list :args '("acp")))
-                 args
-                 (unless (plist-member args :config-aliases)
-                   (list :config-aliases
-                     ellm-acp-opencode-config-aliases)))))
-
 ;;;; Interface implementation
 
 (cl-defmethod ellm-provider-current-model ((provider ellm-acp-provider))
@@ -221,11 +197,9 @@ OpenCode's ACP `effort' config option."
         (mapcar #'ellm-acp--slash-command-candidate
                 (ellm-acp--connection-available-commands ellm-acp--connection))))))
 
-(cl-defmethod ellm-provider-frontmatter-entries ((provider ellm-acp-provider) path buffer)
-  "Return ACP frontmatter entries for PROVIDER under PATH in BUFFER."
+(cl-defmethod ellm-provider-frontmatter-entries ((_provider ellm-acp-provider) path buffer)
+  "Return ACP frontmatter entries under PATH in BUFFER."
   (pcase path
-    ('nil
-     (ellm-acp--alias-frontmatter-entries provider buffer))
     ('(acp config)
      (ellm-acp--config-frontmatter-entries buffer))
     (_ nil)))
@@ -976,8 +950,8 @@ called with the raw response before ON-READY."
         (ellm-acp--set-config-option-sync
          connection config-id value option))))))
 
-(defun ellm-acp--frontmatter-config-values (provider connection frontmatter)
-  "Return desired ACP config entries from FRONTMATTER for PROVIDER."
+(defun ellm-acp--frontmatter-config-values (_provider connection frontmatter)
+  "Return desired ACP config entries from FRONTMATTER."
   (let (entries)
     (dolist (cell (ellm-acp--frontmatter-acp-config-cells frontmatter))
       (setq entries
@@ -996,15 +970,6 @@ called with the raw response before ON-READY."
                  model (plist-get entry :value))
           (user-error "ellm ACP: conflicting frontmatter values for ACP config `%s'"
                       model-id))))
-    (dolist (alias (ellm-acp-provider-config-aliases provider))
-      (let* ((path (ellm-acp--alias-path alias))
-             (cell (ellm--alist-get-nested-cell frontmatter path)))
-        (when cell
-          (setq entries
-                (ellm-acp--add-frontmatter-config-value
-                 entries
-                 (ellm-acp--alias-config-id alias)
-                 (cdr cell))))))
     (nreverse entries)))
 
 (defun ellm-acp--frontmatter-acp-config-cells (frontmatter)
@@ -1016,7 +981,7 @@ called with the raw response before ON-READY."
 (defun ellm-acp--add-frontmatter-config-value (entries config-id value)
   "Return ENTRIES with CONFIG-ID set to VALUE, signalling on conflicts."
   (unless config-id
-    (user-error "ellm ACP: config alias is missing :config-id"))
+    (user-error "ellm ACP: config option id is missing"))
   (let ((existing (cl-find config-id entries
                            :key (lambda (entry) (plist-get entry :id))
                            :test #'equal)))
@@ -1193,57 +1158,6 @@ called with the raw response before ON-READY."
   (when-let* ((connection (ellm-acp--buffer-connection buffer)))
     (mapcar #'ellm-acp--config-option-frontmatter-entry
             (ellm-acp--connection-config-options connection))))
-
-(defun ellm-acp--alias-frontmatter-entries (provider buffer)
-  "Return top-level alias frontmatter entries for ACP PROVIDER and BUFFER."
-  (let ((connection (ellm-acp--buffer-connection buffer)))
-    (cl-loop for alias in (ellm-acp-provider-config-aliases provider)
-             for path = (ellm-acp--alias-path alias)
-             when (= (length path) 1)
-             collect (ellm-acp--alias-frontmatter-entry
-                      alias connection))))
-
-(defun ellm-acp--alias-frontmatter-entry (alias connection)
-  "Return a top-level frontmatter entry for ALIAS and CONNECTION."
-  (let* ((path (ellm-acp--alias-path alias))
-         (key (ellm-acp--key-name (car path)))
-         (config-id (ellm-acp--alias-config-id alias))
-         (option (and connection
-                      (ellm-acp--config-option connection config-id)))
-         (spec (ellm-acp--alias-spec alias))
-         (values (and option
-                      (ellm-acp--config-option-value-candidates option))))
-    (append (list key
-                  :ann (or (ellm--plistish-get spec 'ann)
-                           (and option (plist-get option :category))
-                           "ACP config")
-                  :desc (or (ellm--plistish-get spec 'desc)
-                            (and option
-                                 (or (plist-get option :description)
-                                     (plist-get option :name)))
-                            (format "Alias for ACP config `%s'." config-id)))
-            (when values
-              (list :values values)))))
-
-(defun ellm-acp--alias-spec (alias)
-  "Return metadata plist for ALIAS."
-  (let ((spec (cdr alias)))
-    (and (listp spec) spec)))
-
-(defun ellm-acp--alias-path (alias)
-  "Return frontmatter path for ALIAS as a list."
-  (let ((path (car alias)))
-    (if (listp path) path (list path))))
-
-(defun ellm-acp--alias-config-id (alias)
-  "Return target ACP config id for ALIAS."
-  (let ((spec (cdr alias)))
-    (cond
-     ((stringp spec) spec)
-     ((symbolp spec) (symbol-name spec))
-     ((listp spec)
-      (or (ellm--plistish-get spec 'config-id)
-          (ellm--plistish-get spec :config-id))))))
 
 (defun ellm-acp--send-prompt (connection buffer text)
   "Send TEXT as BUFFER's pending user prompt through CONNECTION."
