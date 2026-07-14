@@ -2677,29 +2677,50 @@ Completes:
 
 ;;;;;; Insertion
 
-(defun ellm--new-buffer (ephemeral)
+(defun ellm--new-buffer (ephemeral &optional select-provider-model)
   "Create a new ellm conversation buffer.
-When EPHEMERAL is non-nil, do not automatically persist it."
-  (let ((buf (generate-new-buffer "*ellm*"))
-        (provider-name (caar ellm-provider-alist))
-        (provider (cdar ellm-provider-alist)))
+When EPHEMERAL is non-nil, do not automatically persist it.
+When SELECT-PROVIDER-MODEL is non-nil, prompt for the provider and model."
+  (let* ((buf (generate-new-buffer "*ellm*"))
+         (provider-name
+          (if select-provider-model
+              (let ((name (completing-read
+                           "Provider: " (ellm--capf-provider-candidates) nil t)))
+                (and (not (string-empty-p name)) (intern name)))
+            (caar ellm-provider-alist)))
+         (provider-entry (and provider-name
+                              (alist-get provider-name ellm-provider-alist)))
+         (provider (ellm--provider-entry-provider provider-entry)))
     (with-current-buffer buf
       (setq-local ellm--persistence-ephemeral-p ephemeral)
       (insert (format "---\nprovider: %s\nmodel: %s\ncreated: %s\n---\n\n"
                       (or provider-name "null")
-                      (or (ellm-provider-current-model
-                           (ellm--provider-entry-provider provider))
+                      (or (ellm-provider-current-model provider)
                           "null")
                       (ellm--timestamp)))
       (ellm--insert-turn "user" :ts (ellm--timestamp))
-      (ellm-mode))
+      (ellm-mode)
+      (when select-provider-model
+        (when (and provider
+                   (not (ellm--provider-entry-models provider-entry))
+                   (not (ellm-provider-buffer-model-candidates provider buf))
+                   (ellm-provider-model-completion-session-start-p provider buf))
+          (ellm-provider-start-session provider (ellm--parse-frontmatter) buf))
+        (when-let* ((models (or (ellm--provider-entry-models provider-entry)
+                                (and provider
+                                     (ellm-provider-buffer-model-candidates
+                                      provider buf))))
+                    (model (completing-read "Model: " models nil t)))
+          (ellm--set-frontmatter-value 'model model))))
     (switch-to-buffer buf)
     buf))
 
-(defun ellm-new-buffer ()
-  "Create a new ellm conversation buffer."
-  (interactive)
-  (ellm--new-buffer nil))
+(defun ellm-new-buffer (&optional select-provider-model)
+  "Create a new ellm conversation buffer.
+With prefix argument SELECT-PROVIDER-MODEL, prompt for provider and model.
+Session-backed providers may start a session to discover model candidates."
+  (interactive "P")
+  (ellm--new-buffer nil select-provider-model))
 
 (defun ellm-new-temp-buffer ()
   "Create an ephemeral ellm conversation buffer.
