@@ -2711,7 +2711,9 @@ When SELECT-PROVIDER-MODEL is non-nil, prompt for the provider and model."
                                      (ellm-provider-buffer-model-candidates
                                       provider buf))))
                     (model (completing-read "Model: " models nil t)))
-          (ellm--set-frontmatter-value 'model model))))
+          (ellm--set-frontmatter-value 'model model)
+          (ellm-provider-configure-new-buffer
+           provider (ellm--parse-frontmatter) buf))))
     (switch-to-buffer buf)
     buf))
 
@@ -3337,6 +3339,14 @@ session metadata over static provider configuration.")
 (cl-defmethod ellm-provider-with-model (provider _model)
   "Default model setter for unknown PROVIDER types."
   provider)
+
+(cl-defgeneric ellm-provider-configure-new-buffer (provider frontmatter buffer)
+  "Interactively configure PROVIDER after model selection in a new BUFFER.
+FRONTMATTER is the parsed YAML frontmatter after the selected model was saved.")
+
+(cl-defmethod ellm-provider-configure-new-buffer (_provider _frontmatter _buffer)
+  "Default new-buffer configuration for providers without dynamic options."
+  nil)
 
 (cl-defgeneric ellm-provider-slash-command-candidates (provider buffer)
   "Return slash command completion candidates for PROVIDER and BUFFER.

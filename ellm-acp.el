@@ -195,6 +195,23 @@ OpenCode's ACP `effort' config option."
     (setf (ellm-acp-provider-model copy) model)
     copy))
 
+(cl-defmethod ellm-provider-configure-new-buffer
+  ((_provider ellm-acp-provider) frontmatter buffer)
+  "Apply BUFFER's model, then prompt for advertised model configuration."
+  (with-current-buffer buffer
+    (let ((connection (ellm-acp--buffer-connection buffer)))
+      (when connection
+        (when-let* ((model (alist-get 'model frontmatter)))
+          (ellm-acp--set-model-sync
+           connection
+           (or (ellm-acp--connection-model-config-id connection) "model")
+           model))
+        (dolist (option (ellm-acp--connection-config-options connection))
+          (unless (or (equal (plist-get option :category) "model")
+                      (equal (plist-get option :id)
+                             (ellm-acp--connection-model-config-id connection)))
+            (ellm-acp-set-config connection option)))))))
+
 (cl-defmethod ellm-provider-slash-command-candidates ((_provider ellm-acp-provider) buffer)
   "Return slash command candidates advertised by BUFFER's ACP session."
   (when (buffer-live-p buffer)
@@ -2008,6 +2025,63 @@ nil, causing a cancelled outcome."
                                     (mapcar #'car labels)
                                     nil t)))
       (cdr (assoc choice labels)))))
+
+;;;; Interactive helpers
+
+(defun ellm-acp-set-config (connection option)
+  "Interactively select value for OPTION and set, for current provider and model."
+  (interactive
+   (let* ((connection (ellm-acp--buffer-connection (current-buffer)))
+          (options (ellm-acp--connection-config-options connection))
+          (selected (completing-read
+                     "Option: "
+                     (mapcar (lambda (option)
+                               (or (plist-get option :name)
+                                   (capitalize (plist-get option :id))))
+                             options)))
+          (option (seq-find
+                   (lambda (option)
+                     (string= selected
+                              (or (plist-get option :name)
+                                  (capitalize (plist-get option :id)))))
+                   options)))
+     (list connection option)))
+  (when-let* ((path (list 'acp 'config (intern (plist-get option :id))))
+              (values (ellm-acp--config-option-value-candidates option)))
+    (let* ((config-id (plist-get option :id))
+           (current (and (plist-member option :currentValue)
+                         (ellm-acp--config-value-label
+                          (plist-get option :currentValue))))
+           (saved-cell (ellm--alist-get-nested-cell
+                        (ellm--parse-frontmatter) path))
+           (default (if saved-cell
+                        (ellm-acp--config-value-label (cdr saved-cell))
+                      current))
+           (value (completing-read
+                   (ellm-acp--config-value-prompt option default current)
+                   values nil t nil nil default)))
+      (ellm-acp--set-config-option-sync
+       connection config-id value option)
+      (ellm--set-frontmatter-value path value))))
+
+(defun ellm-acp--config-value-label (value)
+  "Return VALUE as a human-readable ACP config value."
+  (cond
+   ((eq value t) "true")
+   ((ellm-acp--false-value-p value) "false")
+   (t (ellm-acp--value-string value))))
+
+(defun ellm-acp--config-value-prompt (option default current)
+  "Return a value prompt for OPTION showing DEFAULT and CURRENT values."
+  (let ((name (or (plist-get option :name)
+                  (capitalize (plist-get option :id))))
+        (details (delq nil
+                       (list (and default (format "default: %s" default))
+                             (and current (format "current: %s" current))))))
+    (format "%s%s: " name
+            (if details
+                (format " (%s)" (string-join details ", "))
+              ""))))
 
 (provide 'ellm-acp)
 ;;; ellm-acp.el ends here
