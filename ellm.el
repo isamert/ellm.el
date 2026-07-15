@@ -248,8 +248,8 @@ value may be:
 
 (defconst ellm--turn-heading-specs
   '((ellm-turn-heading-1 1.4)
-    (ellm-turn-heading-2 1.3)
-    (ellm-turn-heading-3 1.2))
+    (ellm-turn-heading-2 0.95)
+    (ellm-turn-heading-3 0.8))
   "List of (FACE HEIGHT) specs for turn heading faces.")
 
 (defun ellm--apply-heading-rescale (val)
