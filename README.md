@@ -176,10 +176,13 @@ On a fresh connection, saved sessions are restored with `session/resume`
 when the agent supports it, otherwise `session/load` when available.
 
 Set `ellm-acp-tool-detail-limit` to keep ACP buffers smaller.  Nil renders
-full tool params and results, `0` inserts only `tool-call` and `tool-result`
-headings, and a positive integer truncates each rendered parameter value and
-result body to that many characters. This setting is ACP-only and does not
-affect the `llm.el` backend.
+full tool params and results.  `summary` renders the human-facing tool title
+and regular text/resource content while omitting raw input/output, locations,
+and structured diffs.  `0` inserts only `tool-call` and `tool-result` headings,
+and a positive integer truncates each rendered parameter value and result body
+to that many characters.  ACP `tool-result` heading titles are limited to 25
+characters because agents commonly use a full command as the title.  This
+setting is ACP-only and does not affect the `llm.el` backend.
 
 Supported by the ACP backend:
 
