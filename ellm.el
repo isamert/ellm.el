@@ -295,11 +295,8 @@ Set to nil to make all headings the same size."
   :group 'ellm-visuals)
 
 (defcustom ellm-fold-reasoning-blocks t
-  "If non-nil, insert reasoning turns folded (collapsed).
-It can also be the symbol `after', which folds after reasoning is finished."
-  :type '(choice (const :tag "Off" nil)
-                 (const :tag "On" t)
-                 (const :tag "After" after))
+  "If non-nil, insert reasoning turns folded (collapsed)."
+  :type 'boolean
   :group 'ellm-visuals)
 
 (defcustom ellm-turn-header-1 ">-|"
