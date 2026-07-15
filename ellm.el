@@ -771,6 +771,8 @@ Used in {load,enable,disable}-theme hooks."
 ;;;; Code block highlighting
 
 (defvar ellm--fence-positions)
+(defvar ellm--fence-positions-vector)
+(defvar ellm--turn-body-cache-vector)
 
 (defvar ellm--lang-mode-cache (make-hash-table :test 'equal)
   "Cache mapping language name to major mode symbol.")
@@ -864,15 +866,26 @@ Also fontifies YAML frontmatter if present and overlaps the region."
     ;; Pair recognized fences within each turn.  An unmatched opening fence
     ;; ends implicitly at the next turn delimiter, so code never leaks into
     ;; the following turn.
-    (let ((fences ellm--fence-positions))
-      (while fences
-        (let* ((open (car fences))
+    (let* ((vec ellm--fence-positions-vector)
+           (count (length vec))
+           (beg-container (ellm--code-container-bounds-at beg))
+           (index (ellm--fence-index-before beg)))
+      ;; `ellm--code-block-scan-bounds' normally moves BEG to the opening
+      ;; fence.  Retain support for direct callers that pass a position in
+      ;; the block body by stepping back to that opening here as well.
+      (when (and beg-container
+                 (cl-oddp (- index
+                             (ellm--fence-index-before
+                              (car beg-container)))))
+        (cl-decf index))
+      (while (and (< index count) (< (aref vec index) end))
+        (let* ((open (aref vec index))
                (container (ellm--code-container-bounds-at open))
                (container-end (and container (cdr container)))
                (close (and container-end
-                           (cadr fences)
-                           (< (cadr fences) container-end)
-                           (cadr fences)))
+                            (< (1+ index) count)
+                            (< (aref vec (1+ index)) container-end)
+                            (aref vec (1+ index))))
                (body-end (or close container-end))
                (block-end (if close
                               (save-excursion
@@ -891,7 +904,7 @@ Also fontifies YAML frontmatter if present and overlaps the region."
                   (ellm--fontify-region-as mode body-beg body-end))
                 (font-lock-append-text-property
                  body-beg body-end 'face 'ellm-block))))
-          (setq fences (if close (cddr fences) (cdr fences))))))))
+          (cl-incf index (if close 2 1)))))))
 
 (defun ellm--fontify-shaded-turns (beg end)
   "Shade turn bodies between BEG and END per each role's `:shade' face.
@@ -1015,15 +1028,28 @@ jumps to that body's end so large tool outputs are skipped in one step."
     (let (found)
       (while (and (not found)
                   (re-search-forward regexp limit t))
-        (let ((mb (match-beginning 0))
-              (md (match-data)))
+        (let* ((mb (match-beginning 0))
+               (md (match-data))
+               (idx (ellm--turn-body-cache-index-at mb))
+               (vec ellm--turn-body-cache-vector)
+               (entry (and idx (aref vec idx)))
+               (body-p (and entry (>= mb (aref entry 1))))
+               (container-beg
+                (cond
+                 (body-p (aref entry 1))
+                 ((or (= (length vec) 0)
+                      (< mb (aref (aref vec 0) 0)))
+                  (point-min))))
+               (body-end
+                (and body-p
+                     (if (< (1+ idx) (length vec))
+                         (aref (aref vec (1+ idx)) 0)
+                       (point-max)))))
           (cond
-           ((ellm--in-code-block-p mb)
-            ;; Skip this match and continue searching.
+           ((and body-p (aref entry 3))
+            (goto-char (min limit (max (point) body-end))))
+           ((ellm--in-code-block-p mb container-beg)
             nil)
-           ((when-let* ((bounds (ellm--markdown-disabled-bounds-at mb)))
-              (goto-char (min limit (max (point) (cdr bounds))))
-              t))
            (t
             (set-match-data md)
             (setq found t)))))
@@ -1107,10 +1133,21 @@ cache is uninitialized; call `ellm--rebuild-fence-cache' to populate it.")
   (save-excursion
     (save-match-data
       (goto-char (point-min))
-      (let (positions)
+      (let* ((turns ellm--turn-body-cache-vector)
+             (turn-count (length turns))
+             (turn-index -1)
+             positions)
         (while (re-search-forward ellm-code-block-fence-regexp nil t)
-          (unless (ellm--markdown-disabled-at-p (match-beginning 0))
-            (push (line-beginning-position) positions))
+          (let ((pos (match-beginning 0)))
+            (while (and (< (1+ turn-index) turn-count)
+                        (<= (aref (aref turns (1+ turn-index)) 0) pos))
+              (cl-incf turn-index))
+            (let ((entry (and (>= turn-index 0)
+                              (aref turns turn-index))))
+              (unless (and entry
+                           (>= pos (aref entry 1))
+                           (aref entry 3))
+                (push (line-beginning-position) positions))))
           (forward-line 1))
         (setq ellm--fence-positions (nreverse positions)
               ellm--fence-cache-valid t)
@@ -1190,10 +1227,41 @@ to be refontified."
             (setq ellm--fence-parity-flipped
                   (cl-oddp (+ dropped added)))))))))
 
-(defun ellm--fence-before (pos)
-  "Return the largest fence position <= POS, or nil.
-Assumes `ellm--fence-positions' is sorted ascending."
-  (car (last (seq-take-while (lambda (p) (<= p pos)) ellm--fence-positions))))
+(defun ellm--refresh-fences-in-region (beg end)
+  "Rescan recognized fences in BEG..END and return non-nil if they changed."
+  (let ((old ellm--fence-positions)
+        refreshed)
+    (save-excursion
+      (save-match-data
+        (goto-char beg)
+        (while (re-search-forward ellm-code-block-fence-regexp end t)
+          (unless (ellm--markdown-disabled-at-p (match-beginning 0))
+            (push (line-beginning-position) refreshed))
+          (forward-line 1))))
+    (setq refreshed (nreverse refreshed))
+    (let* ((vec ellm--fence-positions-vector)
+           (start (ellm--fence-index-before beg))
+           (stop (ellm--fence-index-before end))
+           (same (= (length refreshed) (- stop start)))
+           (index start))
+      (when same
+        (dolist (pos refreshed)
+          (unless (= pos (aref vec index))
+            (setq same nil))
+          (cl-incf index)))
+      (if same
+          nil
+        (let (before after)
+          (dolist (pos old)
+            (cond
+             ((< pos beg) (push pos before))
+             ((>= pos end) (push pos after))))
+          (setq ellm--fence-positions
+                (nconc (nreverse before)
+                       refreshed
+                       (nreverse after)))
+          (ellm--sync-fence-vector)
+          t)))))
 
 (defun ellm--fence-index-before (pos)
   "Return the number of recognized fence positions strictly before POS."
@@ -1207,13 +1275,27 @@ Assumes `ellm--fence-positions' is sorted ascending."
           (setq hi mid))))
     lo))
 
-(defun ellm--in-code-block-p (&optional pos)
-  "Return non-nil if POS (or point) is inside a turn-local code block."
+(defun ellm--fence-before (pos)
+  "Return the largest fence position <= POS, or nil."
+  (let* ((vec ellm--fence-positions-vector)
+         (count (length vec))
+         (index (ellm--fence-index-before pos)))
+    (cond
+     ((and (< index count) (= (aref vec index) pos))
+      (aref vec index))
+     ((> index 0)
+      (aref vec (1- index))))))
+
+(defun ellm--in-code-block-p (&optional pos container-beg)
+  "Return non-nil if POS (or point) is inside a turn-local code block.
+When CONTAINER-BEG is non-nil, reuse it instead of looking up the turn body."
   (let* ((target (or pos (point)))
-         (container (ellm--code-container-bounds-at target)))
-    (and container
+         (container-beg
+          (or container-beg
+              (car-safe (ellm--code-container-bounds-at target)))))
+    (and container-beg
          (cl-oddp (- (ellm--fence-index-before target)
-                     (ellm--fence-index-before (car container)))))))
+                     (ellm--fence-index-before container-beg))))))
 
 ;;;;; Turn body cache
 
@@ -1281,23 +1363,31 @@ BEG, END, and OLD-LEN are the values passed to `after-change-functions'."
          (old-end (+ beg old-len))
          (insertion-p (zerop old-len)))
     (unless (zerop delta)
-      (setq ellm--turn-body-cache
-            (mapcar
-             (lambda (entry)
-               (vector (let ((pos (aref entry 0)))
-                         (if (>= pos old-end) (+ pos delta) pos))
-                       (let ((pos (aref entry 1)))
-                         ;; Text inserted exactly at BODY-BEG belongs to the
-                         ;; body, so keep that boundary before the new text.
-                         (if (if insertion-p
-                                 (> pos old-end)
-                               (>= pos old-end))
-                             (+ pos delta)
-                           pos))
-                       (aref entry 2)
-                       (aref entry 3)))
-             ellm--turn-body-cache))
-      (ellm--sync-turn-body-cache-vector))))
+      (let* ((vec ellm--turn-body-cache-vector)
+             (count (length vec))
+             (lo 0)
+             (hi count))
+        ;; Find the first delimiter at or after OLD-END.  The preceding entry
+        ;; may still have a BODY-BEG after the edit, so inspect it too.
+        (while (< lo hi)
+          (let ((mid (/ (+ lo hi) 2)))
+            (if (< (aref (aref vec mid) 0) old-end)
+                (setq lo (1+ mid))
+              (setq hi mid))))
+        (let ((index (max 0 (1- lo))))
+          (while (< index count)
+            (let* ((entry (aref vec index))
+                   (delimiter-beg (aref entry 0))
+                   (body-beg (aref entry 1)))
+              (when (>= delimiter-beg old-end)
+                (aset entry 0 (+ delimiter-beg delta)))
+              ;; Text inserted exactly at BODY-BEG belongs to that body, so
+              ;; keep the boundary before the newly inserted text.
+              (when (if insertion-p
+                        (> body-beg old-end)
+                      (>= body-beg old-end))
+                (aset entry 1 (+ body-beg delta))))
+            (cl-incf index)))))))
 
 (defun ellm--update-turn-body-cache-after-change (beg end old-len)
   "Update turn body cache after a buffer change.
@@ -1406,20 +1496,23 @@ Extension policy:
           (cons (point-min) (point-max))))
     (let* ((line-beg (save-excursion (goto-char beg) (line-beginning-position)))
            (line-end (save-excursion (goto-char end) (line-end-position)))
+           (vec ellm--fence-positions-vector)
+           (line-index (ellm--fence-index-before line-beg))
            ;; Touched a fence line iff:
            ;; - some cached fence is currently on the affected line range
            ;;   (i.e. either survived as-is or was just inserted), or
            ;; - the parity flag is set (we removed one without adding one).
            (touched-fence
             (or ellm--fence-parity-flipped
-                (cl-some (lambda (p) (and (>= p line-beg) (<= p line-end)))
-                         ellm--fence-positions))))
+                (and (< line-index (length vec))
+                     (<= (aref vec line-index) line-end)))))
       (when touched-fence
         (let* ((parity-flipped ellm--fence-parity-flipped)
                (prev (ellm--fence-before (1- line-beg)))
+               (next-index (ellm--fence-index-before (1+ line-end)))
                (next (and (not parity-flipped)
-                          (cl-find-if (lambda (p) (> p line-end))
-                                      ellm--fence-positions)))
+                          (< next-index (length vec))
+                          (aref vec next-index)))
                (next-end (and next
                               (save-excursion
                                 (goto-char next)
@@ -1477,6 +1570,21 @@ Optional WINDOW determines the rule width."
                   (point-max)))))
       (ellm--put-turn-rules rb re window))))
 
+(defun ellm--turn-neighborhood-bounds (beg end)
+  "Return bounds of turn bodies adjacent to the change at BEG..END."
+  (save-match-data
+    (cons (save-excursion
+            (goto-char beg)
+            (forward-line 0)
+            (if (re-search-backward ellm-turn-regexp nil t)
+                (line-beginning-position)
+              (point-min)))
+          (save-excursion
+            (goto-char end)
+            (if (re-search-forward ellm-turn-regexp nil t)
+                (line-beginning-position)
+              (point-max))))))
+
 (defun ellm--after-change-function (beg end old-len)
   "Update fence cache and rule overlays after a buffer change.
 BEG END OLD-LEN are passed by `after-change'."
@@ -1488,17 +1596,15 @@ BEG END OLD-LEN are passed by `after-change'."
     (ellm--update-turn-body-cache-after-change beg end old-len)
     (ellm--update-fences-after-change beg end old-len)
     (when (and turn-structure-changed ellm--fence-cache-valid)
-      ;; The incremental result describes how the old recognized fences move
-      ;; if turn semantics stay unchanged.  A full rebuild differing from it
-      ;; means this delimiter edit enabled or disabled non-local fences.  An
-      ;; odd fence count next to the edit means it also moved an implicit
-      ;; turn-boundary close.
-      (let ((incremental-fences ellm--fence-positions))
-        (ellm--rebuild-fence-cache)
-        (unless (and (equal incremental-fences ellm--fence-positions)
-                     (not (ellm--in-code-block-p beg))
-                     (not (ellm--in-code-block-p
-                           (max (point-min) (1- beg)))))
+      ;; A delimiter edit can change fence recognition in its adjacent turn
+      ;; bodies even when the fence lines themselves were untouched.  Rescan
+      ;; only those bodies rather than rebuilding the whole-buffer cache.
+      (pcase-let ((`(,scan-beg . ,scan-end)
+                   (ellm--turn-neighborhood-bounds beg end)))
+        (unless (and (not (ellm--refresh-fences-in-region scan-beg scan-end))
+                      (not (ellm--in-code-block-p beg))
+                      (not (ellm--in-code-block-p
+                            (max (point-min) (1- beg)))))
           (setq ellm--fence-structure-changed t)))))
   ;; If the deletion intersected a delimiter line, every rule overlay
   ;; that lived inside the deleted range has now collapsed to the
@@ -1536,10 +1642,11 @@ available."
               (if (ellm--in-code-block-p end)
                   (let* ((container (ellm--code-container-bounds-at end))
                          (container-end (cdr container))
-                         (closer (cl-find-if
-                                  (lambda (p)
-                                    (and (> p end) (< p container-end)))
-                                  ellm--fence-positions)))
+                         (vec ellm--fence-positions-vector)
+                         (index (ellm--fence-index-before (1+ end)))
+                         (closer (and (< index (length vec))
+                                      (< (aref vec index) container-end)
+                                      (aref vec index))))
                     (if closer
                         (save-excursion
                           (goto-char closer)

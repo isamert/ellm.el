@@ -1218,12 +1218,44 @@ called with the raw response before ON-READY."
      :error-fn (lambda (error-object)
                  (ellm-acp--finish-with-error buffer error-object)))))
 
+(defun ellm-acp--last-turn-role ()
+  "Return the role of the final turn in the current buffer, or nil."
+  (save-excursion
+    (save-match-data
+      (goto-char (point-max))
+      (when (re-search-backward ellm-turn-regexp nil t)
+        (match-string-no-properties 2)))))
+
+(defun ellm-acp--last-turn-body-empty-p ()
+  "Return non-nil if the final turn body contains only whitespace."
+  (save-excursion
+    (save-match-data
+      (goto-char (point-max))
+      (when (re-search-backward ellm-turn-regexp nil t)
+        (goto-char (min (1+ (line-end-position)) (point-max)))
+        (skip-chars-forward " \t\n\r")
+        (eobp)))))
+
+(defun ellm-acp--last-turn-content (role)
+  "Return content of the most recent ROLE turn, or nil."
+  (save-excursion
+    (save-match-data
+      (goto-char (point-max))
+      (let ((body-end (point-max)))
+        (catch 'content
+          (while (re-search-backward ellm-turn-regexp nil t)
+            (let ((delimiter-beg (match-beginning 0)))
+              (when (equal (match-string-no-properties 2) role)
+                (throw 'content
+                       (string-trim
+                        (buffer-substring-no-properties
+                         (min (1+ (line-end-position)) (point-max))
+                         body-end))))
+              (setq body-end delimiter-beg))))))))
+
 (defun ellm-acp--last-user-content ()
   "Return the content of the most recent user turn in the current buffer."
-  (when-let* ((turn (cl-find-if (lambda (turn)
-                                   (equal (ellm-turn-role turn) "user"))
-                                 (reverse (ellm--parse-turns)))))
-    (ellm-turn-content turn)))
+  (ellm-acp--last-turn-content "user"))
 
 (defun ellm-acp-start-session (provider frontmatter buffer &optional quiet)
   "Start/login an ACP session for BUFFER without sending a prompt.
@@ -1379,8 +1411,7 @@ When SELECT is non-nil, choose a session from `session/list'."
           (or (plist-get session :additionalDirectories) [])))
         :configOptions))
       (goto-char (point-max))
-      (unless (and (ellm--parse-turns)
-                   (equal (ellm-turn-role (car (last (ellm--parse-turns)))) "user"))
+      (unless (equal (ellm-acp--last-turn-role) "user")
         (ellm--insert-turn "user"))
       (ellm--persistence-checkpoint))
     (switch-to-buffer buf)
@@ -1482,32 +1513,23 @@ being merged into the same ellm turn."
 (defun ellm-acp--inside-open-message-p (connection role message-id)
   "Return non-nil when point is in ROLE's current ACP message."
   (and (ellm-acp--inside-open-role-p role)
-       (let* ((turn (car (last (ellm--parse-turns))))
-              (last-key (ellm-acp--connection-last-message-key connection)))
-         (cond
-          ((not message-id) t)
-          ((and last-key
-                (equal (car last-key) role)
-                (equal (cdr last-key) message-id))
-           t)
-          ((and (not last-key)
-                turn
-                (string-empty-p (ellm-turn-content turn)))
-           t)))))
+       (or (not message-id)
+           (let ((last-key
+                  (ellm-acp--connection-last-message-key connection)))
+             (if last-key
+                 (and (equal (car last-key) role)
+                      (equal (cdr last-key) message-id))
+               (ellm-acp--last-turn-body-empty-p))))))
 
 (defun ellm-acp--content-continuation-p (role)
   "Return non-nil when a new content turn for ROLE should be nested."
   (and (not (equal role "user"))
        (not (and (equal role "assistant")
-                 (let ((last (car (last (ellm--parse-turns)))))
-                   (and last (equal (ellm-turn-role last) "user")))))))
+                 (equal (ellm-acp--last-turn-role) "user")))))
 
 (defun ellm-acp--inside-open-role-p (role)
   "Return non-nil if point is currently in an open turn with ROLE."
-  (save-excursion
-    (goto-char (point-max))
-    (when (re-search-backward ellm-turn-regexp nil t)
-      (equal (match-string-no-properties 2) role))))
+  (equal (ellm-acp--last-turn-role) role))
 
 (defun ellm-acp--content-text (content)
   "Return text display for ACP CONTENT block."
@@ -2066,9 +2088,7 @@ If the matched turn has nested child turns, delete those children too."
     (with-current-buffer buffer
       (ellm--preserve-user-position
         (goto-char (point-max))
-        (unless (and-let* ((turns (ellm--parse-turns))
-                           (last-turn (car (last turns))))
-                  (equal (ellm-turn-role last-turn) "user"))
+        (unless (equal (ellm-acp--last-turn-role) "user")
           (ellm--insert-turn "user"))
         (ellm--set-active-request nil)
         (ellm--persistence-checkpoint)
