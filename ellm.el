@@ -528,45 +528,71 @@ key whose value is nil."
     (and (null keys) cell)))
 
 (defmacro ellm--preserve-user-position (&rest body)
-  "Run BODY without disturbing user point/window positions.
+  "Run BODY while preserving or following user point/window positions.
 This is intended for asynchronous backend insertions into the current
-buffer.  BODY may move point and edit the buffer; visible windows showing
-the buffer are restored to the same logical point and window start after
-the edit.  BODY runs with `inhibit-read-only' so backend insertions can
-update request-locked buffers."
+buffer.  A point at the buffer end, or immediately before its final
+newline, follows output to the new end.  Other positions and their window
+starts are restored after the edit.  Each visible window follows
+independently.  BODY runs with `inhibit-read-only' so backend insertions
+can update request-locked buffers."
   (declare (indent 0) (debug t))
   `(let* ((ellm--preserve-buffer (current-buffer))
+          (ellm--preserve-end (point-max))
+          (ellm--preserve-follow-p
+           (lambda (position)
+             (or (= position ellm--preserve-end)
+                 (and (> ellm--preserve-end (point-min))
+                      (= position (1- ellm--preserve-end))
+                      (eq (char-before ellm--preserve-end) ?\n)))))
           (ellm--preserve-point (copy-marker (point) nil))
+          (ellm--preserve-point-follows
+           (funcall ellm--preserve-follow-p (point)))
           (ellm--preserve-window-states
            (mapcar (lambda (window)
-                     (list window
-                           (copy-marker (window-point window) nil)
-                           (copy-marker (window-start window) nil)
-                           (window-hscroll window)))
-                   (get-buffer-window-list (current-buffer) nil t))))
+                     (let ((window-point (window-point window)))
+                       (list window
+                             (copy-marker window-point nil)
+                             (copy-marker (window-start window) nil)
+                             (window-hscroll window)
+                             (funcall ellm--preserve-follow-p window-point))))
+                    (get-buffer-window-list (current-buffer) nil t))))
      (unwind-protect
          (let ((inhibit-read-only t))
            (save-current-buffer
              (save-excursion
                ,@body)))
        (unwind-protect
-           (when (buffer-live-p ellm--preserve-buffer)
-             (with-current-buffer ellm--preserve-buffer
-               (when-let* ((pos (marker-position ellm--preserve-point)))
-                 (goto-char pos))
-               (dolist (state ellm--preserve-window-states)
-                 (let ((window (nth 0 state))
-                       (point-marker (nth 1 state))
-                       (start-marker (nth 2 state))
-                       (hscroll (nth 3 state)))
-                   (when (and (window-live-p window)
-                              (eq (window-buffer window)
-                                  ellm--preserve-buffer))
-                     (when-let* ((start (marker-position start-marker)))
-                       (set-window-start window start t))
-                     (when-let* ((point (marker-position point-marker)))
-                       (set-window-point window point))
-                     (set-window-hscroll window hscroll))))))
+            (when (buffer-live-p ellm--preserve-buffer)
+              (with-current-buffer ellm--preserve-buffer
+                (let ((new-end (point-max)))
+                  (if ellm--preserve-point-follows
+                      (goto-char new-end)
+                    (when-let* ((pos (marker-position ellm--preserve-point)))
+                      (goto-char pos)))
+                  (dolist (state ellm--preserve-window-states)
+                    (let ((window (nth 0 state))
+                          (point-marker (nth 1 state))
+                          (start-marker (nth 2 state))
+                          (hscroll (nth 3 state))
+                          (follows (nth 4 state)))
+                      (when (and (window-live-p window)
+                                 (eq (window-buffer window)
+                                     ellm--preserve-buffer))
+                        (if follows
+                            (progn
+                              (set-window-point window new-end)
+                              (unless (pos-visible-in-window-p new-end window)
+                                (save-excursion
+                                  (goto-char new-end)
+                                  (vertical-motion
+                                   (- 1 (max 1 (window-body-height window)))
+                                   window)
+                                  (set-window-start window (point) t))))
+                          (when-let* ((start (marker-position start-marker)))
+                            (set-window-start window start t))
+                          (when-let* ((point (marker-position point-marker)))
+                            (set-window-point window point)))
+                        (set-window-hscroll window hscroll)))))))
          (set-marker ellm--preserve-point nil)
          (dolist (state ellm--preserve-window-states)
            (set-marker (nth 1 state) nil)
@@ -1186,7 +1212,8 @@ Each entry is a vector [DELIMITER-BEG BODY-BEG ROLE MARKDOWN-DISABLED].")
   "Shift cached turn body positions after a non-structural change.
 BEG, END, and OLD-LEN are the values passed to `after-change-functions'."
   (let* ((delta (- (- end beg) old-len))
-         (old-end (+ beg old-len)))
+         (old-end (+ beg old-len))
+         (insertion-p (zerop old-len)))
     (unless (zerop delta)
       (setq ellm--turn-body-cache
             (mapcar
@@ -1194,7 +1221,13 @@ BEG, END, and OLD-LEN are the values passed to `after-change-functions'."
                (vector (let ((pos (aref entry 0)))
                          (if (>= pos old-end) (+ pos delta) pos))
                        (let ((pos (aref entry 1)))
-                         (if (>= pos old-end) (+ pos delta) pos))
+                         ;; Text inserted exactly at BODY-BEG belongs to the
+                         ;; body, so keep that boundary before the new text.
+                         (if (if insertion-p
+                                 (> pos old-end)
+                               (>= pos old-end))
+                             (+ pos delta)
+                           pos))
                        (aref entry 2)
                        (aref entry 3)))
              ellm--turn-body-cache))
