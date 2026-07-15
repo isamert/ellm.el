@@ -2258,6 +2258,7 @@ streaming backend insertions.  Nil REQUEST restores the previous
 (defun ellm--notify-request-finished ()
   "Run `ellm-request-finished-hook' once for the current request."
   (unless ellm--request-finished-notified-p
+    (ellm--flush-pending-fold)
     (setq ellm--request-finished-notified-p t)
     (run-hooks 'ellm-request-finished-hook)))
 
@@ -3175,7 +3176,8 @@ Empty or whitespace-only bodies are not folded."
             ;; but leave the final newline visible.  Hiding that separator
             ;; newline can leave a one-character outline ellipsis overlay
             ;; behind after unfolding.
-            (outline-flag-region heading-end subtree-end t)))))))
+            (outline-flag-region heading-end subtree-end t)
+            t))))))
 
 (defun ellm--fold-subtree-at (pos)
   "Collapse the outline subtree of the heading containing POS."

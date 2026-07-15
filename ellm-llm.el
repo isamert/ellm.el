@@ -225,13 +225,15 @@ TOOL-USE is `(:name NAME :args ARGS)' as produced by `llm.el' multi-
 output.  ARGS is an alist of (ARG-SYM . VALUE)."
   (let* ((name (plist-get tool-use :name))
           (args (plist-get tool-use :args)))
-    (ellm--insert-tool-call-with-params name id args)))
+    (ellm--insert-tool-call-with-params name id args)
+    (ellm--flush-pending-fold)))
 
 (defun ellm-llm--insert-tool-result (id name result)
   "Insert a `tool-result' turn for NAME pairing call ID with RESULT body."
   (ellm--insert-turn "tool-result" :pipe-arg name :id id)
   (insert (ellm--ensure-newline
-           (ellm-tools--transform-tool-result name nil nil result))))
+           (ellm-tools--transform-tool-result name nil nil result)))
+  (ellm--flush-pending-fold))
 
 (defun ellm-llm--render-tool-uses (tool-uses tool-results)
   "Insert `tool-call' / `tool-result' turns for TOOL-USES and TOOL-RESULTS.

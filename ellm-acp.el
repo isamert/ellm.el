@@ -1554,7 +1554,8 @@ When CONNECTION is non-nil, remember marker ranges for incremental updates."
                 (plist-get update :title)))
         (setf (ellm-acp-rendered-tool-call-beg state) call-beg)
         (setf (ellm-acp-rendered-tool-params-beg state) params-beg)
-        (setf (ellm-acp-rendered-tool-params-end state) params-end)))))
+        (setf (ellm-acp-rendered-tool-params-end state) params-end)))
+    (ellm--flush-pending-fold)))
 
 (cl-defun ellm-acp--tool-turn-attrs (update &key omit-status omit-title title)
   "Return ellm turn attrs for ACP tool UPDATE."
@@ -1631,15 +1632,18 @@ objects otherwise look like malformed plists to `json-serialize'."
 
 (cl-defun ellm-acp--tool-result-detail-text (update &key skip-raw-input title state)
   "Return transformed and limited body text for ACP tool result UPDATE."
-  (ellm-acp--limited-tool-detail-text
-   (ellm-tools--transform-tool-result
-    (or title (plist-get update :title) 'ellm-acp-tool)
-    (and (plist-member update :rawInput)
-         (ellm-acp--raw-input-params (plist-get update :rawInput)))
-    nil
-    (if (ellm-acp--tool-summary-p)
-        (ellm-acp--tool-summary-text update state)
-      (ellm-acp--tool-update-text update :skip-raw-input skip-raw-input)))))
+  (let ((text
+         (ellm-acp--limited-tool-detail-text
+          (ellm-tools--transform-tool-result
+           (or title (plist-get update :title) 'ellm-acp-tool)
+           (and (plist-member update :rawInput)
+                (ellm-acp--raw-input-params (plist-get update :rawInput)))
+           nil
+           (if (ellm-acp--tool-summary-p)
+               (ellm-acp--tool-summary-text update state)
+             (ellm-acp--tool-update-text
+              update :skip-raw-input skip-raw-input))))))
+    (if (string-empty-p text) text (ellm--ensure-newline text))))
 
 (defun ellm-acp--tool-call-details (update state)
   "Return display details for tool call UPDATE with rendered STATE."
@@ -1682,6 +1686,12 @@ objects otherwise look like malformed plists to `json-serialize'."
 (defun ellm-acp--marker-live-p (marker)
   "Return non-nil when MARKER points into a live buffer."
   (and (markerp marker) (marker-buffer marker)))
+
+(defun ellm-acp--region-has-content-p (beg end)
+  "Return non-nil when the region between BEG and END is non-whitespace."
+  (save-excursion
+    (goto-char beg)
+    (re-search-forward "[^[:space:]]" end t)))
 
 (defun ellm-acp--turn-folded-p (marker)
   "Return non-nil when the turn at MARKER has its own outline fold."
@@ -1748,7 +1758,8 @@ objects otherwise look like malformed plists to `json-serialize'."
          (result-follows (and (ellm-acp--marker-live-p result-beg)
                               (= result-beg end)))
          (folded (ellm-acp--turn-folded-p
-                  (ellm-acp-rendered-tool-call-beg state))))
+                  (ellm-acp-rendered-tool-call-beg state)))
+         (had-content (ellm-acp--region-has-content-p beg end)))
     (goto-char beg)
     (delete-region beg end)
     (ellm-acp--insert-tool-call-details details)
@@ -1759,8 +1770,12 @@ objects otherwise look like malformed plists to `json-serialize'."
     (when result-follows
       (set-marker result-beg (point))
       (set-marker-insertion-type result-beg nil))
-    (when folded
-      (ellm--fold-subtree-at (ellm-acp-rendered-tool-call-beg state)))))
+    (cond
+     (folded
+      (ellm--fold-subtree-at (ellm-acp-rendered-tool-call-beg state)))
+     ((not had-content)
+      (ellm--fold-turn-at
+       (ellm-acp-rendered-tool-call-beg state) "tool-call")))))
 
 (defun ellm-acp--upsert-tool-call-details (update connection)
   "Render UPDATE's display details on its live tool-call turn."
@@ -1819,14 +1834,19 @@ objects otherwise look like malformed plists to `json-serialize'."
               (plist-get update :title)))
       (setf (ellm-acp-rendered-tool-result-beg state) result-beg)
       (setf (ellm-acp-rendered-tool-result-body-beg state) body-beg)
-      (setf (ellm-acp-rendered-tool-result-end state) result-end))))
+      (setf (ellm-acp-rendered-tool-result-end state) result-end))
+    (ellm--flush-pending-fold)))
 
 (defun ellm-acp--update-tool-result (state update)
   "Update STATE's rendered result header and body from UPDATE."
   (let ((title (or (ellm-acp-rendered-tool-result-title state)
                    (plist-get update :title)))
         (folded (ellm-acp--turn-folded-p
-                 (ellm-acp-rendered-tool-result-beg state))))
+                 (ellm-acp-rendered-tool-result-beg state)))
+        (had-content
+         (ellm-acp--region-has-content-p
+          (ellm-acp-rendered-tool-result-body-beg state)
+          (ellm-acp-rendered-tool-result-end state))))
     (unless (ellm-acp-rendered-tool-result-title state)
       (setf (ellm-acp-rendered-tool-result-title state)
             (plist-get update :title)))
@@ -1841,8 +1861,12 @@ objects otherwise look like malformed plists to `json-serialize'."
        (ellm-acp-rendered-tool-result-end state)
        (ellm-acp--tool-result-detail-text
         update :skip-raw-input t :title title :state state)))
-    (when folded
-      (ellm--fold-subtree-at (ellm-acp-rendered-tool-result-beg state)))))
+    (cond
+     (folded
+      (ellm--fold-subtree-at (ellm-acp-rendered-tool-result-beg state)))
+     ((not had-content)
+      (ellm--fold-turn-at
+       (ellm-acp-rendered-tool-result-beg state) "tool-result")))))
 
 (defun ellm-acp--insert-tool-update (update &optional connection)
   "Insert or update ACP tool call UPDATE as live rendered turns."
