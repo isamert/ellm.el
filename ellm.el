@@ -284,6 +284,17 @@ Set to nil to make all headings the same size."
          (when (fboundp 'ellm--refresh-pretty-separators-all-buffers)
            (ellm--refresh-pretty-separators-all-buffers))))
 
+(defcustom ellm-turn-rules t
+  "If non-nil, draw horizontal rules above top-level turns.
+When nil, ellm does not install ruler update hooks or perform ruler work
+during fontification and buffer edits."
+  :type 'boolean
+  :group 'ellm-visuals
+  :set (lambda (sym val)
+         (set-default sym val)
+         (when (fboundp 'ellm--refresh-turn-rules-all-buffers)
+           (ellm--refresh-turn-rules-all-buffers))))
+
 (defcustom ellm-reveal-separator-at-point t
   "If non-nil, temporarily show the raw delimiter line when point enters it."
   :type 'boolean
@@ -759,6 +770,8 @@ Used in {load,enable,disable}-theme hooks."
 
 ;;;; Code block highlighting
 
+(defvar ellm--fence-positions)
+
 (defvar ellm--lang-mode-cache (make-hash-table :test 'equal)
   "Cache mapping language name to major mode symbol.")
 
@@ -848,15 +861,37 @@ Also fontifies YAML frontmatter if present and overlaps the region."
           ;; including the trailing newline so `:extend' fills the line.
           (put-text-property fm-beg open-end 'face 'ellm-frontmatter)
           (put-text-property close-beg close-end 'face 'ellm-frontmatter))))
-    (goto-char beg)
-    (while (re-search-forward ellm-code-block-regexp end t)
-      (let* ((lang (match-string 1))
-             (body-beg (match-beginning 2))
-             (body-end (match-end 2))
-             (mode (ellm--lang-mode lang)))
-        (when mode
-          (ellm--fontify-region-as mode body-beg body-end))
-        (font-lock-append-text-property body-beg body-end 'face 'ellm-block)))))
+    ;; Pair recognized fences within each turn.  An unmatched opening fence
+    ;; ends implicitly at the next turn delimiter, so code never leaks into
+    ;; the following turn.
+    (let ((fences ellm--fence-positions))
+      (while fences
+        (let* ((open (car fences))
+               (container (ellm--code-container-bounds-at open))
+               (container-end (and container (cdr container)))
+               (close (and container-end
+                           (cadr fences)
+                           (< (cadr fences) container-end)
+                           (cadr fences)))
+               (body-end (or close container-end))
+               (block-end (if close
+                              (save-excursion
+                                (goto-char close)
+                                (forward-line 1)
+                                (point))
+                            container-end)))
+          (when (and body-end block-end
+                     (< open end) (> block-end beg))
+            (goto-char open)
+            (when (looking-at ellm-code-block-header-regexp)
+              (let* ((lang (match-string 1))
+                     (body-beg (match-end 0))
+                     (mode (ellm--lang-mode lang)))
+                (when mode
+                  (ellm--fontify-region-as mode body-beg body-end))
+                (font-lock-append-text-property
+                 body-beg body-end 'face 'ellm-block))))
+          (setq fences (if close (cddr fences) (cdr fences))))))))
 
 (defun ellm--fontify-shaded-turns (beg end)
   "Shade turn bodies between BEG and END per each role's `:shade' face.
@@ -994,6 +1029,21 @@ jumps to that body's end so large tool outputs are skipped in one step."
             (setq found t)))))
       found)))
 
+(defun ellm--make-code-fence-matcher (regexp)
+  "Return a font-lock matcher for code-fence REGEXP.
+Matches in Markdown-disabled turn bodies are ignored."
+  (lambda (limit)
+    (let (found)
+      (while (and (not found)
+                  (re-search-forward regexp limit t))
+        (let ((md (match-data)))
+          (if-let* ((bounds
+                     (ellm--markdown-disabled-bounds-at (match-beginning 0))))
+              (goto-char (min limit (max (point) (cdr bounds))))
+            (set-match-data md)
+            (setq found t))))
+      found)))
+
 (defconst ellm-font-lock-keywords
   `(;; Turn delimiters
     (,ellm-turn-regexp
@@ -1004,8 +1054,10 @@ jumps to that body's end so large tool outputs are skipped in one step."
     ;; Frontmatter delimiter lines (`---' open and close) and YAML body
     ;; are handled by `ellm--fontify-code-blocks'.
     ;; Code block delimiters
-    (,ellm-code-block-header-regexp (0 'ellm-code-block-delimiter t))
-    (,ellm-code-block-end-regexp (0 'ellm-code-block-delimiter t))
+    (,(ellm--make-code-fence-matcher ellm-code-block-header-regexp)
+     (0 'ellm-code-block-delimiter t))
+    (,(ellm--make-code-fence-matcher ellm-code-block-end-regexp)
+     (0 'ellm-code-block-delimiter t))
     ;; Bold **text**
     (,(ellm--make-markdown-matcher "\\*\\*\\([^*]+\\)\\*\\*") (0 'ellm-bold t))
     ;; Italic *text* (not bold)
@@ -1029,15 +1081,17 @@ jumps to that body's end so large tool outputs are skipped in one step."
 
 ;; To keep code-block highlighting correct without re-fontifying the
 ;; entire buffer on every change, we maintain a buffer-local sorted
-;; vector of positions where each ``` fence line begins. The cache lets
-;; us:
+;; vector of positions where each recognized ``` fence line begins.
+;; Fences in Markdown-disabled turns are not recognized.  The cache lets us:
 ;;   - decide cheaply whether a change actually touched a fence;
 ;;   - extend font-lock's region to the surrounding fence pair when it
 ;;     did, so flipped block-membership is reflected immediately on the
 ;;     lines below the change.
 
 (defvar-local ellm--fence-positions nil
-  "Sorted list of buffer positions (line beginnings) of ``` fence lines.
+  "Sorted list of recognized ``` fence line positions.
+Fences in Markdown-disabled turn bodies are excluded.  Positions are line
+beginnings, sorted in ascending order.
 Maintained by `ellm--update-fences-after-change'.  A nil value means the
 cache is uninitialized; call `ellm--rebuild-fence-cache' to populate it.")
 
@@ -1049,12 +1103,14 @@ cache is uninitialized; call `ellm--rebuild-fence-cache' to populate it.")
 
 (defun ellm--rebuild-fence-cache ()
   "Rebuild `ellm--fence-positions' from buffer contents."
+  (ellm--ensure-turn-body-cache)
   (save-excursion
     (save-match-data
       (goto-char (point-min))
       (let (positions)
         (while (re-search-forward ellm-code-block-fence-regexp nil t)
-          (push (line-beginning-position) positions)
+          (unless (ellm--markdown-disabled-at-p (match-beginning 0))
+            (push (line-beginning-position) positions))
           (forward-line 1))
         (setq ellm--fence-positions (nreverse positions)
               ellm--fence-cache-valid t)
@@ -1065,6 +1121,11 @@ cache is uninitialized; call `ellm--rebuild-fence-cache' to populate it.")
 recent change altered fence count by an odd number.  Read (and cleared)
 by `ellm--extend-after-change-region' to decide whether to extend
 fontification all the way to `point-max'.")
+
+(defvar-local ellm--fence-structure-changed nil
+  "Non-nil when a turn edit changed which fences are recognized.
+Consumed by `ellm--extend-after-change-region', which refontifies the buffer
+so stale code faces and fence parity cannot survive the structural edit.")
 
 (defvar-local ellm--pending-fold-turn nil
   "Pending foldable turn waiting for a stable following boundary.
@@ -1088,8 +1149,8 @@ Strategy:
      any newly visible fence lines back into the cache.
 
 Sets `ellm--fence-parity-flipped' to non-nil when the net change in
-fence count is odd (i.e. the parity of every fence past the change
-flipped, swapping code-block membership of every following line)."
+fence count is odd, so code-block membership after the change may need
+to be refontified."
   (when ellm--fence-cache-valid
     (save-excursion
       (save-match-data
@@ -1117,8 +1178,9 @@ flipped, swapping code-block membership of every following line)."
             (goto-char scan-beg)
             (while (re-search-forward ellm-code-block-fence-regexp
                                       (1+ scan-end) t)
-              (push (line-beginning-position) new-fences)
-              (cl-incf added)
+              (unless (ellm--markdown-disabled-at-p (match-beginning 0))
+                (push (line-beginning-position) new-fences)
+                (cl-incf added))
               (forward-line 1))
             (when new-fences
               (setq ellm--fence-positions
@@ -1133,18 +1195,25 @@ flipped, swapping code-block membership of every following line)."
 Assumes `ellm--fence-positions' is sorted ascending."
   (car (last (seq-take-while (lambda (p) (<= p pos)) ellm--fence-positions))))
 
-(defun ellm--in-code-block-p (&optional pos)
-  "Return non-nil if POS (or point) is inside a fenced code block."
-  (let* ((target (or pos (point)))
-         (vec ellm--fence-positions-vector)
-         (lo 0)
-         (hi (length vec)))
+(defun ellm--fence-index-before (pos)
+  "Return the number of recognized fence positions strictly before POS."
+  (let ((vec ellm--fence-positions-vector)
+        (lo 0)
+        (hi (length ellm--fence-positions-vector)))
     (while (< lo hi)
       (let ((mid (/ (+ lo hi) 2)))
-        (if (< (aref vec mid) target)
+        (if (< (aref vec mid) pos)
             (setq lo (1+ mid))
-            (setq hi mid))))
-    (cl-oddp lo)))
+          (setq hi mid))))
+    lo))
+
+(defun ellm--in-code-block-p (&optional pos)
+  "Return non-nil if POS (or point) is inside a turn-local code block."
+  (let* ((target (or pos (point)))
+         (container (ellm--code-container-bounds-at target)))
+    (and container
+         (cl-oddp (- (ellm--fence-index-before target)
+                     (ellm--fence-index-before (car container)))))))
 
 ;;;;; Turn body cache
 
@@ -1255,6 +1324,33 @@ otherwise shift cached positions past the edit."
     (let ((idx (1- lo)))
       (and (>= idx 0) idx))))
 
+(defun ellm--turn-body-bounds-at (&optional pos)
+  "Return turn body bounds containing POS, or nil on a delimiter line."
+  (let* ((target (or pos (point)))
+         (idx (ellm--turn-body-cache-index-at target))
+         (vec ellm--turn-body-cache-vector)
+         (entry (and idx (aref vec idx))))
+    (when (and entry (>= target (aref entry 1)))
+      (cons (aref entry 1)
+            (if (< (1+ idx) (length vec))
+                (aref (aref vec (1+ idx)) 0)
+              (point-max))))))
+
+(defun ellm--code-container-bounds-at (&optional pos)
+  "Return the turn-local region in which a fence at POS may be paired.
+Turn delimiter lines are outside all such regions.  Text before the first
+turn delimiter is treated as one region."
+  (let* ((target (or pos (point)))
+         (body (ellm--turn-body-bounds-at target))
+         (vec ellm--turn-body-cache-vector))
+    (or body
+        (when (or (= (length vec) 0)
+                  (< target (aref (aref vec 0) 0)))
+          (cons (point-min)
+                (if (> (length vec) 0)
+                    (aref (aref vec 0) 0)
+                  (point-max)))))))
+
 (defun ellm--markdown-disabled-bounds-at (&optional pos)
   "Return raw turn body bounds containing POS, or nil.
 The returned cons is (BODY-BEG . BODY-END).  Delimiter lines are never
@@ -1287,49 +1383,57 @@ for Markdown-disabled roles."
 (defun ellm--extend-after-change-region (beg end _old-len)
   "Extend the font-lock refontification region for a buffer change.
 Called as `font-lock-extend-after-change-region-function'.  Returns nil
-\(no extension) in the common case where the change didn't touch a ```
+\(no extension) in the common case where the change didn't affect a ```
 fence; otherwise a (BEG . END) cons.
 
 Extension policy:
   - Cache up to date: assumed; `ellm--update-fences-after-change' has
     already run from `after-change-functions' before us.
+  - If a turn delimiter edit changed which fences are recognized,
+    refontify the whole buffer.
   - If the change kept the total fence count's parity (added/removed an
     even number of fences), only the local block surrounding the change
     can have flipped: extend to the previous fence (or `point-min') and
     past the next fence (or `point-max').
-  - If parity flipped (odd number of fences added/removed), every
-    following line's code-block membership flipped too: extend END all
-    the way to `point-max'."
-  (let* ((line-beg (save-excursion (goto-char beg) (line-beginning-position)))
-         (line-end (save-excursion (goto-char end) (line-end-position)))
-         ;; Touched a fence line iff:
-         ;; - some cached fence is currently on the affected line range
-         ;;   (i.e. either survived as-is or was just inserted), or
-         ;; - the parity flag is set (we removed one without adding one).
-         (touched-fence
-          (or ellm--fence-parity-flipped
-              (cl-some (lambda (p) (and (>= p line-beg) (<= p line-end)))
-                       ellm--fence-positions))))
-    (when touched-fence
-      (let* ((parity-flipped ellm--fence-parity-flipped)
-             (prev (ellm--fence-before (1- line-beg)))
-             (next (and (not parity-flipped)
-                        (cl-find-if (lambda (p) (> p line-end))
-                                    ellm--fence-positions)))
-             (next-end (and next
-                            (save-excursion
-                              (goto-char next)
-                              (forward-line 1)
-                              (point))))
-             (new-beg (or prev (point-min)))
-             (new-end (cond
-                       (parity-flipped (point-max))
-                       (next-end next-end)
-                       (t (point-max)))))
-        ;; Clear the parity flag now that we've consumed it.
-        (setq ellm--fence-parity-flipped nil)
-        (when (or (< new-beg beg) (> new-end end))
-          (cons (min new-beg beg) (max new-end end)))))))
+  - If parity flipped (odd number of fences added/removed), conservatively
+    extend END to `point-max'; turn-local pairing still prevents code syntax
+    from crossing a turn delimiter."
+  (if ellm--fence-structure-changed
+      (progn
+        (setq ellm--fence-structure-changed nil
+              ellm--fence-parity-flipped nil)
+        (unless (and (= beg (point-min)) (= end (point-max)))
+          (cons (point-min) (point-max))))
+    (let* ((line-beg (save-excursion (goto-char beg) (line-beginning-position)))
+           (line-end (save-excursion (goto-char end) (line-end-position)))
+           ;; Touched a fence line iff:
+           ;; - some cached fence is currently on the affected line range
+           ;;   (i.e. either survived as-is or was just inserted), or
+           ;; - the parity flag is set (we removed one without adding one).
+           (touched-fence
+            (or ellm--fence-parity-flipped
+                (cl-some (lambda (p) (and (>= p line-beg) (<= p line-end)))
+                         ellm--fence-positions))))
+      (when touched-fence
+        (let* ((parity-flipped ellm--fence-parity-flipped)
+               (prev (ellm--fence-before (1- line-beg)))
+               (next (and (not parity-flipped)
+                          (cl-find-if (lambda (p) (> p line-end))
+                                      ellm--fence-positions)))
+               (next-end (and next
+                              (save-excursion
+                                (goto-char next)
+                                (forward-line 1)
+                                (point))))
+               (new-beg (or prev (point-min)))
+               (new-end (cond
+                         (parity-flipped (point-max))
+                         (next-end next-end)
+                         (t (point-max)))))
+          ;; Clear the parity flag now that we've consumed it.
+          (setq ellm--fence-parity-flipped nil)
+          (when (or (< new-beg beg) (> new-end end))
+            (cons (min new-beg beg) (max new-end end))))))))
 
 (defvar-local ellm--pending-delimiter-deletion nil
   "Bounds of a pending deletion that intersects a turn delimiter line.
@@ -1345,7 +1449,8 @@ BEG and END bound the to-be-changed region.  Insertions (BEG == END)
 can't collapse any overlays, so they're ignored."
   (when (ellm--turn-delimiter-in-region-p beg end)
     (setq ellm--turn-body-cache-force-rebuild t))
-  (when (and (not ellm--pending-delimiter-deletion)
+  (when (and ellm-turn-rules
+             (not ellm--pending-delimiter-deletion)
              (/= beg end))
     (when (ellm--turn-delimiter-in-region-p beg end)
       (setq ellm--pending-delimiter-deletion (cons beg end)))))
@@ -1357,25 +1462,44 @@ The neighborhood spans from the previous turn delimiter line (or
 splitting of turns caused by an edit at POS is reflected.
 
 Optional WINDOW determines the rule width."
-  (let ((rb (save-excursion
-              (goto-char pos)
-              (forward-line 0)
-              (if (re-search-backward ellm-turn-regexp nil t)
-                  (line-beginning-position)
-                (point-min))))
-        (re (save-excursion
-              (goto-char pos)
-              (forward-line 1)
-              (if (re-search-forward ellm-turn-regexp nil t)
-                  (line-end-position)
-                (point-max)))))
-    (ellm--put-turn-rules rb re window)))
+  (when ellm-turn-rules
+    (let ((rb (save-excursion
+                (goto-char pos)
+                (forward-line 0)
+                (if (re-search-backward ellm-turn-regexp nil t)
+                    (line-beginning-position)
+                  (point-min))))
+          (re (save-excursion
+                (goto-char pos)
+                (forward-line 1)
+                (if (re-search-forward ellm-turn-regexp nil t)
+                    (line-end-position)
+                  (point-max)))))
+      (ellm--put-turn-rules rb re window))))
 
 (defun ellm--after-change-function (beg end old-len)
   "Update fence cache and rule overlays after a buffer change.
 BEG END OLD-LEN are passed by `after-change'."
-  (ellm--update-fences-after-change beg end old-len)
-  (ellm--update-turn-body-cache-after-change beg end old-len)
+  (let ((turn-structure-changed
+         (or ellm--turn-body-cache-force-rebuild
+             (ellm--turn-delimiter-in-region-p beg end))))
+    ;; Fence recognition depends on the current turn role, so update turn
+    ;; boundaries before scanning changed lines for fences.
+    (ellm--update-turn-body-cache-after-change beg end old-len)
+    (ellm--update-fences-after-change beg end old-len)
+    (when (and turn-structure-changed ellm--fence-cache-valid)
+      ;; The incremental result describes how the old recognized fences move
+      ;; if turn semantics stay unchanged.  A full rebuild differing from it
+      ;; means this delimiter edit enabled or disabled non-local fences.  An
+      ;; odd fence count next to the edit means it also moved an implicit
+      ;; turn-boundary close.
+      (let ((incremental-fences ellm--fence-positions))
+        (ellm--rebuild-fence-cache)
+        (unless (and (equal incremental-fences ellm--fence-positions)
+                     (not (ellm--in-code-block-p beg))
+                     (not (ellm--in-code-block-p
+                           (max (point-min) (1- beg)))))
+          (setq ellm--fence-structure-changed t)))))
   ;; If the deletion intersected a delimiter line, every rule overlay
   ;; that lived inside the deleted range has now collapsed to the
   ;; single post-change point.  Sweep just that point for orphans and
@@ -1384,18 +1508,19 @@ BEG END OLD-LEN are passed by `after-change'."
   ;; pass via `ellm--fontify-region'.
   (when ellm--pending-delimiter-deletion
     (setq ellm--pending-delimiter-deletion nil)
-    ;; All collapsed rule overlays sit at BEG (== END after deletion).
-    ;; `remove-overlays' on a zero-length range still catches overlays
-    ;; touching that point.
-    (remove-overlays beg (min (1+ end) (point-max)) 'ellm-rule t)
-    (ellm--refresh-rules-around beg)))
+    (when ellm-turn-rules
+      ;; All collapsed rule overlays sit at BEG (== END after deletion).
+      ;; `remove-overlays' on a zero-length range still catches overlays
+      ;; touching that point.
+      (remove-overlays beg (min (1+ end) (point-max)) 'ellm-rule t)
+      (ellm--refresh-rules-around beg))))
 
 (defun ellm--code-block-scan-bounds (beg end)
   "Return a (SCAN-BEG . SCAN-END) cons covering whole code blocks for BEG..END.
 To avoid that ambiguity we snap the scan range to real block
 boundaries using the parity-aware fence cache (`ellm--fence-positions'):
-a position is inside a block iff an odd number of fence lines precede
-it.
+a position is inside a block iff an odd number of fence lines precede it
+in the same turn body.
 Falls back to a conservative whole-line range when the cache is not
 available."
   (if (and ellm--fence-cache-valid ellm--fence-positions)
@@ -1407,16 +1532,20 @@ available."
                 beg))
              (scan-end
               ;; If END is inside a block, advance past its closing
-              ;; fence so the whole block is scanned in one piece.
+              ;; fence or turn boundary so the whole block is scanned.
               (if (ellm--in-code-block-p end)
-                  (let ((closer (cl-find-if (lambda (p) (> p end))
-                                            ellm--fence-positions)))
+                  (let* ((container (ellm--code-container-bounds-at end))
+                         (container-end (cdr container))
+                         (closer (cl-find-if
+                                  (lambda (p)
+                                    (and (> p end) (< p container-end)))
+                                  ellm--fence-positions)))
                     (if closer
                         (save-excursion
                           (goto-char closer)
                           (forward-line 1)
                           (point))
-                      (point-max)))
+                      container-end))
                 end)))
         (cons scan-beg scan-end))
     ;; Cache unavailable: fall back to whole-line bounds (no fence
@@ -1444,7 +1573,8 @@ re-shaded, leaving unshaded gaps at line beginnings/ends."
     (pcase-let ((`(,scan-beg . ,scan-end) (ellm--code-block-scan-bounds beg end)))
       (ellm--fontify-code-blocks scan-beg scan-end))
     (ellm--fontify-shaded-turns beg end)
-    (ellm--put-turn-rules beg end)
+    (when ellm-turn-rules
+      (ellm--put-turn-rules beg end))
     (ellm--put-pretty-separators beg end)
     `(jit-lock-bounds ,beg . ,end)))
 
@@ -1516,16 +1646,17 @@ it.  The buffer-wide refresh, used on window resize, is
 
 Optional WINDOW determines the rule width; defaults to a window
 displaying the current buffer."
-  (remove-overlays beg end 'ellm-rule t)
-  (let ((win (or window (ellm--rule-window))))
-    (save-excursion
-      (goto-char beg)
-      (while (re-search-forward ellm-turn-regexp end t)
-        (let ((bol (line-beginning-position))
-              (header (match-string-no-properties 1)))
-          (unless (or (= bol (point-min))
-                      (ellm--continuation-header-p header))
-            (ellm--make-rule-overlay bol win)))))))
+  (when ellm-turn-rules
+    (remove-overlays beg end 'ellm-rule t)
+    (let ((win (or window (ellm--rule-window))))
+      (save-excursion
+        (goto-char beg)
+        (while (re-search-forward ellm-turn-regexp end t)
+          (let ((bol (line-beginning-position))
+                (header (match-string-no-properties 1)))
+            (unless (or (= bol (point-min))
+                        (ellm--continuation-header-p header))
+              (ellm--make-rule-overlay bol win))))))))
 
 (defun ellm--rebuild-turn-rules (&optional window)
   "Rebuild all rule overlays in the current buffer from scratch.
@@ -1535,29 +1666,31 @@ Cost is O(buffer overlays + buffer size); rule overlays are sparse
 
 Optional WINDOW determines the rule width; defaults to a window
 displaying the current buffer."
-  (remove-overlays (point-min) (point-max) 'ellm-rule t)
-  (let ((win (or window (ellm--rule-window))))
-    (save-excursion
-      (goto-char (point-min))
-      (while (re-search-forward ellm-turn-regexp nil t)
-        (let ((bol (line-beginning-position))
-              (header (match-string-no-properties 1)))
-          (unless (or (= bol (point-min))
-                      (ellm--continuation-header-p header))
-            (ellm--make-rule-overlay bol win)))))))
+  (when ellm-turn-rules
+    (remove-overlays (point-min) (point-max) 'ellm-rule t)
+    (let ((win (or window (ellm--rule-window))))
+      (save-excursion
+        (goto-char (point-min))
+        (while (re-search-forward ellm-turn-regexp nil t)
+          (let ((bol (line-beginning-position))
+                (header (match-string-no-properties 1)))
+            (unless (or (= bol (point-min))
+                        (ellm--continuation-header-p header))
+              (ellm--make-rule-overlay bol win))))))))
 
 (defun ellm--update-rules (&optional frame-or-window)
   "Refresh all turn rule widths in ellm buffers visible on FRAME-OR-WINDOW.
 Each buffer's rules are sized for the window currently displaying it,
 not for the selected window (which may be on an unrelated buffer)."
-  (let ((frame (cond
-                ((framep frame-or-window) frame-or-window)
-                ((windowp frame-or-window) (window-frame frame-or-window))
-                (t (selected-frame)))))
-    (dolist (win (window-list frame 'no-minibuf))
-      (with-current-buffer (window-buffer win)
-        (when (derived-mode-p 'ellm-mode)
-          (ellm--rebuild-turn-rules win))))))
+  (when ellm-turn-rules
+    (let ((frame (cond
+                  ((framep frame-or-window) frame-or-window)
+                  ((windowp frame-or-window) (window-frame frame-or-window))
+                  (t (selected-frame)))))
+      (dolist (win (window-list frame 'no-minibuf))
+        (with-current-buffer (window-buffer win)
+          (when (and ellm-turn-rules (derived-mode-p 'ellm-mode))
+            (ellm--rebuild-turn-rules win)))))))
 
 (defvar-local ellm--was-narrowed-p nil
   "Non-nil if this buffer was narrowed after the previous command.")
@@ -1568,10 +1701,35 @@ Narrowed fontification can legitimately remove rule overlays whose anchor
 falls outside the accessible part of the buffer.  When the buffer is widened
 again, rebuild from the full buffer so those rulers come back even if no
 subsequent edit happens near them."
-  (let ((narrowed (buffer-narrowed-p)))
-    (when (and ellm--was-narrowed-p (not narrowed))
-      (ellm--rebuild-turn-rules))
-    (setq ellm--was-narrowed-p narrowed)))
+  (when ellm-turn-rules
+    (let ((narrowed (buffer-narrowed-p)))
+      (when (and ellm--was-narrowed-p (not narrowed))
+        (ellm--rebuild-turn-rules))
+      (setq ellm--was-narrowed-p narrowed))))
+
+(defun ellm--configure-turn-rules (&optional defer-rebuild)
+  "Enable or disable ruler maintenance in the current ellm buffer.
+When DEFER-REBUILD is non-nil, fontification will create the initial rules."
+  (if ellm-turn-rules
+      (progn
+        (add-hook 'window-size-change-functions #'ellm--update-rules nil t)
+        (add-hook 'post-command-hook #'ellm--refresh-rules-after-widen nil t)
+        (setq ellm--was-narrowed-p (buffer-narrowed-p))
+        (unless defer-rebuild
+          (ellm--rebuild-turn-rules)))
+    (remove-hook 'window-size-change-functions #'ellm--update-rules t)
+    (remove-hook 'post-command-hook #'ellm--refresh-rules-after-widen t)
+    (setq ellm--pending-delimiter-deletion nil)
+    (save-restriction
+      (widen)
+      (remove-overlays (point-min) (point-max) 'ellm-rule t))))
+
+(defun ellm--refresh-turn-rules-all-buffers ()
+  "Apply `ellm-turn-rules' to all existing ellm buffers."
+  (dolist (buffer (buffer-list))
+    (with-current-buffer buffer
+      (when (derived-mode-p 'ellm-mode)
+        (ellm--configure-turn-rules)))))
 
 ;;;;;; Pretty separators
 
@@ -3640,8 +3798,7 @@ Implementations should stream into the assistant turn already appended by
   (setq-local header-line-format '((:eval (ellm--header-line-status))))
   (add-hook 'before-change-functions #'ellm--before-change-function nil t)
   (add-hook 'after-change-functions #'ellm--after-change-function nil t)
-  (add-hook 'window-size-change-functions #'ellm--update-rules nil t)
-  (add-hook 'post-command-hook #'ellm--refresh-rules-after-widen nil t)
+  (ellm--configure-turn-rules t)
   (add-hook 'post-command-hook #'ellm--reveal-separator-at-point nil t)
   (add-hook 'completion-at-point-functions #'ellm--frontmatter-capf nil t)
   (add-hook 'completion-at-point-functions #'ellm--slash-command-capf nil t)
@@ -3664,9 +3821,8 @@ Implementations should stream into the assistant turn already appended by
   (setq-local page-delimiter ellm-page-delimiter-regexp)
   (outline-minor-mode 1)
   ;; Cache
-  (ellm--rebuild-fence-cache)
   (ellm--rebuild-turn-body-cache)
-  (setq ellm--was-narrowed-p (buffer-narrowed-p))
+  (ellm--rebuild-fence-cache)
   ;; Collapse configured turns (tool calls / reasoning) in loaded
   ;; conversations.  Safe here because every turn is already complete.
   (ellm--fold-configured-turns)
