@@ -809,6 +809,18 @@ Entries here override the default language mode inference logic.")
             (puthash lang mode ellm--lang-mode-cache)
             mode)))))
 
+(defun ellm--code-block-mode (lang header)
+  "Return the major mode inferred from LANG or fenced block HEADER.
+HEADER may contain a file name prefixed by a START:END line range."
+  (or (ellm--lang-mode lang)
+      (let* ((info (string-trim
+                    (string-remove-prefix "```" (string-trim-left header))))
+             (file (replace-regexp-in-string
+                    "\\`[0-9]+:[0-9]+:" "" info))
+             (entry (assoc-default file auto-mode-alist #'string-match))
+             (mode (if (consp entry) (car entry) entry)))
+        (and (symbolp mode) (fboundp mode) mode))))
+
 (defun ellm--fontify-region-as (mode body-beg body-end)
   "Fontify region BODY-BEG..BODY-END as if it were in MODE.
 
@@ -912,8 +924,9 @@ Also fontifies YAML frontmatter if present and overlaps the region."
             (goto-char open)
             (when (looking-at ellm-code-block-header-regexp)
               (let* ((lang (match-string 1))
+                     (header (match-string-no-properties 0))
                      (body-beg (match-end 0))
-                     (mode (ellm--lang-mode lang)))
+                     (mode (ellm--code-block-mode lang header)))
                 (when mode
                   (ellm--fontify-region-as mode body-beg body-end))
                 (font-lock-append-text-property
