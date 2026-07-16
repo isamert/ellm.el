@@ -1382,11 +1382,10 @@ When SELECT is non-nil, choose a session from `session/list'."
 (defun ellm-acp--load-session-into-new-buffer (provider frontmatter session)
   "Load ACP SESSION for PROVIDER into a new ellm buffer."
   (let* ((session-id (plist-get session :sessionId))
+         (title (plist-get session :title))
          (cwd (or (plist-get session :cwd)
                   (ellm-acp--provider-cwd provider frontmatter)))
-         (buf (generate-new-buffer (format "*ellm:%s*"
-                                           (or (plist-get session :title)
-                                               session-id))))
+         (buf (generate-new-buffer ellm-initial-buffer-name))
          connection)
     (with-current-buffer buf
       (insert (format "---\nprovider: %s\nmodel: %s\ncwd: %s\nacp:\n  session-id: %s\n---\n\n"
@@ -1396,6 +1395,7 @@ When SELECT is non-nil, choose a session from `session/list'."
                       (or (ellm-acp-provider-model provider) "null")
                       cwd session-id))
       (ellm-mode)
+      (ellm-update-session-title title buf)
       (setq connection (ellm-acp--ensure-connection provider buf))
       (ellm-acp--initialize-sync connection)
       (unless (ellm-acp--capability connection '(loadSession))
@@ -1462,16 +1462,17 @@ When SELECT is non-nil, choose a session from `session/list'."
               (_ nil))))))))
 
 (defun ellm-acp--handle-session-info-update (connection update)
-  "Persist ACP session metadata UPDATE for CONNECTION."
-  (unless ellm-acp--inhibit-frontmatter-persist
-    (when-let* ((buffer (ellm-acp--connection-buffer connection)))
-      (when (buffer-live-p buffer)
-        (with-current-buffer buffer
-          (when (plist-member update :title)
-            (ellm--set-frontmatter-value '(acp title) (plist-get update :title)))
-          (when (plist-member update :updatedAt)
-            (ellm--set-frontmatter-value '(acp updated-at)
-                                         (plist-get update :updatedAt))))))))
+  "Handle ACP session metadata UPDATE for CONNECTION."
+  (when-let* ((buffer (ellm-acp--connection-buffer connection)))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (unless ellm-acp--inhibit-frontmatter-persist
+          (when-let* ((title (plist-get update :title)))
+            (ellm--set-frontmatter-value '(acp title) title))
+          (when-let* ((updated-at (plist-get update :updatedAt)))
+            (ellm--set-frontmatter-value '(acp updated-at) updated-at)))
+        (when-let* ((title (plist-get update :title)))
+          (ellm-update-session-title title buffer))))))
 
 (defun ellm-acp--slash-command-candidate (command)
   "Return completion candidate for ACP slash COMMAND."

@@ -101,6 +101,20 @@ set any frontmatter key useful to a child buffer, most commonly `provider',
   :type 'sexp
   :group 'ellm)
 
+(defcustom ellm-initial-buffer-name #'ellm-default-buffer-name
+  "Initial buffer name for ellm buffers."
+  :type '(choice string function)
+  :group 'ellm)
+
+(defcustom ellm-buffer-name-function #'ellm-default-buffer-name
+  "Function used to name buffers from backend-provided session titles.
+The function is called with the title in the target ellm buffer and should
+return a buffer name, or nil to leave the name unchanged.  When this option is
+nil, backend title updates do not rename buffers."
+  :type '(choice (const :tag "Do not rename buffers automatically" nil)
+                 function)
+  :group 'ellm)
+
 (defcustom ellm-current-project-function #'ellm-current-project-root
   "Function used to return the current project root.
 The function is called without arguments with `default-directory' set to
@@ -2072,6 +2086,33 @@ stored without their leading colon, e.g. `:id call_1' becomes
 (defvar-local ellm--base-default-directory nil
   "Buffer default directory before applying frontmatter `cwd:'.")
 
+(defun ellm-default-buffer-name (&optional title)
+  "Return the default buffer name for backend-provided session TITLE."
+  (let* ((default-directory
+           (or ellm--base-default-directory default-directory))
+         (root (funcall ellm-current-project-function))
+         (project-name
+          (and root
+               (file-name-nondirectory
+                (directory-file-name (expand-file-name root))))))
+    (if (or (not (stringp title)) (string-empty-p title))
+        (if project-name
+            (format "*ellm: %s*" project-name)
+          (format "*ellm*"))
+      (if (and project-name (not (string-empty-p project-name)))
+          (format "*ellm (%s): %s*" project-name title)
+        (format "*ellm: %s*" title)))))
+
+(defun ellm-update-session-title (title &optional buffer)
+  "Update BUFFER's name from backend-provided session TITLE.
+BUFFER defaults to the current buffer.  Do nothing when
+`ellm-buffer-name-function' is nil or returns nil."
+  (let ((buffer (or buffer (current-buffer))))
+    (when (and ellm-buffer-name-function (buffer-live-p buffer))
+      (with-current-buffer buffer
+        (when-let* ((name (funcall ellm-buffer-name-function title)))
+          (rename-buffer name t))))))
+
 (defvar-local ellm--frontmatter-cwd-directory nil
   "Resolved directory from frontmatter `cwd:', or nil when unset.")
 
@@ -3005,7 +3046,9 @@ Completes:
   "Create a new ellm conversation buffer.
 When EPHEMERAL is non-nil, do not automatically persist it.
 When SELECT-PROVIDER-MODEL is non-nil, prompt for the provider and model."
-  (let* ((buf (generate-new-buffer "*ellm*"))
+  (let* ((buf (generate-new-buffer (if (functionp ellm-initial-buffer-name)
+                                       (funcall ellm-initial-buffer-name)
+                                     ellm-initial-buffer-name)))
          (provider-name
           (if select-provider-model
               (let ((name (completing-read
