@@ -209,6 +209,67 @@ Supported by the ACP backend:
 | Deprecated ACP session modes                                    | no                         |
 | HTTP/WebSocket ACP transports                                   | no, stdio only             |
 
+### Kagi Assistant Backend
+
+This is an example backend that you can use if you have a Kagi
+account. This a proof-of-concept work that showcases ellm as a
+frontend for different kind of backends.
+
+Use the Kagi backend with an existing Kagi Assistant subscription.
+This is an unofficial integration with Kagi Assistant's web API, so it
+may need updates if that API changes.  Authentication uses only the
+`kagi_session` cookie; browser headers are not sent.
+
+```elisp
+(require 'ellm)
+(require 'ellm-kagi)
+
+(setq ellm-provider-alist
+      `((kagi . ,(ellm-make-kagi-provider
+                  :session-token (lambda () (getenv "KAGI_SESSION_TOKEN"))
+                  :model "kimi-k2-6-thinking"))))
+```
+
+Pass the cookie value itself in `KAGI_SESSION_TOKEN`, without the
+`kagi_session=` prefix.  Model completion uses the built-in
+`ellm-kagi-models` fallback catalog.  Run `M-x
+ellm-kagi-refresh-models` from a Kagi conversation to replace that
+provider's candidates with the currently supported models returned by
+Kagi.  You can also pass an explicit `:models` list to
+`ellm-make-kagi-provider`.
+
+A conversation may override Kagi request settings:
+
+```markdown
+---
+provider: kagi
+model: kimi-k2-6-thinking
+kagi:
+  enable-search: true
+  personalization: false
+  thinking-preset: extended
+---
+
+>-| user
+Research this question and summarize what you find.
+```
+
+The backend creates a Kagi conversation on the first send and persists
+its identifiers in frontmatter:
+
+```yaml
+kagi:
+  conversation-id: 56b20b57-dd37-4c7f-ab19-4a1f1461b706
+  branch-id: 952002a5-2a15-455f-837a-31e1f35b6d86
+```
+
+Later sends continue that server-side branch.  Kagi therefore receives
+the latest user turn rather than a replay of the editable ellm
+transcript.  Text and thinking snapshots stream into the buffer; final
+usage and cost are shown in the header line.  Local ellm tools, custom
+system turns, session listing, and remote conversation deletion are
+not supported by this backend.
+
 ### MCP Servers
 
 MCP server configuration follows the shape used by `mcp.el`'s
@@ -335,7 +396,7 @@ powerful:
   Markdown, it defines *turns* as first-class citizens, which makes
   navigation/folding etc. a breeze.
 - It's a frontend for any LLM provider. Right now it supports many API
-  providers through llm.el, and it's also an ACP client. You can also
+  providers through llm.el, Kagi Assistant, and ACP agents. You can also
   implement a couple of functions and use ellm as your frontend for
   another backend. Of course, each backend has a different level of
   flexibility, but this lets you mix your different subscriptions. For
