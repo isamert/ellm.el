@@ -98,24 +98,46 @@ provide request defaults that may be overridden by `kagi:' frontmatter."
     copy))
 
 (cl-defmethod ellm-provider-frontmatter-entries
-  ((_provider ellm-kagi-provider) path _buffer)
-  "Return Kagi-specific frontmatter entries under PATH."
+  ((provider ellm-kagi-provider) path _buffer)
+  "Return Kagi-specific frontmatter entries for PROVIDER under PATH."
   (when (null path)
-    '(("kagi" :ann "map"
-       :desc "Kagi Assistant request settings and persisted conversation metadata."
-       :children
-       (("enable-search" :ann "boolean"
-         :desc "Enable Kagi web search for this conversation."
-         :values (("true" :desc "Enable Kagi web search.")
-                  ("false" :desc "Disable Kagi web search.")))
-        ("personalization" :ann "boolean"
-         :desc "Use Kagi account personalization for this conversation."
-         :values (("true" :desc "Enable Kagi personalization.")
-                  ("false" :desc "Disable Kagi personalization.")))
-        ("thinking-preset" :ann "preset"
-         :desc "Kagi thinking budget for models that support thinking presets."
-         :values (("standard" :desc "Use Kagi's standard thinking budget.")
-                  ("extended" :desc "Use Kagi's extended thinking budget."))))))))
+    (list
+     (list
+      "kagi" :ann "map"
+      :desc "Kagi Assistant request settings and persisted conversation metadata."
+      :children
+      (list
+       (list "enable-search" :ann "boolean"
+             :desc "Enable Kagi web search for this conversation."
+             :type 'boolean :editable t
+             :default (if (ellm-kagi-provider-enable-search provider)
+                          t :false)
+             :values '(("true" :desc "Enable Kagi web search.")
+                       ("false" :desc "Disable Kagi web search.")))
+       (list "personalization" :ann "boolean"
+             :desc "Use Kagi account personalization for this conversation."
+             :type 'boolean :editable t
+             :default (if (ellm-kagi-provider-personalization provider)
+                          t :false)
+             :values '(("true" :desc "Enable Kagi personalization.")
+                       ("false" :desc "Disable Kagi personalization.")))
+       (append
+        (list "thinking-preset" :ann "preset"
+              :desc "Kagi thinking budget for models that support thinking presets."
+              :type 'enum :editable t
+              :values '(("standard" :desc "Use Kagi's standard thinking budget.")
+                        ("extended" :desc "Use Kagi's extended thinking budget.")))
+        (when-let* ((preset (ellm-kagi--provider-thinking-preset provider)))
+          (list :default preset))))))))
+
+(cl-defmethod ellm-provider-config-effect
+  ((_provider ellm-kagi-provider) path _buffer)
+  "Return Kagi's application effect for config PATH."
+  (when (member path '((model)
+                       (kagi enable-search)
+                       (kagi personalization)
+                       (kagi thinking-preset)))
+    'next-send))
 
 (cl-defmethod ellm-provider-close-session
   ((_provider ellm-kagi-provider) _frontmatter buffer)
@@ -313,7 +335,7 @@ to `ellm-provider' or the first Kagi entry in `ellm-provider-alist'."
 
 (defun ellm-kagi--json-boolean (value)
   "Return VALUE represented as a JSON boolean."
-  (if value t :json-false))
+  (if (ellm--false-value-p value) :json-false t))
 
 (defun ellm-kagi--setting-string (value)
   "Return VALUE as a Kagi setting string, preserving nil."

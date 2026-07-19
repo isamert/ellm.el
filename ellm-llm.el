@@ -82,6 +82,34 @@ In this case there is no real session, so we just close the in-flight requests."
   ()
   (ellm-cancel t))
 
+(cl-defmethod ellm-provider-config-effect
+  ((provider llm-standard-chat-provider) path _buffer)
+  "Return the `llm.el' backend's application effect for config PATH."
+  (ellm-llm--config-effect provider path))
+
+(cl-defmethod ellm-provider-config-effect (provider path _buffer)
+  "Compatibility fallback matching direct `llm.el' backend dispatch."
+  (ellm-llm--config-effect provider path))
+
+(defun ellm-llm--config-effect (provider path)
+  "Return the `llm.el' application effect for PROVIDER's config PATH."
+  (let ((capabilities (ignore-errors (llm-capabilities provider))))
+    (when (or (member path '((system) (temperature) (max-tokens) (cwd)))
+              (and (equal path '(model))
+                   (ellm-llm--provider-slot-p provider 'chat-model))
+              (and (equal path '(reasoning))
+                   (cl-intersection capabilities
+                                    '(reasoning streaming-reasoning)))
+              (and (equal path '(tools))
+                   (cl-intersection capabilities
+                                    '(tool-use streaming-tool-use))))
+      'next-send)))
+
+(defun ellm-llm--provider-slot-p (provider slot)
+  "Return non-nil when PROVIDER has struct SLOT."
+  (and (cl-struct-p provider)
+       (assq slot (cl-struct-slot-info (type-of provider)))))
+
 ;;;; Internal
 
 ;;;;; Tool handling

@@ -72,6 +72,24 @@ Useful commands:
 Create a new conversation with `M-x ellm-new-buffer`, edit the final
 `user` turn, then run `ellm-send`.
 
+### Interactive Configuration
+
+Run `M-x ellm-set-config` in a conversation buffer to edit frontmatter without
+manually navigating YAML completion.  The command shows only settings supported
+by the current backend, includes current values, and indicates when each change
+takes effect.  Value prompts use completion for models and enums, booleans for
+on/off settings, numeric readers, directory readers, or multiple selection for
+tools and MCP servers.
+
+Changes are persisted in frontmatter.  `llm.el` and Kagi settings apply on the
+next send.  ACP model and advertised `acp.config.*` options apply immediately
+when a session is live; `cwd`, `mcp`, and `acp.additional-directories` are saved
+with a notice that a new ACP session is required.  If dynamic ACP options are
+not loaded, the command offers to start a session first.
+
+Use `C-u M-x ellm-set-config` to remove a selected setting from frontmatter.
+Removing a live ACP override does not mutate the already-running session.
+
 ### llm.el Backend
 
 Use this backend for direct LLM API calls through

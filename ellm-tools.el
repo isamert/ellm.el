@@ -1204,7 +1204,7 @@ FALLBACK-PROVIDER is used when FRONTMATTER has no `provider:' key."
           (setq-local ellm-subagent-parent-buffer parent-buffer-name)
           (when fallback-provider
             (setq-local ellm-provider fallback-provider))
-          (insert "---\n" (ellm--ensure-newline (yaml-encode frontmatter))
+          (insert "---\n" (ellm--ensure-newline (ellm--yaml-encode frontmatter))
                   "---\n\n")
           (ellm-mode)
           (ellm--insert-turn "user" :ts (ellm--timestamp))

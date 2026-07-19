@@ -2177,11 +2177,17 @@ parsing fails.  Unless QUIET is non-nil, parsing failures issue a
                ellm--frontmatter-cache-error))
             (copy-tree ellm--frontmatter-cache-value))
         (condition-case err
+            ;; NOTE: yaml.el currently coerces scalar-looking quoted and block
+            ;; strings (such as "false" or "1").  We accept that limitation
+            ;; because no supported provider is known to rely on such values.
             (let ((value (yaml-parse-string body
                                             :object-type 'alist
                                             :sequence-type 'list
                                             :null-object nil
-                                            :false-object nil)))
+                                            :false-object :false)))
+              (unless (or (null value)
+                          (and (listp value) (cl-every #'consp value)))
+                (error "Frontmatter must be a YAML mapping"))
               (setq ellm--frontmatter-cache-valid t
                     ellm--frontmatter-cache-body body
                     ellm--frontmatter-cache-value (copy-tree value)
@@ -2198,6 +2204,12 @@ parsing fails.  Unless QUIET is non-nil, parsing failures issue a
     (setq ellm--frontmatter-cache-valid nil)
     nil))
 
+(defun ellm--false-value-p (value)
+  "Return non-nil when VALUE represents boolean false."
+  (or (null value)
+      (memq value '(:false :json-false))
+      (and (stringp value) (equal (downcase value) "false"))))
+
 (defun ellm--frontmatter-value (key)
   "Return frontmatter KEY from the current buffer.
 KEY may be a symbol/string or a list naming a nested path."
@@ -2208,15 +2220,63 @@ KEY may be a symbol/string or a list naming a nested path."
 When the buffer has no frontmatter, create one at the beginning.  VALUE is
 written as a YAML scalar string.  Nil VALUE deletes KEY.  This ignores
 request-time read-only protection."
-  (let ((inhibit-read-only t))
-    (pcase-let ((fm (ellm--parse-frontmatter))
-                (`(_ _ ,beg ,end _) (ellm--frontmatter-bounds)))
-      (replace-region-contents
-       (or beg (point-min)) (or end (point-min))
-       (lambda ()
-         (concat (unless beg "---\n")
-                 (yaml-encode (ellm--alist-set-nested fm key value))
-                 (unless beg "\n---\n\n")))))))
+  (if (null value)
+      (ellm--delete-frontmatter-value key)
+    (let ((inhibit-read-only t))
+      (pcase-let ((fm (ellm--parse-frontmatter))
+                  (`(_ _ ,beg ,end _) (ellm--frontmatter-bounds)))
+        (replace-region-contents
+         (or beg (point-min)) (or end (point-min))
+         (lambda ()
+           (concat (unless beg "---\n")
+                   (ellm--yaml-encode (ellm--alist-set-nested fm key value))
+                   (unless beg "\n---\n\n"))))))))
+
+(defun ellm--yaml-encode (object)
+  "Encode OBJECT as YAML."
+  ;; NOTE: yaml.el may emit scalar-looking strings such as "false" or "1" as
+  ;; plain YAML scalars.  We accept that limitation because no supported
+  ;; provider is known to rely on those exact string values.
+  (yaml-encode object))
+
+(defun ellm--frontmatter-key-equal-p (left right)
+  "Return non-nil when frontmatter keys LEFT and RIGHT name the same key."
+  (equal (if (symbolp left) (symbol-name left) left)
+         (if (symbolp right) (symbol-name right) right)))
+
+(defun ellm--alist-delete-nested (alist keys)
+  "Return ALIST without the nested value at KEYS.
+Empty maps created by deleting the final child are removed as well."
+  (let* ((keys (if (listp keys) keys (list keys)))
+         (key (car keys))
+         (cell (cl-find key alist :key #'car
+                        :test #'ellm--frontmatter-key-equal-p)))
+    (cond
+     ((not cell) alist)
+     ((null (cdr keys)) (delq cell alist))
+     ((listp (cdr cell))
+      (let ((child (ellm--alist-delete-nested (cdr cell) (cdr keys))))
+        (if child
+            (setcdr cell child)
+          (setq alist (delq cell alist)))
+        alist))
+     (t alist))))
+
+(defun ellm--delete-frontmatter-value (key)
+  "Delete frontmatter KEY and prune empty parent maps.
+KEY may be a symbol/string or a list naming a nested path."
+  (when-let* ((bounds (ellm--frontmatter-bounds)))
+    (let ((fm (copy-tree (ellm--parse-frontmatter))))
+      (when ellm--frontmatter-cache-error
+        (user-error "ellm: cannot edit malformed frontmatter"))
+      (pcase-let ((`(_ _ ,beg ,end _) bounds))
+        (let ((inhibit-read-only t))
+          (replace-region-contents
+           beg end
+           (lambda ()
+             (if-let* ((updated (ellm--alist-delete-nested fm key)))
+                 (ellm--yaml-encode updated)
+               ""))))))))
 
 ;;;;; Persistence
 
@@ -2478,7 +2538,7 @@ accepted."
   (let ((entries (alist-get 'mcp frontmatter))
         resolved)
     (cond
-     ((null entries)
+     ((ellm--false-value-p entries)
       nil)
      ((eq entries t)
       (dolist (server ellm-mcp-servers)
@@ -2539,6 +2599,9 @@ accepted."
 Set by `ellm-send' to the object returned by `ellm-backend-send'.
 Cleared on completion, error, or cancellation.")
 
+(defvar-local ellm--config-in-flight nil
+  "Config path currently being applied asynchronously, or nil.")
+
 (defvar-local ellm-request-finished-hook nil
   "Hook run when the current request fully finishes.
 This runs after success, cancellation, or failure, but not between internal
@@ -2584,26 +2647,37 @@ streaming backend insertions.  Nil REQUEST restores the previous
      :values ellm--capf-provider-candidates)
     ("model"       :ann "model"
      :desc "Chat model name."
-     :values ellm--capf-model-candidates)
+     :values ellm--capf-model-candidates
+     :type enum :editable t)
     ("system"      :ann "string"
-     :desc "System prompt (used when no `system' turn present).")
+     :desc "System prompt (used when no `system' turn present)."
+     :type string :editable t)
     ("temperature" :ann "number"
-     :desc "Sampling temperature (number).")
+     :desc "Sampling temperature (number)."
+     :type number :editable t)
     ("max-tokens"  :ann "integer"
-     :desc "Max output tokens (integer).")
+     :desc "Max output tokens (integer)."
+     :type integer :editable t)
     ("reasoning"   :ann "level"
      :desc "Reasoning level: light, medium, maximum, none."
+     :type enum :editable t
      :values (("light" :desc "Prefer a small reasoning budget.")
               ("medium" :desc "Prefer a moderate reasoning budget.")
               ("maximum" :desc "Prefer the largest reasoning budget.")
               ("none" :desc "Disable reasoning when supported.")))
     ("tools"       :ann "list"
      :desc "Tools enabled for this buffer; names from `ellm-tools-list' or `@CATEGORY'."
+     :type list :editable t
      :items ellm--capf-tool-candidates)
     ("mcp"         :ann "list|true"
      :desc "MCP servers enabled for this buffer; true means all, names come from `ellm-mcp-servers', and `@CATEGORY' expands categories."
-     :values (("true" :desc "Enable every MCP server in `ellm-mcp-servers'."))
+     :type mcp :editable t
+     :values (("true" :value t
+               :desc "Enable every MCP server in `ellm-mcp-servers'."))
      :items ellm--capf-mcp-candidates)
+    ("cwd"         :ann "directory"
+     :desc "Working directory used by backends and local tools when supported."
+     :type directory :editable t)
     ("subagents"   :ann "map"
      :desc "Subagent defaults and named profiles. Buffer-local `subagents:' overrides `ellm-subagents'."
      :children (("default" :ann "profile|map"
@@ -2620,8 +2694,9 @@ streaming backend insertions.  Nil REQUEST restores the previous
      :desc "ACP related configurations."
      :children (("session-id" :ann "string"
                  :desc "ACP session id used to continue an existing session.")
-                ("additional-directories" :ann "list"
-                 :desc "Additional ACP workspace roots sent on session lifecycle requests.")
+                 ("additional-directories" :ann "list"
+                  :desc "Additional ACP workspace roots sent on session lifecycle requests."
+                  :type directories :editable t)
                 ("config" :ann "map"
                  :desc "ACP session config options advertised by the active agent."
                  :children ellm--capf-acp-config-entries))))
@@ -2637,9 +2712,13 @@ SPEC is a plist with:
   :items   Array item candidates, resolved the same way as `:values'.
            Used for block lists (`- ITEM') and inline arrays (`[ITEM]').
   :children Nested key entries with the same shape as this top-level alist.
+  :type     Value reader used by `ellm-set-config'.
+  :editable Whether `ellm-set-config' may offer this entry.
 
 Candidate lists may contain plain strings or entries of the form
-  `(STRING :ann ANN :desc DESC)'.  ANN and DESC are optional.
+  `(STRING :ann ANN :desc DESC :value VALUE)'.  ANN, DESC, and VALUE are
+optional.  VALUE is the typed value used by `ellm-set-config'; STRING is used
+when VALUE is absent.
 Keys without `:values', `:items', or `:children' get only key-side completion.
 `:children' may be a list or a function returning a list.")
 
@@ -2728,12 +2807,14 @@ distinct `category' slot of `ellm-tool' entries."
   "Return `provider:' from frontmatter using a cheap line scan.
 This is used only for completion while the YAML body may be temporarily
 invalid, such as when completing a new key before typing `:'."
-  (pcase-let ((`(_ _ ,contents-beg ,contents-end _) (ellm--frontmatter-bounds)))
-    (save-excursion
-      (goto-char contents-beg)
-      (when (re-search-forward
-             "^[ \t]*provider:[ \t]*\\([^#\n]+\\)" contents-end t)
-        (string-trim (match-string-no-properties 1) "[ \t\"']+" "[ \t\"']+")))))
+  (when-let* ((bounds (ellm--frontmatter-bounds)))
+    (pcase-let ((`(_ _ ,contents-beg ,contents-end _) bounds))
+      (save-excursion
+        (goto-char contents-beg)
+        (when (re-search-forward
+               "^[ \t]*provider:[ \t]*\\([^#\n]+\\)" contents-end t)
+          (string-trim (match-string-no-properties 1)
+                       "[ \t\"']+" "[ \t\"']+"))))))
 
 (defun ellm--capf-current-provider ()
   "Return the current frontmatter provider for completion, or nil."
@@ -3606,6 +3687,7 @@ results are handled.
 
 Errors during streaming are signalled normally."
   (interactive)
+  (ellm--ensure-no-config-in-flight)
   (when ellm--active-request
     (user-error "ellm: a request is already in flight; M-x ellm-cancel"))
   (ellm--ensure-trailing-user-turn)
@@ -3648,6 +3730,265 @@ If QUIET is non-nil, then do not print any messages."
     (unless quiet
       (message "ellm: request cancelled"))))
 
+;;;; Configuration
+
+(defun ellm--ensure-no-config-in-flight ()
+  "Signal when a live configuration change is still being applied."
+  (when ellm--config-in-flight
+    (user-error "ellm: configuration is still being applied")))
+
+(defun ellm--config-path-string (path)
+  "Return dotted display text for frontmatter PATH."
+  (mapconcat (lambda (key) (if (symbolp key) (symbol-name key) key))
+             path "."))
+
+(defun ellm--config-effect-label (effect)
+  "Return a concise display label for config EFFECT."
+  (pcase effect
+    ('live "applies now")
+    ('next-send "next send")
+    ('new-session "new session")
+    (_ "unsupported")))
+
+(defun ellm--config-entry-children (spec)
+  "Return resolved child entries from frontmatter SPEC."
+  (let ((children (plist-get spec :children)))
+    (if (functionp children) (funcall children) children)))
+
+(defun ellm--config-settings (provider buffer &optional removal)
+  "Return editable settings supported by PROVIDER in BUFFER.
+When REMOVAL is non-nil, return only settings currently present in frontmatter."
+  (with-current-buffer buffer
+    (let ((frontmatter (ellm--parse-frontmatter)))
+      (cl-labels
+        ((walk (entries prefix)
+           (let (result)
+             (dolist (entry entries result)
+               (let* ((key (car entry))
+                      (spec (cdr entry))
+                      (path (append prefix (list (intern key))))
+                      (children (ellm--config-entry-children spec)))
+                 (if children
+                     (setq result (append result (walk children path)))
+                   (let* ((cell (and removal
+                                     (ellm--alist-get-nested-cell
+                                      frontmatter path)))
+                          (effect
+                           (or (ellm-provider-config-effect
+                                provider path buffer)
+                               (and cell 'next-send))))
+                     (when (and (plist-get spec :editable)
+                                effect
+                                (or (not removal) cell))
+                       (setq result
+                             (append result
+                                     (list (list :path path :spec spec
+                                                 :effect effect))))))))))))
+        (walk (ellm--frontmatter-capf--key-entries nil) nil)))))
+
+(defun ellm--config-current (provider setting frontmatter)
+  "Return (PRESENT . VALUE) for SETTING with PROVIDER and FRONTMATTER."
+  (let* ((path (plist-get setting :path))
+         (spec (plist-get setting :spec))
+         (type (plist-get spec :type))
+         (cell (ellm--alist-get-nested-cell frontmatter path)))
+    (cond
+     ((and cell
+           (or (cdr cell) (memq type '(boolean list directories mcp))))
+      (cons t (cdr cell)))
+     ((plist-member spec :current) (cons t (plist-get spec :current)))
+     ((plist-member spec :default)
+      (let ((value (plist-get spec :default)))
+        (cons t (if (functionp value) (funcall value) value))))
+     ((equal path '(model))
+      (and-let* ((model (ellm-provider-current-model provider)))
+        (cons t model))))))
+
+(defun ellm--config-value-label (type value)
+  "Return a minibuffer display label for VALUE of TYPE."
+  (pcase type
+    ('boolean (if (ellm--false-value-p value)
+                  "false"
+                "true"))
+    ('mcp
+     (cond
+      ((eq value t) "true")
+      ((ellm--false-value-p value) "false")
+      (t
+       (mapconcat (lambda (item) (format "%s" item))
+                  (cond ((vectorp value) (append value nil))
+                        ((listp value) value)
+                        (value (list value)))
+                  ", "))))
+    ((or 'list 'directories)
+     (mapconcat (lambda (item) (format "%s" item))
+                (cond ((vectorp value) (append value nil))
+                      ((listp value) value)
+                      (value (list value)))
+                ", "))
+    (_ (format "%s" value))))
+
+(defun ellm--config-choice-label (provider setting frontmatter)
+  "Return selection label for SETTING using PROVIDER and FRONTMATTER."
+  (let* ((current (ellm--config-current provider setting frontmatter))
+         (type (plist-get (plist-get setting :spec) :type)))
+    (format "%s%s  [%s]"
+            (ellm--config-path-string (plist-get setting :path))
+            (if current
+                (format " (current: %s)"
+                        (ellm--config-value-label type (cdr current)))
+              "")
+            (ellm--config-effect-label (plist-get setting :effect)))))
+
+(defun ellm--config-resolve-candidates (spec property)
+  "Return completion candidates from SPEC's PROPERTY."
+  (when-let* ((candidate-spec (plist-get spec property)))
+    (car (ellm--capf-resolve-values candidate-spec))))
+
+(defun ellm--config-candidate-value (selected candidates)
+  "Return typed value represented by SELECTED in CANDIDATES."
+  (let ((entry (cl-find selected candidates
+                        :key #'ellm--frontmatter-capf--candidate-name
+                        :test #'equal)))
+    (if (and (consp entry) (plist-member (cdr entry) :value))
+        (plist-get (cdr entry) :value)
+      selected)))
+
+(defun ellm--config-read-multiple (prompt candidates default require-match)
+  "Read multiple CANDIDATES with PROMPT and DEFAULT."
+  (let* ((names (mapcar #'ellm--frontmatter-capf--candidate-name candidates))
+         (selected (completing-read-multiple
+                    prompt names nil require-match nil nil default)))
+    (mapcar (lambda (value)
+              (ellm--config-candidate-value value candidates))
+            selected)))
+
+(defun ellm--config-read-value (provider setting frontmatter)
+  "Interactively read a typed value for SETTING."
+  (let* ((path (plist-get setting :path))
+         (spec (plist-get setting :spec))
+         (type (or (plist-get spec :type) 'string))
+         (current (ellm--config-current provider setting frontmatter))
+         (default (and current (ellm--config-value-label type (cdr current))))
+         (prompt (format "%s%s: "
+                         (ellm--config-path-string path)
+                         (if default (format " (current: %s)" default) "")))
+         (values (ellm--config-resolve-candidates spec :values))
+         (items (ellm--config-resolve-candidates spec :items)))
+    (pcase type
+      ('boolean
+       (if (equal (completing-read prompt '("true" "false") nil t
+                                   nil nil default)
+                  "true")
+           t
+         :false))
+      ('enum
+       (let* ((candidates values)
+              (selected (completing-read
+                         prompt
+                         (mapcar #'ellm--frontmatter-capf--candidate-name
+                                 candidates)
+                         nil (and candidates t) nil nil default)))
+         (ellm--config-candidate-value selected candidates)))
+      ('number (read-number prompt (and current (cdr current))))
+      ('integer (truncate (read-number prompt (and current (cdr current)))))
+      ('directory (read-directory-name prompt nil default nil))
+      ('directories
+       (ellm--config-read-multiple prompt nil default nil))
+      ('list
+       (ellm--config-read-multiple prompt items default (and items t)))
+      ('mcp
+       (let ((selected (ellm--config-read-multiple
+                        prompt (append values items) default nil)))
+         (cond
+          ((equal selected '(t)) t)
+          ((memq t selected)
+           (user-error "ellm: `mcp: true' cannot be combined with server names"))
+          (t selected))))
+      (_ (read-string prompt nil nil default)))))
+
+(defun ellm--config-error-message (error-object)
+  "Return readable text for config ERROR-OBJECT."
+  (or (and (listp error-object) (plist-get error-object :message))
+      (condition-case nil
+          (error-message-string error-object)
+        (error (format "%s" error-object)))))
+
+(defun ellm--config-finish-message (path status)
+  "Report that PATH was persisted with application STATUS."
+  (message
+   (pcase status
+     ('live "ellm: %s applied and saved")
+     ('new-session "ellm: %s saved; start a new session to apply it")
+     (_ "ellm: %s saved; it will apply on the next send"))
+   (ellm--config-path-string path)))
+
+(defun ellm-set-config (&optional remove)
+  "Interactively edit a supported setting in the current ellm buffer.
+The setting is persisted in frontmatter.  Live backend settings are applied
+before persistence; other settings apply on the next send or a new session.
+With prefix argument REMOVE, remove the selected frontmatter setting instead."
+  (interactive "P")
+  (unless (derived-mode-p 'ellm-mode)
+    (user-error "ellm: this command requires an ellm buffer"))
+  (when ellm--active-request
+    (user-error "ellm: cannot change configuration while a request is active"))
+  (ellm--ensure-no-config-in-flight)
+  (let* ((buffer (current-buffer))
+         (frontmatter (ellm--parse-frontmatter)))
+    (when ellm--frontmatter-cache-error
+      (user-error "ellm: cannot edit malformed frontmatter"))
+    (let ((provider (ellm--resolve-provider frontmatter)))
+      (when (and (not remove)
+                 (ellm-provider-config-metadata-session-start-p provider buffer)
+                 (y-or-n-p "Start provider session to load configuration options? "))
+        (ellm-provider-prepare-config-metadata provider frontmatter buffer)
+        (setq frontmatter (ellm--parse-frontmatter)
+              provider (ellm--resolve-provider frontmatter)))
+      (let* ((settings (ellm--config-settings provider buffer remove))
+           (choices
+            (mapcar (lambda (setting)
+                      (cons (ellm--config-choice-label
+                             provider setting frontmatter)
+                            setting))
+                    settings)))
+      (unless choices
+        (user-error "ellm: provider exposes no editable settings"))
+      (let* ((selected (completing-read "Setting: " choices nil t))
+             (setting (cdr (assoc selected choices)))
+             (path (plist-get setting :path))
+             (effect (plist-get setting :effect)))
+        (if remove
+            (progn
+              (ellm--delete-frontmatter-value path)
+              (message (if (eq effect 'live)
+                           "ellm: %s removed; the existing live session is unchanged"
+                         "ellm: %s removed")
+                       (ellm--config-path-string path)))
+          (let ((value (ellm--config-read-value
+                        provider setting frontmatter)))
+            (when (eq effect 'live)
+              (setq ellm--config-in-flight path))
+            (condition-case err
+                (ellm-provider-apply-config
+                 provider path value frontmatter buffer
+                 (lambda (status)
+                   (when (buffer-live-p buffer)
+                     (with-current-buffer buffer
+                       (setq ellm--config-in-flight nil)
+                       (ellm--set-frontmatter-value path value)
+                       (ellm--config-finish-message path (or status effect)))))
+                 (lambda (error-object)
+                   (when (buffer-live-p buffer)
+                     (with-current-buffer buffer
+                       (setq ellm--config-in-flight nil)))
+                   (message "ellm: failed to set %s: %s"
+                            (ellm--config-path-string path)
+                            (ellm--config-error-message error-object))))
+              (error
+               (setq ellm--config-in-flight nil)
+               (signal (car err) (cdr err)))))))))))
+
 (defun ellm--command-frontmatter ()
   "Return frontmatter for the current command context, if available."
   (if (derived-mode-p 'ellm-mode)
@@ -3668,6 +4009,7 @@ If QUIET is non-nil, then do not print any messages."
 (defun ellm-load-session ()
   "Select a backend session with completion and open it in a new buffer."
   (interactive)
+  (ellm--ensure-no-config-in-flight)
   (let* ((fm (ellm--command-frontmatter))
          (provider (ellm--command-provider fm)))
     (ellm-provider-load-session provider fm)))
@@ -3675,6 +4017,7 @@ If QUIET is non-nil, then do not print any messages."
 (defun ellm-start-session ()
   "Start/login the backend session without sending a prompt."
   (interactive)
+  (ellm--ensure-no-config-in-flight)
   (when ellm--active-request
     (user-error "ellm: a request is already in flight; M-x ellm-cancel"))
   (let* ((fm (ellm--command-frontmatter))
@@ -3687,6 +4030,7 @@ If QUIET is non-nil, then do not print any messages."
 When PROMPT-TO-CLEAR is non-nil, ask whether to clear the conversation while
 keeping frontmatter and an empty user prompt."
   (interactive (list t))
+  (ellm--ensure-no-config-in-flight)
   (let* ((fm (ellm--command-frontmatter))
          (provider (ellm--command-provider fm)))
     (ellm-provider-close-session provider fm (current-buffer))
@@ -3698,17 +4042,19 @@ keeping frontmatter and an empty user prompt."
 
 (defun ellm--close-session-on-kill ()
   "Best-effort session cleanup for `kill-buffer-hook'."
-  (condition-case err
-      (ellm-close-session)
-    (user-error nil)
-    (error
-     (message "ellm: session cleanup failed: %s" (error-message-string err)))))
+  (let ((ellm--config-in-flight nil))
+    (condition-case err
+        (ellm-close-session)
+      (user-error nil)
+      (error
+       (message "ellm: session cleanup failed: %s" (error-message-string err))))))
 
 (defun ellm-delete-session (&optional select)
   "Delete an ACP/backend session from session history.
 With prefix argument SELECT, choose a session from the backend when supported.
 Without SELECT, delete the current buffer's session when it has one."
   (interactive "P")
+  (ellm--ensure-no-config-in-flight)
   (let* ((fm (ellm--command-frontmatter))
          (provider (ellm--command-provider fm)))
     (ellm-provider-delete-session provider fm (current-buffer) select)))
@@ -3782,6 +4128,45 @@ map.  Entries use the same shape as `ellm--frontmatter-keys'.")
 (cl-defmethod ellm-provider-frontmatter-entries (_provider _path _buffer)
   "Default dynamic frontmatter entries for providers without extensions."
   nil)
+
+(cl-defgeneric ellm-provider-config-effect (provider path buffer)
+  "Return config application timing for PROVIDER's PATH in BUFFER.
+The result is one of `live', `next-send', `new-session', or nil when PATH is
+not supported by PROVIDER.")
+
+(cl-defmethod ellm-provider-config-effect (_provider _path _buffer)
+  "Default config support for unknown providers."
+  nil)
+
+(cl-defgeneric ellm-provider-config-metadata-session-start-p (provider buffer)
+  "Return non-nil when PROVIDER needs a session for config metadata in BUFFER.")
+
+(cl-defmethod ellm-provider-config-metadata-session-start-p (_provider _buffer)
+  "Default config metadata session predicate."
+  nil)
+
+(cl-defgeneric ellm-provider-prepare-config-metadata (provider frontmatter buffer)
+  "Prepare PROVIDER's dynamic config metadata for BUFFER synchronously.
+FRONTMATTER is BUFFER's parsed frontmatter before preparation.")
+
+(cl-defmethod ellm-provider-prepare-config-metadata
+  (_provider _frontmatter _buffer)
+  "Default preparation for providers with static config metadata."
+  nil)
+
+(cl-defgeneric ellm-provider-apply-config
+    (provider path value frontmatter buffer on-ready on-error)
+  "Apply VALUE at config PATH for PROVIDER in BUFFER.
+FRONTMATTER is the pre-change parsed frontmatter.  Call ON-READY with one of
+`live', `next-send', or `new-session' after successful application, or call
+ON-ERROR with an error object on failure.")
+
+(cl-defmethod ellm-provider-apply-config
+  (provider path _value _frontmatter buffer on-ready _on-error)
+  "Report PROVIDER's declared config effect for PATH through ON-READY."
+  (funcall on-ready
+           (or (ellm-provider-config-effect provider path buffer)
+               'next-send)))
 
 (cl-defgeneric ellm-provider-start-session (provider frontmatter buffer)
   "Start PROVIDER's session for BUFFER without sending a prompt.
