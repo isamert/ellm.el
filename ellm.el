@@ -2119,9 +2119,10 @@ stored without their leading colon, e.g. `:id call_1' becomes
 (defun ellm-update-session-title (title &optional buffer)
   "Update BUFFER's name from backend-provided session TITLE.
 BUFFER defaults to the current buffer.  Do nothing when
-`ellm-buffer-name-function' is nil or returns nil."
+TITLE is missing, or `ellm-buffer-name-function' is nil or returns nil."
   (let ((buffer (or buffer (current-buffer))))
-    (when (and ellm-buffer-name-function (buffer-live-p buffer))
+    (when (and (stringp title) (not (string-empty-p title))
+               ellm-buffer-name-function (buffer-live-p buffer))
       (with-current-buffer buffer
         (when-let* ((name (funcall ellm-buffer-name-function title)))
           (rename-buffer name t))))))

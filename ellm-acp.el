@@ -1500,7 +1500,10 @@ When SELECT is non-nil, choose a session from `session/list'."
          (title (plist-get session :title))
          (cwd (or (plist-get session :cwd)
                   (ellm-acp--provider-cwd provider frontmatter)))
-         (buf (generate-new-buffer ellm-initial-buffer-name))
+         (buf (generate-new-buffer
+               (if (functionp ellm-initial-buffer-name)
+                   (funcall ellm-initial-buffer-name)
+                 ellm-initial-buffer-name)))
          connection)
     (with-current-buffer buf
       (insert (format "---\nprovider: %s\nmodel: %s\ncwd: %s\nacp:\n  session-id: %s\n---\n\n"
