@@ -80,6 +80,29 @@ omitted."
                  (natnum :tag "Maximum characters"))
   :group 'ellm-acp)
 
+(autoload 'ellm-acp-extensions-handle-notification "ellm-acp-extensions")
+(autoload 'ellm-acp-extensions-handle-session-update "ellm-acp-extensions")
+
+(defcustom ellm-acp-extension-notification-functions
+  '(ellm-acp-extensions-handle-notification)
+  "Functions that handle non-standard ACP notifications.
+Each function receives CONNECTION, METHOD, and PARAMS.  The first non-nil
+return value marks the notification handled and stops extension dispatch.
+Errors are logged and do not prevent other handlers from running."
+  :type 'hook
+  :group 'ellm-acp)
+
+(defcustom ellm-acp-extension-session-update-functions
+  '(ellm-acp-extensions-handle-session-update)
+  "Functions that observe or handle ACP session updates.
+Each function receives CONNECTION, UPDATE, and PHASE.  PHASE is either
+`pre-render' or `post-render'.  Returning `:handled' during `pre-render'
+suppresses standard rendering.  Post-render handlers run after standard
+dispatch completes.  Errors are logged and do not prevent other handlers
+from running."
+  :type 'hook
+  :group 'ellm-acp)
+
 (cl-defstruct (ellm-acp-provider (:constructor ellm-make-acp-provider))
   "Provider configuration for an ACP agent process.
 COMMAND is the executable used to start the ACP agent.  ARGS is a list of
@@ -133,6 +156,9 @@ an optional list of model candidates used for frontmatter completion."
    (rendered-tools
     :initform (make-hash-table :test 'equal)
     :accessor ellm-acp--connection-rendered-tools)
+   (extension-state
+    :initform (make-hash-table :test 'equal)
+    :accessor ellm-acp--connection-extension-state)
    (log-buffer
     :initform nil
     :accessor ellm-acp--connection-log-buffer))
@@ -152,6 +178,85 @@ an optional list of model candidates used for frontmatter completion."
 
 (defvar ellm-acp--inhibit-frontmatter-persist nil
   "When non-nil, do not persist ACP session metadata into frontmatter.")
+
+;;;; Extensions
+
+(defun ellm-acp-call-with-buffer (connection function)
+  "Call FUNCTION in CONNECTION's live ellm buffer and return its result."
+  (when-let* ((buffer (ellm-acp--connection-buffer connection)))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (funcall function)))))
+
+(defun ellm-acp-tool-call-title (connection tool-call-id)
+  "Return CONNECTION's stable rendered title for TOOL-CALL-ID."
+  (when-let* ((state (gethash tool-call-id
+                              (ellm-acp--connection-rendered-tools connection))))
+    (ellm-acp-rendered-tool-call-title state)))
+
+(defun ellm-acp--extension-state-table (connection namespace &optional create)
+  "Return CONNECTION's state table for NAMESPACE.
+Create and store the table when CREATE is non-nil."
+  (or (gethash namespace (ellm-acp--connection-extension-state connection))
+      (when create
+        (let ((table (make-hash-table :test 'equal)))
+          (puthash namespace table
+                   (ellm-acp--connection-extension-state connection))
+          table))))
+
+(defun ellm-acp-extension-state-get (connection namespace key &optional default)
+  "Return CONNECTION extension value under NAMESPACE and KEY.
+Return DEFAULT when the namespace or key is absent."
+  (if-let* ((table (ellm-acp--extension-state-table connection namespace)))
+      (gethash key table default)
+    default))
+
+(defun ellm-acp-extension-state-put (connection namespace key value)
+  "Store VALUE under CONNECTION extension NAMESPACE and KEY."
+  (puthash key value (ellm-acp--extension-state-table connection namespace t)))
+
+(defun ellm-acp-extension-state-remove (connection namespace key)
+  "Remove CONNECTION extension value under NAMESPACE and KEY."
+  (when-let* ((table (ellm-acp--extension-state-table connection namespace)))
+    (remhash key table)
+    (when (zerop (hash-table-count table))
+      (remhash namespace (ellm-acp--connection-extension-state connection)))))
+
+(defun ellm-acp-extension-state-map (connection namespace function)
+  "Call FUNCTION with each KEY and VALUE in CONNECTION's NAMESPACE."
+  (when-let* ((table (ellm-acp--extension-state-table connection namespace)))
+    (maphash function table)))
+
+(defun ellm-acp-extension-state-clear (connection &optional namespace)
+  "Clear extension state on CONNECTION.
+When NAMESPACE is non-nil, clear only that namespace."
+  (if namespace
+      (remhash namespace (ellm-acp--connection-extension-state connection))
+    (clrhash (ellm-acp--connection-extension-state connection))))
+
+(defun ellm-acp--run-extension-notification (connection method params)
+  "Run extension notification handlers until METHOD and PARAMS are handled."
+  (catch 'handled
+    (dolist (function ellm-acp-extension-notification-functions)
+      (condition-case err
+          (when (funcall function connection method params)
+            (throw 'handled t))
+        (error
+         (message "ellm ACP extension notification error: %s"
+                  (error-message-string err)))))
+    nil))
+
+(defun ellm-acp--run-extension-session-update (connection update phase)
+  "Run extension handlers for CONNECTION UPDATE during PHASE."
+  (let ((handled nil))
+    (dolist (function ellm-acp-extension-session-update-functions)
+      (condition-case err
+          (when (eq (funcall function connection update phase) :handled)
+            (setq handled t))
+        (error
+         (message "ellm ACP extension session update error: %s"
+                  (error-message-string err)))))
+    (and handled :handled)))
 
 ;;;; Interface implementation
 
@@ -529,7 +634,8 @@ Call ON-READY with its effect on success, or ON-ERROR on failure."
   (pcase method
     ('session/update
      (ellm-acp--handle-session-update connection params))
-    (_ nil)))
+    (_
+     (ellm-acp--run-extension-notification connection method params))))
 
 (defun ellm-acp--request-sync (connection method params)
   "Send METHOD with PARAMS over CONNECTION and synchronously return result."
@@ -1464,6 +1570,7 @@ do not show a success message.  Return the ready ACP connection."
         (user-error "ellm ACP: agent does not support session/close"))
       (ellm-acp--request-sync connection :session/close `(:sessionId ,session-id))
       (setf (ellm-acp--connection-session-id connection) nil)
+      (ellm-acp-extension-state-clear connection)
       (ellm--set-frontmatter-value '(acp session-id) nil)
       (and-let* ((proc (ellm-acp--connection-process connection))
                   ((process-live-p proc)))
@@ -1491,6 +1598,7 @@ When SELECT is non-nil, choose a session from `session/list'."
       (ellm-acp--request-sync connection :session/delete `(:sessionId ,session-id))
       (when (equal session-id (ellm-acp--current-session-id connection frontmatter))
         (setf (ellm-acp--connection-session-id connection) nil)
+        (ellm-acp-extension-state-clear connection)
         (ellm--set-frontmatter-value '(acp session-id) nil))
       (message "ellm ACP: deleted session %s" session-id))))
 
@@ -1544,40 +1652,45 @@ When SELECT is non-nil, choose a session from `session/list'."
       (with-current-buffer buffer
         (ellm--preserve-user-position
           (let ((update (plist-get params :update)))
-            (pcase (plist-get update :sessionUpdate)
-              ("user_message_chunk"
-               (ellm-acp--insert-content connection "user"
-                                         (plist-get update :content)
-                                         (plist-get update :messageId)))
-              ("agent_message_chunk"
-               (ellm-acp--insert-content connection "assistant"
-                                         (plist-get update :content)
-                                         (plist-get update :messageId)))
-              ("agent_thought_chunk"
-               (ellm-acp--insert-content connection "reasoning"
-                                         (plist-get update :content)
-                                         (plist-get update :messageId)))
-              ("tool_call"
-               (setf (ellm-acp--connection-last-message-key connection) nil)
-               (ellm-acp--insert-tool-call update connection))
-              ("tool_call_update"
-               (setf (ellm-acp--connection-last-message-key connection) nil)
-               (ellm-acp--insert-tool-update update connection))
-              ("plan"
-               (setf (ellm-acp--connection-last-message-key connection) nil)
-               (ellm-acp--insert-plan update))
-              ("available_commands_update"
-               (setf (ellm-acp--connection-available-commands connection)
-                     (plist-get update :availableCommands)))
-              ("session_info_update"
-               (ellm-acp--handle-session-info-update connection update))
-              ("config_option_update"
-               (ellm-acp--update-model-candidates
-                connection (plist-get update :configOptions)))
-              ("usage_update"
-               (setf (ellm-acp--connection-last-message-key connection) nil)
-               (ellm-acp--update-usage update))
-              (_ nil))))))))
+            (unless (eq (ellm-acp--run-extension-session-update
+                         connection update 'pre-render)
+                        :handled)
+              (pcase (plist-get update :sessionUpdate)
+                ("user_message_chunk"
+                 (ellm-acp--insert-content connection "user"
+                                           (plist-get update :content)
+                                           (plist-get update :messageId)))
+                ("agent_message_chunk"
+                 (ellm-acp--insert-content connection "assistant"
+                                           (plist-get update :content)
+                                           (plist-get update :messageId)))
+                ("agent_thought_chunk"
+                 (ellm-acp--insert-content connection "reasoning"
+                                           (plist-get update :content)
+                                           (plist-get update :messageId)))
+                ("tool_call"
+                 (setf (ellm-acp--connection-last-message-key connection) nil)
+                 (ellm-acp--insert-tool-call update connection))
+                ("tool_call_update"
+                 (setf (ellm-acp--connection-last-message-key connection) nil)
+                 (ellm-acp--insert-tool-update update connection))
+                ("plan"
+                 (setf (ellm-acp--connection-last-message-key connection) nil)
+                 (ellm-acp--insert-plan update))
+                ("available_commands_update"
+                 (setf (ellm-acp--connection-available-commands connection)
+                       (plist-get update :availableCommands)))
+                ("session_info_update"
+                 (ellm-acp--handle-session-info-update connection update))
+                ("config_option_update"
+                 (ellm-acp--update-model-candidates
+                  connection (plist-get update :configOptions)))
+                ("usage_update"
+                 (setf (ellm-acp--connection-last-message-key connection) nil)
+                 (ellm-acp--update-usage update))
+                (_ nil)))
+            (ellm-acp--run-extension-session-update
+             connection update 'post-render)))))))
 
 (defun ellm-acp--handle-session-info-update (connection update)
   "Handle ACP session metadata UPDATE for CONNECTION."

@@ -3298,6 +3298,7 @@ pairs, e.g. `:ts 2025-01-01T00:00:00 :id call_1'."
     (delete-region (point-min) (point-max))
     (when frontmatter
       (insert frontmatter "\n\n"))
+    (ellm-update-todos nil)
     (ellm--insert-turn "user")))
 
 (defun ellm--format-tool-param-value (value)
@@ -4232,12 +4233,116 @@ Implementations should stream into the assistant turn already appended by
 ;;;;; State
 
 (cl-defstruct (ellm-buffer-state (:constructor ellm--make-buffer-state))
-  "Buffer stats."
+  "Buffer state used by `ellm-mode' displays."
+  todos
   context-size context-usage
   cost-amount cost-currency)
 
 (defvar-local ellm-buffer-state (ellm--make-buffer-state)
-  "Buffer stats.")
+  "State used by the current ellm buffer's displays.")
+
+;;;;; Todos
+
+(defconst ellm--todo-statuses
+  '("pending" "in_progress" "completed" "cancelled")
+  "Todo statuses understood by `ellm-update-todos'.")
+
+(defconst ellm--todo-priorities '("high" "medium" "low")
+  "Todo priorities understood by `ellm-update-todos'.")
+
+(defun ellm--todo-field (todo field)
+  "Return FIELD from TODO represented as a plist, alist, or hash table."
+  (let ((keyword (intern (concat ":" (symbol-name field))))
+        (string-name (symbol-name field)))
+    (cond
+     ((hash-table-p todo)
+      (or (gethash field todo)
+          (gethash keyword todo)
+          (gethash string-name todo)))
+     ((and (listp todo) (keywordp (car todo)))
+      (plist-get todo keyword))
+     ((listp todo)
+      (or (alist-get field todo)
+          (alist-get keyword todo)
+          (alist-get string-name todo nil nil #'equal))))))
+
+(defun ellm--todo-string (value)
+  "Return VALUE as a string suitable for a normalized todo field."
+  (cond
+   ((stringp value) value)
+   ((null value) nil)
+   ((symbolp value) (symbol-name value))
+   (t (format "%s" value))))
+
+(defun ellm--normalize-todo (todo index)
+  "Normalize TODO at INDEX into a plist."
+  (let* ((id (ellm--todo-string (ellm--todo-field todo 'id)))
+         (content (ellm--todo-string (ellm--todo-field todo 'content)))
+         (status (ellm--todo-string (ellm--todo-field todo 'status)))
+         (priority (or (ellm--todo-string
+                        (ellm--todo-field todo 'priority))
+                       "medium")))
+    (when (or (not content)
+              (string-match-p "\\`[[:space:]]*\\'" content))
+      (error "ellm: todo item %d has no content" index))
+    (unless (member status ellm--todo-statuses)
+      (error "ellm: todo item %d has invalid status: %S" index status))
+    (unless (member priority ellm--todo-priorities)
+      (error "ellm: todo item %d has invalid priority: %S" index priority))
+    (append (when id (list :id id))
+            (list :content content :status status :priority priority))))
+
+(defun ellm--normalize-todos (todos)
+  "Return TODOS as a list of normalized todo plists."
+  (let ((items (cond
+                ((vectorp todos) (append todos nil))
+                ((listp todos) todos)
+                (t (error "ellm: todos must be an array")))))
+    (cl-loop for todo in items
+             for index from 1
+             collect (ellm--normalize-todo todo index))))
+
+(defun ellm--merge-todos (current updates)
+  "Merge normalized UPDATES by id into normalized CURRENT todos.
+Existing positions are preserved and todos with new or missing ids are
+appended in update order."
+  (let ((updates-by-id (make-hash-table :test #'equal))
+        (current-ids (make-hash-table :test #'equal)))
+    (dolist (todo updates)
+      (when-let* ((id (plist-get todo :id)))
+        (puthash id todo updates-by-id)))
+    (dolist (todo current)
+      (when-let* ((id (plist-get todo :id)))
+        (puthash id t current-ids)))
+    (append
+     (mapcar (lambda (todo)
+               (or (and-let* ((id (plist-get todo :id)))
+                     (gethash id updates-by-id))
+                   todo))
+             current)
+     (cl-loop for todo in updates
+              for id = (plist-get todo :id)
+              unless (and id (gethash id current-ids))
+              collect todo))))
+
+(defun ellm-update-todos (todos &optional merge)
+  "Update the current ellm buffer's TODOS and refresh its header line.
+TODOS may be a vector or list of plists, alists, or hash tables.  Each item
+requires `content' and one of the statuses in `ellm--todo-statuses'; `id' is
+optional and `priority' defaults to `medium'.
+
+By default TODOS replaces the current list.  When MERGE is non-nil, items
+with ids replace matching items in place and new items are appended.  Return
+the resulting normalized list."
+  (let* ((normalized (ellm--normalize-todos todos))
+         (updated (if merge
+                      (ellm--merge-todos
+                       (ellm-buffer-state-todos ellm-buffer-state)
+                       normalized)
+                    normalized)))
+    (setf (ellm-buffer-state-todos ellm-buffer-state) updated)
+    (force-mode-line-update)
+    updated))
 
 ;;;;; Header line
 
@@ -4293,25 +4398,60 @@ Implementations should stream into the assistant turn already appended by
         (format "%s%.2f" symbol amount)
       (string-join (delq nil (list (format "%.2f" amount)
                                    (and currency (format "%s" currency))))
-                   " "))))
+                    " "))))
+
+(defun ellm--format-todo-progress (todos)
+  "Return compact header-line progress and current task for TODOS."
+  (when todos
+    (let* ((current (or (cl-find "in_progress" todos
+                                 :key (lambda (todo) (plist-get todo :status))
+                                 :test #'equal)
+                        (cl-find "pending" todos
+                                 :key (lambda (todo) (plist-get todo :status))
+                                 :test #'equal)
+                        (car (last
+                              (cl-remove-if-not
+                               (lambda (todo)
+                                 (equal (plist-get todo :status) "completed"))
+                               todos)))
+                        (car todos)))
+           (completed (cl-count "completed" todos
+                                :key (lambda (todo) (plist-get todo :status))
+                                :test #'equal)))
+      (format "[%d/%d] %s" completed (length todos)
+              (replace-regexp-in-string
+               "%" "%%"
+               (replace-regexp-in-string
+                "[\n\r\t]+" " " (plist-get current :content))
+               t t)))))
+
+(defun ellm--header-line-right-status (text)
+  "Return header-line TEXT aligned against the right edge."
+  (concat
+   (propertize " " 'display
+               (if (and (fboundp 'string-pixel-width)
+                        (display-graphic-p))
+                   `(space :align-to (- right (,(string-pixel-width text))))
+                 `(space :align-to (- right ,(+ 1 (string-width text))))))
+   text))
 
 (defun ellm--header-line-status ()
   "Return `ellm-mode' header-line status text."
-  (let* ((usage (ellm--format-context-usage
-                 (ellm-buffer-state-context-usage ellm-buffer-state)
-                 (ellm-buffer-state-context-size ellm-buffer-state)))
+  (let* ((todos (ellm--format-todo-progress
+                 (ellm-buffer-state-todos ellm-buffer-state)))
+         (usage (ellm--format-context-usage
+                  (ellm-buffer-state-context-usage ellm-buffer-state)
+                  (ellm-buffer-state-context-size ellm-buffer-state)))
          (cost (ellm--format-cost
                 (ellm-buffer-state-cost-amount ellm-buffer-state)
                 (ellm-buffer-state-cost-currency ellm-buffer-state)))
          (rhs (string-join (delq nil (list usage cost)) " ")))
-    (when (and rhs (not (string-empty-p rhs)))
-      (concat
-       (propertize " " 'display
-                   (if (and (fboundp 'string-pixel-width)
-                            (display-graphic-p))
-                       `(space :align-to (- right (,(string-pixel-width rhs))))
-                     `(space :align-to (- right ,(+ 1 (string-width rhs))))))
-       rhs))))
+    (cond
+     ((and todos (not (string-empty-p rhs)))
+      (concat todos (ellm--header-line-right-status rhs)))
+     (todos todos)
+     ((not (string-empty-p rhs))
+      (ellm--header-line-right-status rhs)))))
 
 ;;;;; Major mode
 

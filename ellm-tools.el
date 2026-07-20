@@ -129,10 +129,6 @@ the pre-transform result; RESULT is the value returned to the model."
   :type 'hook
   :group 'ellm-tools)
 
-(defvar-local ellm-tools-todo-list nil
-  "Buffer-local todo list managed by the `todowrite' tool.
-Each item is a plist with `:content', `:status' and `:priority'.")
-
 (defcustom ellm-subagent-buffer-name-format "*ellm subagent:%s*"
   "Format string used for generated subagent buffer names.
 It receives one `%s' argument: the subagent display name or id."
@@ -609,10 +605,9 @@ Each issue is returned as line-range:type:message."
   ((todos :array "The complete todo list. Each item must have `content' and `status' (`pending', `in_progress', `completed', or `cancelled'); `priority' may be `high', `medium', or `low'."))
   "Replace the current buffer's todo list with TODOS.
 This is a classic LLM todo tracker: always pass the full current list, not
-just incremental changes.  The normalized list is stored in the
-buffer-local variable `ellm-tools-todo-list'."
-  (setq ellm-tools-todo-list (ellm-tools--normalize-todos todos))
-  (ellm-tools--format-todos ellm-tools-todo-list))
+just incremental changes.  The normalized list is stored in
+`ellm-buffer-state' for backend-neutral display."
+  (ellm-tools--format-todos (ellm-update-todos todos)))
 
 ;;;;; Agents
 
@@ -856,58 +851,6 @@ when non-nil, is treated as success if STDOUT is empty."
          (format "\n</%s>" kind)))))))
 
 ;;;;;; TodoTool
-
-(defun ellm-tools--todo-field (item field)
-  "Return FIELD from todo ITEM.
-FIELD is a symbol such as `content'."
-  (let ((keyword (intern (concat ":" (symbol-name field))))
-        (string-name (symbol-name field)))
-    (cond
-     ((hash-table-p item)
-      (or (gethash field item)
-          (gethash keyword item)
-          (gethash string-name item)))
-     ((and (listp item) (keywordp (car item)))
-      (plist-get item keyword))
-     ((listp item)
-      (or (alist-get field item)
-          (alist-get keyword item)
-          (alist-get string-name item nil nil #'equal))))))
-
-(defun ellm-tools--todo-string (value)
-  "Return VALUE as a todo string field."
-  (cond
-   ((stringp value) value)
-   ((null value) nil)
-   ((symbolp value) (symbol-name value))
-   (t (format "%s" value))))
-
-(defun ellm-tools--normalize-todo (item index)
-  "Normalize todo ITEM at INDEX into a plist."
-  (let* ((content (ellm-tools--todo-string
-                   (ellm-tools--todo-field item 'content)))
-         (status (ellm-tools--todo-string
-                  (ellm-tools--todo-field item 'status)))
-         (priority (or (ellm-tools--todo-string
-                        (ellm-tools--todo-field item 'priority))
-                       "medium")))
-    (when (or (not content) (s-blank? content))
-      (ellm-tools--error "todo item %d has no content" index))
-    (unless (member status '("pending" "in_progress" "completed" "cancelled"))
-      (ellm-tools--error "todo item %d has invalid status: %S" index status))
-    (unless (member priority '("high" "medium" "low"))
-      (ellm-tools--error "todo item %d has invalid priority: %S" index priority))
-    (list :content content :status status :priority priority)))
-
-(defun ellm-tools--normalize-todos (todos)
-  "Normalize TODOS into a list of todo plists."
-  (let ((items (cond
-                ((vectorp todos) (append todos nil))
-                ((listp todos) todos)
-                (t (ellm-tools--error "todos must be an array")))))
-    (cl-loop for item in items
-             for index from 1
-             collect (ellm-tools--normalize-todo item index))))
 
 (defun ellm-tools--todo-count (todos status)
   "Return number of TODOS with STATUS."
