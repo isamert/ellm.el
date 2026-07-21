@@ -46,6 +46,7 @@
 (require 'color)
 (require 'json)
 (require 'outline)
+(require 'xdg)
 (require 'yaml)
 
 ;;;; Customization
@@ -150,6 +151,14 @@ return a directory name; nil means not to persist that buffer."
 (defcustom ellm-persistence-project-directory ".ellm"
   "Directory below a project root used for project-local sessions."
   :type 'string
+  :group 'ellm)
+
+(defcustom ellm-cache-directory
+  (file-name-as-directory (expand-file-name "ellm" (xdg-cache-home)))
+  "Directory for durable ellm state not owned by a persisted session.
+Opaque reasoning state is stored here when conversation persistence is
+disabled or the current buffer is ephemeral."
+  :type 'directory
   :group 'ellm)
 
 (defun ellm-current-project-root ()
@@ -2281,6 +2290,117 @@ KEY may be a symbol/string or a list naming a nested path."
 
 ;;;;; Persistence
 
+(defconst ellm--reasoning-state-id-regexp
+  "\\`rs-[[:xdigit:]]\\{64\\}\\'"
+  "Regexp matching a content-addressed reasoning state identifier.")
+
+(defun ellm--reasoning-state-root (&optional global)
+  "Return the reasoning state root for the current buffer.
+When GLOBAL is non-nil, or no persisted session directory exists, return the
+global cache root."
+  (file-name-as-directory
+   (if (and ellm--session-directory (not global))
+       (expand-file-name ".state" ellm--session-directory)
+     (expand-file-name ellm-cache-directory))))
+
+(defun ellm--reasoning-state-directory (&optional global)
+  "Return the reasoning state directory for the current buffer.
+GLOBAL has the same meaning as in `ellm--reasoning-state-root'."
+  (expand-file-name "reasoning/" (ellm--reasoning-state-root global)))
+
+(defun ellm--reasoning-state-path (id &optional global)
+  "Return the state file path for reasoning state ID.
+GLOBAL has the same meaning as in `ellm--reasoning-state-root'."
+  (and (stringp id)
+       (string-match-p ellm--reasoning-state-id-regexp id)
+       (expand-file-name (concat id ".json")
+                         (ellm--reasoning-state-directory global))))
+
+(defun ellm--reasoning-state-json (state)
+  "Return canonical JSON text for reasoning STATE."
+  (json-serialize state :null-object nil :false-object :json-false))
+
+(defun ellm--reasoning-state-id (json)
+  "Return the content-addressed identifier for reasoning state JSON."
+  (concat "rs-" (secure-hash 'sha256 json)))
+
+(defun ellm--ensure-reasoning-state-directory (&optional global)
+  "Create and return the private reasoning state directory.
+GLOBAL has the same meaning as in `ellm--reasoning-state-root'."
+  (let ((root (ellm--reasoning-state-root global))
+        (directory (ellm--reasoning-state-directory global)))
+    (make-directory directory t)
+    (set-file-modes root #o700)
+    (set-file-modes directory #o700)
+    directory))
+
+(defun ellm--write-reasoning-state-file (id json &optional global)
+  "Atomically write reasoning state JSON for ID and return ID.
+GLOBAL has the same meaning as in `ellm--reasoning-state-root'."
+  (let* ((directory (ellm--ensure-reasoning-state-directory global))
+         (target (expand-file-name (concat id ".json") directory)))
+    (unless (file-exists-p target)
+      (let ((temporary (make-temp-file
+                        (expand-file-name ".reasoning-" directory))))
+        (unwind-protect
+            (progn
+              (let ((coding-system-for-write 'utf-8-unix))
+                (write-region json nil temporary nil 'silent))
+              (set-file-modes temporary #o600)
+              (rename-file temporary target t)
+              (set-file-modes target #o600))
+          (when (file-exists-p temporary)
+            (delete-file temporary)))))
+    id))
+
+(defun ellm-reasoning-state-write (state)
+  "Persist opaque reasoning STATE and return its content-addressed ID.
+Persisted conversations store state in their session directory.  Other
+buffers use `ellm-cache-directory'."
+  (let* ((json (ellm--reasoning-state-json state))
+         (id (ellm--reasoning-state-id json)))
+    (ellm--write-reasoning-state-file id json (not ellm--session-directory))))
+
+(defun ellm--read-reasoning-state-file (id file)
+  "Read and validate reasoning state ID from FILE, returning a plist."
+  (when (and file (file-readable-p file))
+    (condition-case nil
+        (let ((json (with-temp-buffer
+                      (let ((coding-system-for-read 'utf-8-unix))
+                        (insert-file-contents file))
+                      (buffer-string))))
+          (when (equal id (ellm--reasoning-state-id json))
+            (let ((state (json-parse-string
+                          json :object-type 'plist
+                          :null-object nil :false-object :json-false)))
+              (and (equal (plist-get state :version) 1) state))))
+      (error nil))))
+
+(defun ellm-reasoning-state-read (id)
+  "Return validated reasoning state referenced by ID, or nil.
+The current session store is preferred over the global cache."
+  (when (and (stringp id)
+             (string-match-p ellm--reasoning-state-id-regexp id))
+    (or (and ellm--session-directory
+             (ellm--read-reasoning-state-file
+              id (ellm--reasoning-state-path id)))
+        (ellm--read-reasoning-state-file
+         id (ellm--reasoning-state-path id t)))))
+
+(defun ellm--localize-reasoning-state-files ()
+  "Copy globally cached reasoning state referenced by this session locally."
+  (when ellm--session-directory
+    (dolist (turn (ellm--parse-turns))
+      (when-let* ((id (alist-get "reasoning-state" (ellm-turn-attrs turn)
+                                 nil nil #'equal))
+                  ((string-match-p ellm--reasoning-state-id-regexp id))
+                  (target (ellm--reasoning-state-path id))
+                  ((not (file-exists-p target)))
+                  (source (ellm--reasoning-state-path id t))
+                  (state (ellm--read-reasoning-state-file id source)))
+        (ellm--write-reasoning-state-file
+         id (ellm--reasoning-state-json state))))))
+
 (defun ellm--persistence-root ()
   "Return the automatic persistence root for the current buffer."
   (let ((root
@@ -2379,6 +2499,7 @@ KEY may be a symbol/string or a list naming a nested path."
     (condition-case err
         (progn
           (ellm--persistence-setup-buffer)
+          (ellm--localize-reasoning-state-files)
           (when buffer-file-name
             (let ((ellm--persistence-saving-p t)
                   (save-silently t)
@@ -2642,6 +2763,13 @@ streaming backend insertions.  Nil REQUEST restores the previous
     (setq ellm--request-finished-notified-p t)
     (run-hooks 'ellm-request-finished-hook)))
 
+(defconst ellm--default-reasoning-candidates
+  '(("light" :desc "Prefer a small reasoning budget.")
+    ("medium" :desc "Prefer a moderate reasoning budget.")
+    ("maximum" :desc "Prefer the largest reasoning budget.")
+    ("none" :desc "Disable reasoning when supported."))
+  "Fallback reasoning candidates for providers without model metadata.")
+
 (defconst ellm--frontmatter-keys
   '(("provider"    :ann "provider"
      :desc "Provider name from `ellm-provider-alist'."
@@ -2660,12 +2788,9 @@ streaming backend insertions.  Nil REQUEST restores the previous
      :desc "Max output tokens (integer)."
      :type integer :editable t)
     ("reasoning"   :ann "level"
-     :desc "Reasoning level: light, medium, maximum, none."
+     :desc "Provider-supported reasoning effort."
      :type enum :editable t
-     :values (("light" :desc "Prefer a small reasoning budget.")
-              ("medium" :desc "Prefer a moderate reasoning budget.")
-              ("maximum" :desc "Prefer the largest reasoning budget.")
-              ("none" :desc "Disable reasoning when supported.")))
+     :values ellm--capf-reasoning-candidates)
     ("tools"       :ann "list"
      :desc "Tools enabled for this buffer; names from `ellm-tools-list' or `@CATEGORY'."
      :type list :editable t
@@ -2793,6 +2918,16 @@ MODELS is a list of model name strings.  SOURCE is one of:
               provider (current-buffer))
              'provider))
       (t (cons nil nil)))))
+
+(defun ellm--capf-reasoning-candidates ()
+  "Return reasoning candidates for the current provider and model."
+  (let* ((frontmatter (ignore-errors (ellm--parse-frontmatter t)))
+         (provider (ellm--capf-current-provider))
+         (model (and frontmatter (alist-get 'model frontmatter))))
+    (or (and provider
+             (ellm-provider-reasoning-candidates
+              provider (and model (format "%s" model)) (current-buffer)))
+        ellm--default-reasoning-candidates)))
 
 (defun ellm--capf-tool-candidates ()
   "Return list of completion strings for `tools:' frontmatter.
@@ -4077,6 +4212,13 @@ Without SELECT, delete the current buffer's session when it has one."
   "Default model candidates for unknown PROVIDER types."
   nil)
 
+(cl-defgeneric ellm-provider-reasoning-candidates (provider model buffer)
+  "Return reasoning effort candidates for PROVIDER's MODEL in BUFFER.")
+
+(cl-defmethod ellm-provider-reasoning-candidates (_provider _model _buffer)
+  "Default reasoning candidates for providers without model metadata."
+  nil)
+
 (cl-defgeneric ellm-provider-buffer-model-candidates (provider buffer)
   "Return model completion candidates for PROVIDER in BUFFER.
 Backends with session-scoped model lists can use BUFFER to prefer live
@@ -4129,6 +4271,24 @@ map.  Entries use the same shape as `ellm--frontmatter-keys'.")
 
 (cl-defmethod ellm-provider-frontmatter-entries (_provider _path _buffer)
   "Default dynamic frontmatter entries for providers without extensions."
+  nil)
+
+(cl-defgeneric ellm-provider-reasoning-state (provider result)
+  "Return durable reasoning state extracted from provider RESULT, or nil.")
+
+(cl-defmethod ellm-provider-reasoning-state (_provider _result)
+  "Default reasoning state extractor for providers without opaque state."
+  nil)
+
+(cl-defgeneric ellm-provider-restore-reasoning
+    (provider prompt summary state)
+  "Restore a reasoning turn into PROMPT for PROVIDER.
+SUMMARY is the editable turn body and STATE is its validated sidecar plist, or
+nil when the state reference is unavailable.")
+
+(cl-defmethod ellm-provider-restore-reasoning
+    (_provider _prompt _summary _state)
+  "Ignore reasoning turns for providers without restoration support."
   nil)
 
 (cl-defgeneric ellm-provider-config-effect (provider path buffer)

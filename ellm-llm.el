@@ -217,6 +217,15 @@ turns across re-parses."
                 (setq rest (nthcdr (1+ consumed) rest))))
             (llm-provider-populate-tool-uses
              provider prompt (nreverse tool-uses))))
+          ((equal role "reasoning")
+           (ellm-provider-restore-reasoning
+            provider prompt
+            (ellm--unescape-turn-delimiters (ellm-turn-content turn))
+            (when-let* ((id (alist-get "reasoning-state"
+                                       (ellm-turn-attrs turn)
+                                       nil nil #'equal)))
+              (ellm-reasoning-state-read id)))
+           (setq rest (cdr rest)))
          ((equal role "tool-result")
           (let (results)
             (while (and rest (equal (ellm-turn-role (car rest)) "tool-result"))
@@ -234,6 +243,9 @@ turns across re-parses."
              prompt nil (nreverse results))))
          ((equal role "tool-param")
           (setq rest (cdr rest)))
+         ((and (equal role "assistant")
+               (string-empty-p (ellm-turn-content turn)))
+           (setq rest (cdr rest)))
          (t
           (setf (llm-chat-prompt-interactions prompt)
                 (append (llm-chat-prompt-interactions prompt)
@@ -292,9 +304,7 @@ When `ellm-fold-tool-calls' is non-nil each inserted turn is folded."
   "Build an `llm-chat-prompt' from the current buffer for PROVIDER.
 FRONTMATTER, when supplied, is the already parsed YAML frontmatter alist."
   (let* ((fm          frontmatter)
-         (turns       (cl-loop for turn in (ellm--parse-turns)
-                               unless (equal "reasoning" (ellm-turn-role turn))
-                               collect turn))
+         (turns       (ellm--parse-turns))
          (fm-system   (alist-get 'system fm))
          (has-system  (and turns
                            (equal (ellm-turn-role (car turns)) "system")))
@@ -314,7 +324,8 @@ FRONTMATTER, when supplied, is the already parsed YAML frontmatter alist."
     (ellm-llm--apply-turns-to-prompt provider turns prompt)
     prompt))
 
-(defun ellm-llm--render-streaming-response (buf request start end result)
+(defun ellm-llm--render-streaming-response
+    (buf request start end result &optional reasoning-state-id)
   (ellm-llm--ensure-buffer buf request)
   (with-current-buffer buf
     (ellm--preserve-user-position
@@ -326,9 +337,17 @@ FRONTMATTER, when supplied, is the already parsed YAML frontmatter alist."
                              (ellm--escape-turn-delimiters text-raw)))
              (new-text
               (concat
-               (when (and reasoning (not (string-empty-p reasoning)))
-                 (concat (ellm--get-turn "reasoning" :continuation t) "\n"
-                         (ellm--ensure-newline reasoning)))
+               (when (or reasoning-state-id
+                         (and reasoning (not (string-empty-p reasoning))))
+                 (concat (if reasoning-state-id
+                             (ellm--get-turn
+                              "reasoning" :continuation t
+                              :reasoning-state reasoning-state-id)
+                           (ellm--get-turn "reasoning" :continuation t))
+                         "\n"
+                         (if reasoning
+                             (ellm--ensure-newline reasoning)
+                           "")))
                (when (and text (not (string-empty-p text)))
                  (concat (ellm--get-turn "assistant" :continuation t) "\n"
                          (ellm--ensure-newline text))))))
@@ -366,11 +385,16 @@ is text-only, a fresh trailing `user' turn is appended."
   (with-current-buffer buf
     (let* ((start (copy-marker (point-max) nil))
            (end   (copy-marker (point-max) t))
+           reasoning-state-id
            request
            (partial-render
             (lambda (result)
+              (when-let* ((state
+                           (ellm-provider-reasoning-state provider result)))
+                (setq reasoning-state-id
+                      (ellm-reasoning-state-write state)))
               (ellm-llm--render-streaming-response
-               buf request start end result)))
+               buf request start end result reasoning-state-id)))
            (final-render
             (lambda (result)
               (ellm-llm--ensure-buffer buf request)

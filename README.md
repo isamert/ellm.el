@@ -11,8 +11,10 @@ level turn is `>>-|` (the choice of starting with `>` is deliberate,
 see *Rationale* below). By making *turns* a first-class citizen of the
 format, it becomes very intuitive to handle navigation, folding,
 narrowing, etc. It integrates with `outline-minor-mode`. There is no
-hidden state—everything is just text in a buffer, so it's quite easy
-to understand and manipulate.  There is no special UI for configuring,
+hidden conversation structure—everything is text in a buffer, so it's quite
+easy to understand and manipulate.  Providers may attach explicit references
+to private sidecar files for opaque data that cannot be represented as text,
+such as encrypted reasoning state.  There is no special UI for configuring,
 you simply edit the YAML frontmatter where completion-at-point is
 available and you can see your options in-buffer, interactively.  Your
 Emacs knowledge transfers cleanly.
@@ -150,6 +152,41 @@ Supported by the `llm.el` backend:
 | Streaming text and reasoning                                            | yes, when provider supports it                         |
 | ACP sessions, permissions, slash commands, plans                        | no                                                     |
 | `mcp:` servers                                                          | parsed by ellm, not used by this backend yet (planned) |
+
+### ChatGPT Codex
+
+`ellm-codex` uses OAuth to access Codex through a ChatGPT subscription; it
+does not require an OpenAI API key.  Configure it as a normal `llm.el`
+provider:
+
+```elisp
+(require 'ellm-codex)
+
+(setq ellm-provider-alist
+      `((codex . ,(ellm-make-codex-provider
+                   :chat-model "gpt-5.6-sol"))))
+```
+
+Run `M-x ellm-codex-login` once, then use `provider: codex` in frontmatter.
+Model completion and `M-x ellm-set-config` include the selectable Codex catalog
+and show only the reasoning efforts supported by the selected model.
+The command opens a browser and receives the OAuth callback on localhost port
+1455.  Browser login requires the `openssl` executable for PKCE randomness.
+Use `C-u M-x ellm-codex-login` for device-code login when OpenSSL or a localhost
+callback is unavailable.  `M-x ellm-codex-logout` removes the stored tokens.
+
+OAuth credentials are stored in `~/.config/ellm/codex-auth.json` by default;
+customize `ellm-codex-auth-file` to change that location.  The credential file
+is mode `0600` and its directory is mode `0700`.
+
+Codex responses contain encrypted reasoning data that must be replayed exactly
+on later requests.  The readable reasoning summary remains in the conversation
+buffer, whose delimiter includes a content-addressed reference such as
+`:reasoning-state rs-...`.  Persisted conversations keep the referenced JSON
+under their session's `.state/reasoning/` directory.  Ephemeral and otherwise
+unpersisted conversations use `~/.cache/ellm/reasoning/`.  These files are also
+private (`0600` files in `0700` directories).  If a referenced file is missing
+or incompatible, ellm falls back to the readable reasoning summary.
 
 ### ACP Backend
 
