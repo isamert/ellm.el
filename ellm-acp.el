@@ -166,7 +166,7 @@ an optional list of model candidates used for frontmatter completion."
 
 (cl-defstruct (ellm-acp-rendered-tool (:constructor ellm-acp--make-rendered-tool))
   "Marker state for one rendered ACP tool call/result pair."
-  id call-title result-title result-summary
+  id call-title header-params result-title result-summary
   call-beg params-beg params-end result-beg result-body-beg result-end)
 
 (cl-defstruct (ellm-acp-request (:constructor ellm-acp--make-request))
@@ -1785,10 +1785,16 @@ When CONNECTION is non-nil, remember marker ranges for incremental updates."
          (state (ellm-acp--tool-state connection id))
          (title (or (and state (ellm-acp-rendered-tool-call-title state))
                     (plist-get update :title)))
+         (header-params (ellm-acp--raw-input-params
+                         (plist-get update :rawInput)))
          (details (ellm-acp--tool-call-details update state))
          (call-beg nil))
     (apply #'ellm--insert-turn "tool-call"
-           (ellm-acp--tool-turn-attrs update :omit-status t :title title))
+           (ellm-acp--tool-turn-attrs
+            update :omit-status t
+            :title (ellm--tool-header-title
+                    (or title "ACP tool")
+                    header-params)))
     (setq call-beg (save-excursion
                      (forward-line -1)
                      (point-marker)))
@@ -1806,6 +1812,9 @@ When CONNECTION is non-nil, remember marker ranges for incremental updates."
         (unless (ellm-acp-rendered-tool-call-title state)
           (setf (ellm-acp-rendered-tool-call-title state)
                 (plist-get update :title)))
+        (when (plist-member update :rawInput)
+          (setf (ellm-acp-rendered-tool-header-params state)
+                header-params))
         (setf (ellm-acp-rendered-tool-call-beg state) call-beg)
         (setf (ellm-acp-rendered-tool-params-beg state) params-beg)
         (setf (ellm-acp-rendered-tool-params-end state) params-end)))
@@ -1824,9 +1833,23 @@ When CONNECTION is non-nil, remember marker ranges for incremental updates."
             (unless (member status '("pending" "in_progress"))
               (list :status status)))))
 
-(defun ellm-acp--tool-result-title (title)
-  "Return TITLE truncated to fit an ACP tool result heading."
-  (and title (truncate-string-to-width title 25 nil nil "...")))
+(defun ellm-acp--tool-result-title (title &optional params)
+  "Return an ACP tool result title built from TITLE and PARAMS."
+  (ellm--tool-header-title (or title "ACP tool") params))
+
+(defun ellm-acp--tool-result-header-title (update state)
+  "Return the stable, parameter-aware result title for UPDATE and STATE."
+  (let ((base-title (or (plist-get update :title)
+                        (and state (ellm-acp-rendered-tool-call-title state))
+                        "ACP tool")))
+    (if (plist-member update :rawInput)
+        (ellm-acp--tool-result-title
+         base-title
+         (ellm-acp--raw-input-params (plist-get update :rawInput)))
+      (or (and state (ellm-acp-rendered-tool-result-title state))
+          (ellm-acp--tool-result-title
+           base-title
+           (and state (ellm-acp-rendered-tool-header-params state)))))))
 
 (defun ellm-acp--raw-input-params (raw-input)
   "Return RAW-INPUT as an alist suitable for `tool-param' turns."
@@ -2042,6 +2065,9 @@ objects otherwise look like malformed plists to `json-serialize'."
   (when-let* ((id (plist-get update :toolCallId)))
     (let* ((state (ellm-acp--tool-state connection id))
            (details (ellm-acp--tool-call-details update state)))
+      (when (and state (plist-member update :rawInput))
+        (setf (ellm-acp-rendered-tool-header-params state)
+              (ellm-acp--raw-input-params (plist-get update :rawInput))))
       (cond
        ((not (ellm-acp--tool-details-enabled-p))
         (unless (ellm-acp--tool-call-state-valid-p state)
@@ -2063,8 +2089,9 @@ objects otherwise look like malformed plists to `json-serialize'."
   "Insert ACP tool result UPDATE and record marker state on CONNECTION."
   (let* ((id (plist-get update :toolCallId))
          (state (ellm-acp--tool-state connection id))
-         (title (or (and state (ellm-acp-rendered-tool-result-title state))
-                    (plist-get update :title)))
+         (title (or (plist-get update :title)
+                    (and state (ellm-acp-rendered-tool-call-title state))))
+         (header-title (ellm-acp--tool-result-header-title update state))
          (result-beg nil)
          (body-beg nil)
          (result-end nil))
@@ -2073,7 +2100,7 @@ objects otherwise look like malformed plists to `json-serialize'."
     (goto-char (point-max))
     (apply #'ellm--insert-turn "tool-result"
            (ellm-acp--tool-turn-attrs
-            update :title (ellm-acp--tool-result-title title)))
+            update :title header-title))
     (setq result-beg (save-excursion
                        (forward-line -1)
                        (point-marker)))
@@ -2089,9 +2116,7 @@ objects otherwise look like malformed plists to `json-serialize'."
     (setq result-end (point-marker))
     (set-marker-insertion-type result-end nil)
     (when (and connection id)
-      (unless (ellm-acp-rendered-tool-result-title state)
-        (setf (ellm-acp-rendered-tool-result-title state)
-              (plist-get update :title)))
+      (setf (ellm-acp-rendered-tool-result-title state) header-title)
       (setf (ellm-acp-rendered-tool-result-beg state) result-beg)
       (setf (ellm-acp-rendered-tool-result-body-beg state) body-beg)
       (setf (ellm-acp-rendered-tool-result-end state) result-end))
@@ -2099,22 +2124,21 @@ objects otherwise look like malformed plists to `json-serialize'."
 
 (defun ellm-acp--update-tool-result (state update)
   "Update STATE's rendered result header and body from UPDATE."
-  (let ((title (or (ellm-acp-rendered-tool-result-title state)
-                   (plist-get update :title)))
+  (let ((title (or (plist-get update :title)
+                   (ellm-acp-rendered-tool-call-title state)))
+        (header-title (ellm-acp--tool-result-header-title update state))
         (folded (ellm-acp--turn-folded-p
                  (ellm-acp-rendered-tool-result-beg state)))
         (had-content
          (ellm-acp--region-has-content-p
           (ellm-acp-rendered-tool-result-body-beg state)
           (ellm-acp-rendered-tool-result-end state))))
-    (unless (ellm-acp-rendered-tool-result-title state)
-      (setf (ellm-acp-rendered-tool-result-title state)
-            (plist-get update :title)))
+    (setf (ellm-acp-rendered-tool-result-title state) header-title)
     (ellm-acp--replace-turn-header
      (ellm-acp-rendered-tool-result-beg state)
      "tool-result"
      (ellm-acp--tool-turn-attrs
-      update :title (ellm-acp--tool-result-title title)))
+      update :title header-title))
     (when (ellm-acp--tool-details-enabled-p)
       (ellm-acp--replace-region-with
        (ellm-acp-rendered-tool-result-body-beg state)

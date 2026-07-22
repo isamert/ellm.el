@@ -227,6 +227,14 @@ them into conversation buffers."
   :type 'hook
   :group 'ellm)
 
+(defcustom ellm-tool-header-summary-width 80
+  "Maximum width of tool call and result titles.
+Single-line tool parameters are appended to tool titles before the complete
+title is truncated to this width.  Multiline parameter values are kept in
+their nested `tool-param' turns but omitted from the title."
+  :type 'natnum
+  :group 'ellm)
+
 (defcustom ellm-mcp-servers nil
   "Alist of MCP server configurations available to ellm buffers.
 
@@ -2732,6 +2740,12 @@ backend request legs such as recursive tool-call handling.")
 (defvar-local ellm--request-finished-notified-p nil
   "Non-nil when the current request has fired `ellm-request-finished-hook'.")
 
+(defvar-local ellm--request-start-time nil
+  "Time at which the current user turn was submitted, or nil.")
+
+(defvar-local ellm--request-assistant-marker nil
+  "Marker at the top-level assistant turn for the current request.")
+
 (defvar-local ellm--request-read-only-state nil
   "Saved `buffer-read-only' value before the current request locked the buffer.")
 
@@ -2756,9 +2770,43 @@ streaming backend insertions.  Nil REQUEST restores the previous
             ellm--request-read-only-state-saved-p nil)))
   request)
 
+(defun ellm--finalize-request-turn ()
+  "Add completion metadata to the current request's assistant turn.
+Return non-nil when a live top-level assistant header was updated."
+  (let ((marker ellm--request-assistant-marker)
+        (started-at ellm--request-start-time)
+        updated)
+    (unwind-protect
+        (when (and started-at
+                   (markerp marker)
+                   (eq (marker-buffer marker) (current-buffer)))
+          (let ((finished-at (ellm--now)))
+            (save-excursion
+              (goto-char marker)
+              (when (and (looking-at ellm-turn-regexp)
+                         (equal (match-string-no-properties 1)
+                                ellm-turn-header-1)
+                         (equal (match-string-no-properties 2) "assistant"))
+                (ellm--set-turn-header-attrs
+                 marker
+                 `(("ts" . ,(ellm--timestamp finished-at))
+                   ("took" . ,(ellm--format-elapsed-time
+                                (float-time
+                                 (time-subtract finished-at started-at))))))
+                (setq updated t)))))
+      (when (markerp marker)
+        (set-marker marker nil))
+      (setq ellm--request-assistant-marker nil
+            ellm--request-start-time nil))
+    updated))
+
 (defun ellm--notify-request-finished ()
-  "Run `ellm-request-finished-hook' once for the current request."
+  "Finalize request metadata and run `ellm-request-finished-hook' once."
   (unless ellm--request-finished-notified-p
+    (when (ellm--finalize-request-turn)
+      ;; Backends generally checkpoint immediately before notifying.  The
+      ;; completion timestamp is added here, so persist that final mutation.
+      (ellm--persistence-checkpoint))
     (ellm--flush-pending-fold)
     (setq ellm--request-finished-notified-p t)
     (run-hooks 'ellm-request-finished-hook)))
@@ -3295,7 +3343,7 @@ When SELECT-PROVIDER-MODEL is non-nil, prompt for the provider and model."
                       (or (ellm-provider-current-model provider)
                           "null")
                       (ellm--timestamp)))
-      (ellm--insert-turn "user" :ts (ellm--timestamp))
+      (ellm--insert-turn "user")
       (ellm-mode))
     (switch-to-buffer buf)
     (when select-provider-model
@@ -3353,9 +3401,26 @@ launched from it receive automatic files."
   (interactive)
   (ellm--new-buffer 'ephemeral))
 
-(defun ellm--timestamp ()
-  "Return current ISO 8601 timestamp."
-  (format-time-string "%Y-%m-%dT%H:%M:%S"))
+(defun ellm--now ()
+  "Return the current time.
+This small wrapper keeps request lifecycle timing deterministic in tests."
+  (current-time))
+
+(defun ellm--timestamp (&optional time)
+  "Return TIME as an ISO 8601 timestamp, defaulting to the current time."
+  (format-time-string "%Y-%m-%dT%H:%M:%S" time))
+
+(defun ellm--format-elapsed-time (seconds)
+  "Return elapsed SECONDS in a compact, single-token form."
+  (let* ((total (max 0 (round seconds)))
+         (hours (/ total 3600))
+         (minutes (/ (% total 3600) 60))
+         (secs (% total 60)))
+    (concat (and (> hours 0) (format "%dh" hours))
+            (and (> minutes 0) (format "%dm" minutes))
+            (if (or (> secs 0) (zerop total))
+                (format "%ds" secs)
+              ""))))
 
 (defun ellm--ensure-newline (s)
   (if (string-suffix-p "\n" s)
@@ -3424,6 +3489,34 @@ pairs, e.g. `:ts 2025-01-01T00:00:00 :id call_1'."
       (ellm--flush-pending-fold depth)
       (ellm--mark-pending-fold beg role depth))))
 
+(defun ellm--set-turn-header-attrs (position attrs)
+  "Set keyword ATTRS on the turn delimiter at POSITION.
+ATTRS is an alist of string keys and single-token string values.  Existing
+occurrences are replaced, while positional and pipe-delimited title text is
+preserved."
+  (save-excursion
+    (goto-char position)
+    (beginning-of-line)
+    (when (looking-at ellm-turn-regexp)
+      (let* ((beg (point))
+             (end (line-end-position))
+             (line (buffer-substring-no-properties beg end)))
+        (dolist (attr attrs)
+          (let ((key (car attr))
+                (value (cdr attr)))
+            (setq line
+                  (replace-regexp-in-string
+                   (format "[ \t]+:%s\\(?:[ \t]+[^ \t\n]+\\)?"
+                           (regexp-quote key))
+                   "" line t t))
+            (setq line (concat line " :" key " " value))))
+        (let ((inhibit-read-only t))
+          (delete-region beg end)
+          (insert line))
+        (when (fboundp 'font-lock-flush)
+          (font-lock-flush beg (line-end-position)))
+        t))))
+
 (defun ellm--clear-buffer-keeping-frontmatter ()
   "Clear the conversation, preserving frontmatter and adding an empty user turn."
   (let* ((bounds (ellm--frontmatter-bounds))
@@ -3443,11 +3536,40 @@ pairs, e.g. `:ts 2025-01-01T00:00:00 :id call_1'."
    ((stringp value) value)
    (t (json-serialize value :false-object :json-false :null-object nil))))
 
+(defun ellm--tool-header-title (name params)
+  "Return a concise tool title from NAME and PARAMS.
+PARAMS is an alist.  Single-line values are rendered as `KEY=VALUE'; multiline
+values are omitted because their nested turns remain available when unfolded."
+  (let ((parts (list (ellm--tool-header-fragment name))))
+    (dolist (param params)
+      (let ((value (ellm--format-tool-param-value (cdr param))))
+        (unless (string-match-p "[\n\r]" value)
+          (setq parts
+                (append parts
+                        (list (format "%s=%s"
+                                      (car param)
+                                      (ellm--tool-header-fragment value))))))))
+    (truncate-string-to-width
+     (string-join parts " ") ellm-tool-header-summary-width nil nil "...")))
+
+(defun ellm--tool-header-fragment (value)
+  "Return VALUE as safe single-line turn-header text.
+Whitespace is collapsed and colons at token boundaries are escaped so a
+display summary cannot be parsed as real turn metadata."
+  (let ((text (replace-regexp-in-string
+               "[ \t]+" " " (format "%s" value))))
+    (setq text (string-replace " :" " \\:" text))
+    (if (string-prefix-p ":" text)
+        (concat "\\" text)
+      text)))
+
 (defun ellm--insert-tool-call-with-params (name id params)
   "Insert a `tool-call' turn for NAME and ID with PARAMS.
 PARAMS is an alist of (PARAM-NAME . VALUE).  Each parameter is inserted
 as a nested `tool-param' turn so values remain visible and parseable."
-  (ellm--insert-turn "tool-call" :pipe-arg name :id id)
+  (ellm--insert-turn "tool-call"
+                     :pipe-arg (ellm--tool-header-title name params)
+                     :id id)
   (dolist (param params)
     (ellm--insert-turn "tool-param" :pipe-arg (format "%s" (car param)))
     (insert (ellm--ensure-newline
@@ -3828,13 +3950,26 @@ Errors during streaming are signalled normally."
   (when ellm--active-request
     (user-error "ellm: a request is already in flight; M-x ellm-cancel"))
   (ellm--ensure-trailing-user-turn)
-  (ellm--persistence-checkpoint)
   (setq ellm--request-finished-notified-p nil)
   (let* ((fm       (ellm--parse-frontmatter))
          (provider (ellm--resolve-provider fm))
          (buf      (current-buffer))
+         (started-at (ellm--now))
+         (user-turn (car (last (ellm--parse-turns))))
          request)
+    (ellm--set-turn-header-attrs
+     (ellm--turn-delimiter-beg user-turn)
+     `(("ts" . ,(ellm--timestamp started-at))))
+    (setq ellm--request-start-time started-at)
+    (ellm--persistence-checkpoint)
     (ellm--insert-turn "assistant")
+    (setq ellm--request-assistant-marker
+          (save-excursion
+            (goto-char (point-max))
+            (forward-line -1)
+            (let ((marker (point-marker)))
+              (set-marker-insertion-type marker nil)
+              marker)))
     (ellm--set-active-request ellm--request-starting)
     (condition-case err
         (progn

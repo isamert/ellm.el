@@ -1150,7 +1150,7 @@ FALLBACK-PROVIDER is used when FRONTMATTER has no `provider:' key."
           (insert "---\n" (ellm--ensure-newline (ellm--yaml-encode frontmatter))
                   "---\n\n")
           (ellm-mode)
-          (ellm--insert-turn "user" :ts (ellm--timestamp))
+          (ellm--insert-turn "user")
           (insert (ellm--ensure-newline prompt))
           (ellm-send)
           buf)
@@ -1486,7 +1486,7 @@ SUBAGENT may be a remembered id or a live buffer name."
             (delete-region (ellm-turn-beg last-turn)
                            (ellm-turn-end last-turn))
             (insert (ellm--ensure-newline text)))
-        (ellm--insert-turn "user" :ts (ellm--timestamp))
+        (ellm--insert-turn "user")
         (insert (ellm--ensure-newline text))))))
 
 (defun ellm-tools--send-ellm-buffer (buffer-name prompt)

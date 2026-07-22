@@ -268,9 +268,12 @@ output.  ARGS is an alist of (ARG-SYM . VALUE)."
     (ellm--insert-tool-call-with-params name id args)
     (ellm--flush-pending-fold)))
 
-(defun ellm-llm--insert-tool-result (id name result)
-  "Insert a `tool-result' turn for NAME pairing call ID with RESULT body."
-  (ellm--insert-turn "tool-result" :pipe-arg name :id id)
+(defun ellm-llm--insert-tool-result (id name result &optional args)
+  "Insert a `tool-result' turn for NAME pairing call ID with RESULT body.
+When ARGS is non-nil, include its single-line values in the folded heading."
+  (ellm--insert-turn "tool-result"
+                     :pipe-arg (ellm--tool-header-title name args)
+                     :id id)
   (insert (ellm--ensure-newline
            (ellm-tools--transform-tool-result name nil nil result)))
   (ellm--flush-pending-fold))
@@ -286,7 +289,7 @@ When `ellm-fold-tool-calls' is non-nil each inserted turn is folded."
              for tu in tool-uses
              for tr in tool-results
              do (ellm-llm--insert-tool-result
-                 id (plist-get tu :name) (cdr tr)))))
+                 id (plist-get tu :name) (cdr tr) (plist-get tu :args)))))
 
 ;;;;; Parsing & sending
 
