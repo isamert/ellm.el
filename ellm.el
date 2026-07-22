@@ -1065,63 +1065,62 @@ Only encoded prefixes produced by
 
 (defun ellm--make-markdown-matcher (regexp)
   "Return a font-lock matcher for Markdown REGEXP.
-Matches inside fenced code blocks and Markdown-disabled turn bodies are
-ignored.  When a match lands inside a Markdown-disabled turn body, point
-jumps to that body's end so large tool outputs are skipped in one step."
+Only complete matches contained in a Markdown prose region are accepted;
+turn delimiters, frontmatter, raw turn bodies, and fenced code are excluded.
+When a match lands inside a Markdown-disabled turn body, point jumps to that
+body's end so large tool outputs are skipped in one step."
   (lambda (limit)
     (let (found)
       (while (and (not found)
                   (re-search-forward regexp limit t))
         (let* ((mb (match-beginning 0))
+               (me (match-end 0))
                (md (match-data))
-               (idx (ellm--turn-body-cache-index-at mb))
-               (vec ellm--turn-body-cache-vector)
-               (entry (and idx (aref vec idx)))
-               (body-p (and entry (>= mb (aref entry 1))))
-               (container-beg
-                (cond
-                 (body-p (aref entry 1))
-                 ((or (= (length vec) 0)
-                      (< mb (aref (aref vec 0) 0)))
-                  (point-min))))
-               (body-end
-                (and body-p
-                     (if (< (1+ idx) (length vec))
-                         (aref (aref vec (1+ idx)) 0)
-                       (point-max)))))
+               (raw-bounds (ellm--markdown-disabled-bounds-at mb))
+               (prose-bounds (and (not raw-bounds)
+                                  (ellm--markdown-prose-bounds-at mb))))
           (cond
-           ((and body-p (aref entry 3))
-            (goto-char (min limit (max (point) body-end))))
-           ((ellm--in-code-block-p mb container-beg)
-            nil)
-           (t
+           (raw-bounds
+            (goto-char (min limit (max (point) (cdr raw-bounds)))))
+           ((and prose-bounds
+                 (<= me (cdr prose-bounds))
+                 (not (ellm--in-code-block-p mb (car prose-bounds)))
+                 ;; Reject matches which start outside code but cross one or
+                 ;; more fence lines before ending outside it again.
+                 (= (ellm--fence-index-before mb)
+                    (ellm--fence-index-before me)))
             (set-match-data md)
-            (setq found t)))))
+            (setq found t))
+           ;; A multiline matcher may have searched past the structural end
+           ;; of this prose region.  Resume at that boundary rather than after
+           ;; the rejected match so valid markup in later turns is not skipped.
+           ((and prose-bounds (< (cdr prose-bounds) me))
+            (goto-char (min limit (cdr prose-bounds)))))))
       found)))
 
 (defun ellm--make-code-fence-matcher (regexp)
   "Return a font-lock matcher for code-fence REGEXP.
-Matches in Markdown-disabled turn bodies are ignored."
+Matches outside Markdown prose regions are ignored."
   (lambda (limit)
     (let (found)
       (while (and (not found)
                   (re-search-forward regexp limit t))
-        (let ((md (match-data)))
-          (if-let* ((bounds
-                     (ellm--markdown-disabled-bounds-at (match-beginning 0))))
-              (goto-char (min limit (max (point) (cdr bounds))))
+        (let* ((mb (match-beginning 0))
+               (me (match-end 0))
+               (md (match-data))
+               (raw-bounds (ellm--markdown-disabled-bounds-at mb))
+               (prose-bounds (and (not raw-bounds)
+                                  (ellm--markdown-prose-bounds-at mb))))
+          (cond
+           (raw-bounds
+            (goto-char (min limit (max (point) (cdr raw-bounds)))))
+           ((and prose-bounds (<= me (cdr prose-bounds)))
             (set-match-data md)
-            (setq found t))))
+            (setq found t)))))
       found)))
 
 (defconst ellm-font-lock-keywords
-  `(;; Turn delimiters
-    (,ellm-turn-regexp
-     (0 (list 'ellm-turn-delimiter
-              (ellm--turn-heading-face (match-string 1)))
-        t)
-     (2 (ellm--role-face (match-string 2)) t))
-    ;; Frontmatter delimiter lines (`---' open and close) and YAML body
+  `(;; Frontmatter delimiter lines (`---' open and close) and YAML body
     ;; are handled by `ellm--fontify-code-blocks'.
     ;; Code block delimiters
     (,(ellm--make-code-fence-matcher ellm-code-block-header-regexp)
@@ -1129,9 +1128,11 @@ Matches in Markdown-disabled turn bodies are ignored."
     (,(ellm--make-code-fence-matcher ellm-code-block-end-regexp)
      (0 'ellm-code-block-delimiter t))
     ;; Bold **text**
-    (,(ellm--make-markdown-matcher "\\*\\*\\([^*]+\\)\\*\\*") (0 'ellm-bold t))
+    (,(ellm--make-markdown-matcher "\\*\\*\\([^*\n]+\\)\\*\\*") (0 'ellm-bold t))
     ;; Italic *text* (not bold)
-    (,(ellm--make-markdown-matcher "\\(?:^\\|[^*]\\)\\(\\*\\([^*]+\\)\\*\\)[^*]") (1 'ellm-italic t))
+    (,(ellm--make-markdown-matcher
+       "\\(?:^\\|[^*\n]\\)\\(\\*\\([^*\n]+\\)\\*\\)\\(?:$\\|[^*\n]\\)")
+     (1 'ellm-italic t))
     ;; Inline code `text`
     (,(ellm--make-markdown-matcher "`\\([^`\n]+\\)`") (0 'ellm-inline-code t))
     ;; Headings
@@ -1144,7 +1145,15 @@ Matches in Markdown-disabled turn bodies are ignored."
     ;; Blockquotes
     (,(ellm--make-markdown-matcher "^> .*$") (0 'ellm-blockquote t))
     ;; List markers
-    (,(ellm--make-markdown-matcher "^\\s-*\\([-*]\\|[0-9]+\\.\\) ") (1 'ellm-list-marker t)))
+    (,(ellm--make-markdown-matcher "^\\s-*\\([-*]\\|[0-9]+\\.\\) ") (1 'ellm-list-marker t))
+    ;; Turn delimiters are structural and deliberately run last.  This is a
+    ;; defensive precedence guarantee in addition to the prose-region checks
+    ;; above: content matchers must never replace a delimiter or role face.
+    (,ellm-turn-regexp
+     (0 (list 'ellm-turn-delimiter
+              (ellm--turn-heading-face (match-string 1)))
+        t)
+     (2 (ellm--role-face (match-string 2)) t)))
   "Font-lock keywords for `ellm-mode'.")
 
 ;;;;; Fence position cache
@@ -1160,7 +1169,7 @@ Matches in Markdown-disabled turn bodies are ignored."
 
 (defvar-local ellm--fence-positions nil
   "Sorted list of recognized ``` fence line positions.
-Fences in Markdown-disabled turn bodies are excluded.  Positions are line
+Only fences in Markdown prose regions are included.  Positions are line
 beginnings, sorted in ascending order.
 Maintained by `ellm--update-fences-after-change'.  A nil value means the
 cache is uninitialized; call `ellm--rebuild-fence-cache' to populate it.")
@@ -1177,21 +1186,11 @@ cache is uninitialized; call `ellm--rebuild-fence-cache' to populate it.")
   (save-excursion
     (save-match-data
       (goto-char (point-min))
-      (let* ((turns ellm--turn-body-cache-vector)
-             (turn-count (length turns))
-             (turn-index -1)
-             positions)
+      (let (positions)
         (while (re-search-forward ellm-code-block-fence-regexp nil t)
           (let ((pos (match-beginning 0)))
-            (while (and (< (1+ turn-index) turn-count)
-                        (<= (aref (aref turns (1+ turn-index)) 0) pos))
-              (cl-incf turn-index))
-            (let ((entry (and (>= turn-index 0)
-                              (aref turns turn-index))))
-              (unless (and entry
-                           (>= pos (aref entry 1))
-                           (aref entry 3))
-                (push (line-beginning-position) positions))))
+            (when (ellm--markdown-prose-bounds-at pos)
+              (push (line-beginning-position) positions)))
           (forward-line 1))
         (setq ellm--fence-positions (nreverse positions)
               ellm--fence-cache-valid t)
@@ -1207,6 +1206,9 @@ fontification all the way to `point-max'.")
   "Non-nil when a turn edit changed which fences are recognized.
 Consumed by `ellm--extend-after-change-region', which refontifies the buffer
 so stale code faces and fence parity cannot survive the structural edit.")
+
+(defvar-local ellm--frontmatter-structure-force-refresh nil
+  "Non-nil when a pending edit touched a frontmatter delimiter line.")
 
 (defvar-local ellm--pending-fold-turn nil
   "Pending foldable turn waiting for a stable following boundary.
@@ -1259,7 +1261,7 @@ to be refontified."
             (goto-char scan-beg)
             (while (re-search-forward ellm-code-block-fence-regexp
                                       (1+ scan-end) t)
-              (unless (ellm--markdown-disabled-at-p (match-beginning 0))
+              (when (ellm--markdown-prose-bounds-at (match-beginning 0))
                 (push (line-beginning-position) new-fences)
                 (cl-incf added))
               (forward-line 1))
@@ -1279,7 +1281,7 @@ to be refontified."
       (save-match-data
         (goto-char beg)
         (while (re-search-forward ellm-code-block-fence-regexp end t)
-          (unless (ellm--markdown-disabled-at-p (match-beginning 0))
+          (when (ellm--markdown-prose-bounds-at (match-beginning 0))
             (push (line-beginning-position) refreshed))
           (forward-line 1))))
     (setq refreshed (nreverse refreshed))
@@ -1400,6 +1402,32 @@ Each entry is a vector [DELIMITER-BEG BODY-BEG ROLE MARKDOWN-DISABLED].")
         (goto-char scan-beg)
         (re-search-forward ellm-turn-regexp scan-end t)))))
 
+(defun ellm--frontmatter-delimiter-in-region-p (beg end)
+  "Return non-nil if BEG..END touches a frontmatter delimiter line.
+Only the BOB opener and the closer of a currently valid frontmatter block
+count; an ordinary Markdown horizontal rule elsewhere is not structural."
+  (save-excursion
+    (save-match-data
+      (let* ((scan-beg (progn (goto-char beg) (line-beginning-position)))
+             (scan-end (progn
+                         (goto-char end)
+                         (min (1+ (line-end-position)) (point-max)))))
+        (goto-char scan-beg)
+        (when (re-search-forward "^---$" scan-end t)
+          (let ((candidate (match-beginning 0)))
+            (or (= candidate (point-min))
+                (when-let* ((frontmatter (ellm--frontmatter-bounds)))
+                  (goto-char (nth 1 frontmatter))
+                  (= candidate (line-beginning-position))))))))))
+
+(defun ellm--request-structural-refontification (beg end)
+  "Invalidate font-lock state in BEG..END after a structural edit.
+This runs after ellm's structural caches have been updated.  `font-lock-flush'
+removes stale faces and lets normal JIT fontification rebuild the region when
+it is next needed."
+  (when (fboundp 'font-lock-flush)
+    (font-lock-flush beg end)))
+
 (defun ellm--shift-turn-body-cache-after-change (beg end old-len)
   "Shift cached turn body positions after a non-structural change.
 BEG, END, and OLD-LEN are the values passed to `after-change-functions'."
@@ -1485,6 +1513,46 @@ turn delimiter is treated as one region."
                     (aref (aref vec 0) 0)
                   (point-max)))))))
 
+(defun ellm--markdown-prose-bounds-at (&optional pos)
+  "Return the Markdown prose region containing POS, or nil.
+Markdown-enabled turn bodies and ordinary text before the first turn are
+prose regions.  Turn delimiter lines, Markdown-disabled bodies, and YAML
+frontmatter are excluded.  The returned bounds are exact structural limits,
+so callers can also reject matches which begin in prose but end elsewhere."
+  (let* ((target (or pos (point)))
+         (idx (ellm--turn-body-cache-index-at target))
+         (vec ellm--turn-body-cache-vector)
+         (entry (and idx (aref vec idx))))
+    (cond
+     ;; A position at or after BODY-BEG belongs to this turn body.  Delimiter
+     ;; lines occupy the gap from DELIMITER-BEG to BODY-BEG and fall through.
+     ((and entry (>= target (aref entry 1)))
+      (unless (aref entry 3)
+        (cons (aref entry 1)
+              (if (< (1+ idx) (length vec))
+                  (aref (aref vec (1+ idx)) 0)
+                (point-max)))))
+     (entry nil)
+     ;; Before the first turn, preserve support for free Markdown prose while
+     ;; treating an initial YAML frontmatter block as its own raw region.
+     (t
+      (let* ((region-end (if (> (length vec) 0)
+                             (aref (aref vec 0) 0)
+                           (point-max)))
+             (frontmatter (ellm--frontmatter-bounds))
+             (frontmatter-end
+              (and frontmatter
+                   (save-excursion
+                     (goto-char (nth 1 frontmatter))
+                     (forward-line 1)
+                     (point)))))
+        (cond
+         ((and frontmatter-end (< target frontmatter-end)) nil)
+         ((and frontmatter-end (< target region-end))
+          (cons frontmatter-end region-end))
+         ((< target region-end)
+          (cons (point-min) region-end))))))))
+
 (defun ellm--markdown-disabled-bounds-at (&optional pos)
   "Return raw turn body bounds containing POS, or nil.
 The returned cons is (BODY-BEG . BODY-END).  Delimiter lines are never
@@ -1502,15 +1570,11 @@ for Markdown-disabled roles."
                 (aref (aref vec (1+ idx)) 0)
               (point-max))))))
 
-(defun ellm--markdown-disabled-at-p (&optional pos)
-  "Return non-nil if POS is in a turn body that disables Markdown prose."
-  (and (ellm--markdown-disabled-bounds-at pos) t))
-
 (defun ellm--markdown-excluded-at-p (&optional pos)
   "Return non-nil if Markdown prose syntax should be ignored at POS."
   (let ((target (or pos (point))))
-    (or (ellm--in-code-block-p target)
-        (ellm--markdown-disabled-at-p target))))
+    (or (not (ellm--markdown-prose-bounds-at target))
+        (ellm--in-code-block-p target))))
 
 ;;;;; Core
 
@@ -1586,6 +1650,8 @@ BEG and END bound the to-be-changed region.  Insertions (BEG == END)
 can't collapse any overlays, so they're ignored."
   (when (ellm--turn-delimiter-in-region-p beg end)
     (setq ellm--turn-body-cache-force-rebuild t))
+  (when (ellm--frontmatter-delimiter-in-region-p beg end)
+    (setq ellm--frontmatter-structure-force-refresh t))
   (when (and ellm-turn-rules
              (not ellm--pending-delimiter-deletion)
              (/= beg end))
@@ -1634,11 +1700,19 @@ Optional WINDOW determines the rule width."
 BEG END OLD-LEN are passed by `after-change'."
   (let ((turn-structure-changed
          (or ellm--turn-body-cache-force-rebuild
-             (ellm--turn-delimiter-in-region-p beg end))))
+             (ellm--turn-delimiter-in-region-p beg end)))
+        (frontmatter-structure-changed
+         (or ellm--frontmatter-structure-force-refresh
+             (ellm--frontmatter-delimiter-in-region-p beg end))))
     ;; Fence recognition depends on the current turn role, so update turn
     ;; boundaries before scanning changed lines for fences.
     (ellm--update-turn-body-cache-after-change beg end old-len)
     (ellm--update-fences-after-change beg end old-len)
+    (when turn-structure-changed
+      (pcase-let ((`(,refresh-beg . ,refresh-end)
+                   (ellm--turn-neighborhood-bounds beg end)))
+        (ellm--request-structural-refontification
+         refresh-beg refresh-end)))
     (when (and turn-structure-changed ellm--fence-cache-valid)
       ;; A delimiter edit can change fence recognition in its adjacent turn
       ;; bodies even when the fence lines themselves were untouched.  Rescan
@@ -1649,7 +1723,15 @@ BEG END OLD-LEN are passed by `after-change'."
                       (not (ellm--in-code-block-p beg))
                       (not (ellm--in-code-block-p
                             (max (point-min) (1- beg)))))
-          (setq ellm--fence-structure-changed t)))))
+          (setq ellm--fence-structure-changed t))))
+    (when frontmatter-structure-changed
+      ;; Frontmatter can contain literal ``` and Markdown-looking lines.  A
+      ;; delimiter edit may therefore reclassify every pre-turn fence/face,
+      ;; not merely the changed line.
+      (setq ellm--frontmatter-structure-force-refresh nil)
+      (when ellm--fence-cache-valid
+        (ellm--rebuild-fence-cache))
+      (ellm--request-structural-refontification (point-min) (point-max))))
   ;; If the deletion intersected a delimiter line, every rule overlay
   ;; that lived inside the deleted range has now collapsed to the
   ;; single post-change point.  Sweep just that point for orphans and
