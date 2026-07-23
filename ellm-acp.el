@@ -161,7 +161,10 @@ an optional list of model candidates used for frontmatter completion."
     :accessor ellm-acp--connection-extension-state)
    (log-buffer
     :initform nil
-    :accessor ellm-acp--connection-log-buffer))
+    :accessor ellm-acp--connection-log-buffer)
+   (current-request
+    :initform nil
+    :accessor ellm-acp--connection-current-request))
   "ACP JSON-RPC connection using newline-delimited stdio.")
 
 (cl-defstruct (ellm-acp-rendered-tool (:constructor ellm-acp--make-rendered-tool))
@@ -171,7 +174,7 @@ an optional list of model candidates used for frontmatter completion."
 
 (cl-defstruct (ellm-acp-request (:constructor ellm-acp--make-request))
   "Active request handle for the ACP backend."
-  connection cancelled)
+  connection buffer generation cancelled)
 
 (defvar-local ellm-acp--connection nil
   "ACP connection associated with the current ellm buffer.")
@@ -461,7 +464,11 @@ Call ON-READY with its effect on success, or ON-ERROR on failure."
   (with-current-buffer buffer
     (let* ((connection (ellm-acp--ensure-connection provider buffer))
            (prompt-text (ellm-acp--last-user-content))
-           (request (ellm-acp--make-request :connection connection)))
+           (request
+            (ellm-acp--make-request
+             :connection connection :buffer buffer
+             :generation ellm--request-generation)))
+      (setf (ellm-acp--connection-current-request connection) request)
       (ellm-acp--ensure-session
        connection provider frontmatter
        (lambda ()
@@ -485,8 +492,19 @@ Call ON-READY with its effect on success, or ON-ERROR on failure."
   (setf (ellm-acp-request-cancelled request) t)
   (let* ((connection (ellm-acp-request-connection request))
          (session-id (ellm-acp--connection-session-id connection)))
-    (when session-id
-      (jsonrpc-notify connection :session/cancel `(:sessionId ,session-id)))))
+    (when (jsonrpc-running-p connection)
+      (unwind-protect
+          (condition-case err
+              (when session-id
+                (jsonrpc-notify
+                 connection :session/cancel `(:sessionId ,session-id)))
+            (error
+             (message "ellm ACP: cancellation notification failed: %s"
+                      (error-message-string err))))
+        ;; ACP updates identify the session, not the individual prompt.
+        ;; Closing the local transport is the only way to guarantee that late
+        ;; updates cannot be mistaken for a subsequent prompt.
+        (jsonrpc-shutdown connection)))))
 
 ;;;; JSON-RPC newline transport
 
@@ -624,8 +642,15 @@ Call ON-READY with its effect on success, or ON-ERROR on failure."
                 (buffer (ellm-acp--connection-buffer connection)))
       (when (buffer-live-p buffer)
         (with-current-buffer buffer
-          (when ellm--active-request
+          (when-let* ((request
+                       (ellm-acp--connection-current-request connection))
+                      ((ellm-acp--request-live-p request)))
+            (setf (ellm-acp-request-cancelled request) t
+                  (ellm-acp--connection-current-request connection) nil)
+            (ellm--invalidate-current-request)
             (ellm--set-active-request nil)
+            (ellm--ensure-next-user-turn)
+            (ellm--persistence-checkpoint)
             (ellm--notify-request-finished)
             (message "ellm ACP: process exited: %s" (string-trim event))))))))
 
@@ -633,15 +658,60 @@ Call ON-READY with its effect on success, or ON-ERROR on failure."
   "Dispatch ACP notification METHOD with PARAMS for CONNECTION."
   (pcase method
     ('session/update
-     (ellm-acp--handle-session-update connection params))
+     (let ((request (ellm-acp--connection-current-request connection)))
+       (when (or (not request) (ellm-acp--request-live-p request))
+         (ellm-acp--handle-session-update connection params))))
     (_
      (ellm-acp--run-extension-notification connection method params))))
 
+(defun ellm-acp--request-live-p (request)
+  "Return non-nil when ACP REQUEST still owns its buffer lifecycle."
+  (and (not (ellm-acp-request-cancelled request))
+       (ellm--request-current-p
+        (ellm-acp-request-buffer request)
+        (ellm-acp-request-generation request))))
+
+(cl-defun ellm-acp--request
+    (connection method params &key success-fn error-fn)
+  "Send one asynchronous ACP request with a centralized timeout.
+Callbacks for a cancelled conversation request are discarded."
+  (let ((conversation-request
+         (ellm-acp--connection-current-request connection))
+        (done nil))
+    (cl-labels
+        ((live-p ()
+           (and (not done)
+                (or (not conversation-request)
+                    (ellm-acp--request-live-p conversation-request))))
+         (fail (error-object)
+           (when (live-p)
+             (setq done t)
+             (when error-fn
+               (funcall error-fn error-object))))
+         (timed-out ()
+           (fail
+            `(:code -32001
+              :message
+              ,(format "%s timed out after %s seconds"
+                       (ellm-acp--method-name method)
+                       ellm-request-timeout)))))
+      (jsonrpc-async-request
+       connection method params
+       :timeout ellm-request-timeout
+       :success-fn
+       (lambda (result)
+         (when (live-p)
+           (setq done t)
+           (when success-fn
+             (funcall success-fn result))))
+       :error-fn #'fail
+       :timeout-fn #'timed-out))))
+
 (defun ellm-acp--request-sync (connection method params)
-  "Send METHOD with PARAMS over CONNECTION and synchronously return result."
+  "Send METHOD with PARAMS and synchronously await the managed request."
   (let ((done nil)
         result error-object)
-    (jsonrpc-async-request
+    (ellm-acp--request
      connection method params
      :success-fn (lambda (value)
                    (setq result value
@@ -949,7 +1019,7 @@ SESSION-ID, when non-nil, is included for load/resume requests."
 
 (defun ellm-acp--initialize (connection on-result on-error)
   "Initialize ACP CONNECTION."
-  (jsonrpc-async-request
+  (ellm-acp--request
    connection :initialize
    `(:protocolVersion 1
      :clientCapabilities ,(ellm-acp--client-capabilities)
@@ -965,7 +1035,7 @@ SESSION-ID, when non-nil, is included for load/resume requests."
   (ellm-acp--with-lifecycle-params
    connection provider frontmatter nil nil on-error
    (lambda (params)
-     (jsonrpc-async-request
+     (ellm-acp--request
       connection :session/new params
       :success-fn
       (lambda (result)
@@ -1003,7 +1073,7 @@ SESSION-ID, when non-nil, is included for load/resume requests."
   (ellm-acp--with-lifecycle-params
    connection provider frontmatter session-id nil on-error
    (lambda (params)
-     (jsonrpc-async-request
+     (ellm-acp--request
       connection :session/resume params
       :success-fn (lambda (result)
                     (ellm-acp--update-model-candidates
@@ -1018,7 +1088,7 @@ SESSION-ID, when non-nil, is included for load/resume requests."
   (ellm-acp--with-lifecycle-params
    connection provider frontmatter session-id additional-directories on-error
    (lambda (params)
-     (jsonrpc-async-request
+     (ellm-acp--request
       connection :session/load params
       :success-fn (lambda (result)
                     (ellm-acp--update-model-candidates
@@ -1104,7 +1174,7 @@ called with the raw response before ON-READY."
                    :value ,wire-value)))
     (when (equal (plist-get option :type) "boolean")
       (setq params (append params '(:type "boolean"))))
-    (jsonrpc-async-request
+    (ellm-acp--request
      connection :session/set_config_option params
      :success-fn (lambda (result)
                     (when (plist-member result :configOptions)
@@ -1432,7 +1502,7 @@ called with the raw response before ON-READY."
   "Send TEXT as BUFFER's pending user prompt through CONNECTION."
   (let ((params `(:sessionId ,(ellm-acp--connection-session-id connection)
                   :prompt [(:type "text" :text ,(or text ""))])))
-    (jsonrpc-async-request
+    (ellm-acp--request
      connection :session/prompt params
      :success-fn (lambda (_result)
                    (ellm-acp--finish-prompt buffer))
@@ -2346,20 +2416,27 @@ If the matched turn has nested child turns, delete those children too."
         (goto-char (point-max))
         (unless (equal (ellm-acp--last-turn-role) "user")
           (ellm--insert-turn "user"))
+        (when ellm-acp--connection
+          (setf (ellm-acp--connection-current-request ellm-acp--connection)
+                nil))
         (ellm--set-active-request nil)
         (ellm--persistence-checkpoint)
         (ellm--notify-request-finished)))))
 
 (defun ellm-acp--finish-with-error (buffer error-object)
-  "Finish ACP request in BUFFER by signalling ERROR-OBJECT."
+  "Finish the ACP request in BUFFER and report ERROR-OBJECT."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
+      (when ellm-acp--connection
+        (setf (ellm-acp--connection-current-request ellm-acp--connection)
+              nil))
       (ellm--set-active-request nil)
+      (ellm--ensure-next-user-turn)
       (ellm--persistence-checkpoint)
       (ellm--notify-request-finished)))
-  (error "ellm ACP: %s"
-         (or (plist-get error-object :message)
-             "request failed")))
+  (message "ellm ACP: %s"
+           (or (plist-get error-object :message)
+               "request failed")))
 
 ;;;; Permission requests
 

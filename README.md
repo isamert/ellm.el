@@ -74,6 +74,12 @@ Useful commands:
 Create a new conversation with `M-x ellm-new-buffer`, edit the final
 `user` turn, then run `ellm-send`.
 
+Request attempts default to a 120-second timeout.  HTTP-backed requests retry
+transient failures once; ACP requests time out without being resent.  Customize
+`ellm-request-timeout`, `ellm-request-retries`, and
+`ellm-request-retry-delay` as needed.  Cancelling always leaves a new trailing
+`user` turn ready for the next prompt.
+
 ### Interactive Configuration
 
 Run `M-x ellm-set-config` in a conversation buffer to edit frontmatter without

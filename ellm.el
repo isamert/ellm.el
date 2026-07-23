@@ -84,6 +84,25 @@ buffer's frontmatter, and by `ellm--frontmatter-capf' for completion."
                                           (:models (repeat string))))))
   :group 'ellm)
 
+(defcustom ellm-request-timeout 120
+  "Maximum seconds an asynchronous request attempt may run.
+Backends use this as a common deadline for provider and protocol requests.
+Set to nil to use the underlying transport's timeout policy."
+  :type '(choice (const :tag "Transport default" nil)
+                 (number :tag "Seconds"))
+  :group 'ellm)
+
+(defcustom ellm-request-retries 1
+  "Maximum retries for transient or safely repeatable request failures.
+Backends decide which failures and operations are safe to retry."
+  :type 'natnum
+  :group 'ellm)
+
+(defcustom ellm-request-retry-delay 0.5
+  "Seconds to wait before retrying a request."
+  :type 'number
+  :group 'ellm)
+
 (defcustom ellm-subagents nil
   "Global defaults and profiles for subagent buffers.
 This has the same shape as frontmatter `subagents:'.  A buffer-local
@@ -2811,6 +2830,9 @@ accepted."
 Set by `ellm-send' to the object returned by `ellm-backend-send'.
 Cleared on completion, error, or cancellation.")
 
+(defvar-local ellm--request-generation 0
+  "Monotonic identity of the current request lifecycle.")
+
 (defvar-local ellm--config-in-flight nil
   "Config path currently being applied asynchronously, or nil.")
 
@@ -2851,6 +2873,24 @@ streaming backend insertions.  Nil REQUEST restores the previous
             ellm--request-read-only-state nil
             ellm--request-read-only-state-saved-p nil)))
   request)
+
+(defun ellm--request-current-p (buffer generation)
+  "Return non-nil when GENERATION is still active in BUFFER."
+  (and (buffer-live-p buffer)
+       (with-current-buffer buffer
+         (and ellm--active-request
+              (= generation ellm--request-generation)))))
+
+(defun ellm--invalidate-current-request ()
+  "Invalidate callbacks belonging to the current request."
+  (cl-incf ellm--request-generation))
+
+(defun ellm--ensure-next-user-turn ()
+  "Append an empty user turn unless the final turn is already a user turn."
+  (let ((last (car (last (ellm--parse-turns)))))
+    (unless (and last (equal (ellm-turn-role last) "user"))
+      (goto-char (point-max))
+      (ellm--insert-turn "user"))))
 
 (defun ellm--finalize-request-turn ()
   "Add completion metadata to the current request's assistant turn.
@@ -4033,6 +4073,7 @@ Errors during streaming are signalled normally."
     (user-error "ellm: a request is already in flight; M-x ellm-cancel"))
   (ellm--ensure-trailing-user-turn)
   (setq ellm--request-finished-notified-p nil)
+  (ellm--invalidate-current-request)
   (let* ((fm       (ellm--parse-frontmatter))
          (provider (ellm--resolve-provider fm))
          (buf      (current-buffer))
@@ -4065,7 +4106,9 @@ Errors during streaming are signalled normally."
             (ellm--persistence-checkpoint)
             (ellm--notify-request-finished)))
       (error
+       (ellm--invalidate-current-request)
        (ellm--set-active-request nil)
+       (ellm--ensure-next-user-turn)
        (ellm--persistence-checkpoint)
        (ellm--notify-request-finished)
        (signal (car err) (cdr err))))))
@@ -4077,10 +4120,16 @@ If QUIET is non-nil, then do not print any messages."
   (if (not ellm--active-request)
       (unless quiet
         (message "ellm: no active request"))
-    (ellm-backend-cancel ellm--active-request)
-    (ellm--set-active-request nil)
-    (ellm--persistence-checkpoint)
-    (ellm--notify-request-finished)
+    (let ((request ellm--active-request))
+      ;; Invalidate first: a synchronous cancellation callback must already be
+      ;; stale before the backend is asked to stop its transport.
+      (ellm--invalidate-current-request)
+      (unwind-protect
+          (ellm-backend-cancel request)
+        (ellm--set-active-request nil)
+        (ellm--ensure-next-user-turn)
+        (ellm--persistence-checkpoint)
+        (ellm--notify-request-finished)))
     (unless quiet
       (message "ellm: request cancelled"))))
 

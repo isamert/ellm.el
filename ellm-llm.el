@@ -42,7 +42,7 @@
 
 (cl-defstruct (ellm-llm-request (:constructor ellm-llm--make-request))
   "Active request handle for the `llm.el' backend."
-  raw)
+  raw buffer generation cancelled timer (attempt 0) (retries 0))
 
 ;;;; Interface implementation
 
@@ -59,7 +59,14 @@ Backend-specific provider types should define a more specific
 
 (cl-defmethod ellm-backend-cancel ((request ellm-llm-request))
   "Cancel an active `llm.el' REQUEST."
-  (llm-cancel-request (ellm-llm-request-raw request)))
+  (setf (ellm-llm-request-cancelled request) t)
+  (cl-incf (ellm-llm-request-attempt request))
+  (when-let* ((timer (ellm-llm-request-timer request)))
+    (cancel-timer timer)
+    (setf (ellm-llm-request-timer request) nil))
+  (when-let* ((raw (ellm-llm-request-raw request)))
+    (llm-cancel-request raw)
+    (setf (ellm-llm-request-raw request) nil)))
 
 (cl-defmethod ellm-provider-current-model ((provider llm-standard-chat-provider))
   "Return PROVIDER's `llm.el' chat model name, or nil when unset."
@@ -76,7 +83,7 @@ Backend-specific provider types should define a more specific
   "Return a copy of PROVIDER with its `chat-model' slot set to MODEL."
   (ellm-llm--provider-with-model provider model))
 
-(cl-defmethod ellm-provider-close-session ((provider llm-standard-chat-provider) _frontmatter _buffer)
+(cl-defmethod ellm-provider-close-session ((_provider llm-standard-chat-provider) _frontmatter _buffer)
   "Close the session.
 In this case there is no real session, so we just close the in-flight requests."
   ()
@@ -149,6 +156,21 @@ nil entries so each ID stays aligned with its corresponding prompt object."
               tool-result-ids)))
     (cons (nreverse tool-use-ids) (nreverse tool-result-ids))))
 
+(defun ellm-llm--new-prompt-tool-uses (prompt previous-interaction)
+  "Return tool uses added to PROMPT after PREVIOUS-INTERACTION."
+  (let* ((interactions (llm-chat-prompt-interactions prompt))
+         (new-interactions
+          (if previous-interaction
+              (cdr (memq previous-interaction interactions))
+            interactions))
+         result)
+    (dolist (interaction new-interactions)
+      (let ((content (llm-chat-prompt-interaction-content interaction)))
+        (when (and (consp content)
+                   (cl-every #'llm-provider-utils-tool-use-p content))
+          (setq result (append result content)))))
+    result))
+
 (defun ellm-llm--provider-current-model (provider)
   "Return PROVIDER's `chat-model' slot when present and meaningful."
   (let ((chat-model (and (recordp provider)
@@ -163,12 +185,40 @@ nil entries so each ID stays aligned with its corresponding prompt object."
 
 (defun ellm-llm--make-llm-tool (tool)
   "Convert backend-neutral ellm TOOL to an `llm-tool'."
-  (llm-make-tool
-   :name (ellm-tool-name tool)
-   :description (ellm-tool-description tool)
-   :args (ellm-tool-args tool)
-   :function (ellm-tool-function tool)
-   :async (ellm-tool-async tool)))
+  (let ((name (ellm-tool-name tool))
+        (function (ellm-tool-function tool))
+        (async (ellm-tool-async tool)))
+    (llm-make-tool
+     :name name
+     :description (ellm-tool-description tool)
+     :args (ellm-tool-args tool)
+     :async async
+     :function
+     (if async
+         (lambda (callback &rest args)
+           (let ((callback-called nil))
+             (condition-case err
+                 (apply
+                  function
+                  (lambda (&rest values)
+                    (setq callback-called t)
+                    (apply callback values))
+                  args)
+               (error
+                ;; Errors raised downstream by the result callback are not
+                ;; failures of the tool and must not invoke it twice.
+                (if callback-called
+                    (signal (car err) (cdr err))
+                  (funcall callback
+                           (format "Tool `%s' failed: %s"
+                                   name (error-message-string err)))
+                  nil)))))
+       (lambda (&rest args)
+         (condition-case err
+             (apply function args)
+           (error
+            (format "Tool `%s' failed: %s"
+                    name (error-message-string err)))))))))
 
 (defun ellm-llm--resolve-tools (frontmatter)
   "Return FRONTMATTER selected tools converted to `llm-tool' objects."
@@ -433,6 +483,151 @@ FRONTMATTER, when supplied, is the already parsed YAML frontmatter alist."
                    text (not (string-empty-p text)))
           (ellm-llm--fold-reasoning-in-region start end))))))
 
+(defun ellm-llm--request-live-p (request)
+  "Return non-nil when REQUEST may still invoke buffer callbacks."
+  (and (not (ellm-llm-request-cancelled request))
+       (ellm--request-current-p
+        (ellm-llm-request-buffer request)
+        (ellm-llm-request-generation request))))
+
+(defun ellm-llm--cancel-request-timer (request)
+  "Cancel REQUEST's current deadline or retry timer."
+  (when-let* ((timer (ellm-llm-request-timer request)))
+    (cancel-timer timer)
+    (setf (ellm-llm-request-timer request) nil)))
+
+(defun ellm-llm--retryable-error-p (type)
+  "Return non-nil when an llm.el error TYPE is transient."
+  (memq type '(llm-request-error llm-request-timeout)))
+
+(defun ellm-llm--handle-attempt-error
+    (request attempt provider prompt partial final on-error type message)
+  "Handle one llm.el request failure, retrying transient failures."
+  (when (and (= attempt (ellm-llm-request-attempt request))
+             (ellm-llm--request-live-p request))
+    (ellm-llm--cancel-request-timer request)
+    (if (and (ellm-llm--retryable-error-p type)
+             (< (ellm-llm-request-retries request) ellm-request-retries))
+        (progn
+          ;; Invalidate callbacks from the timed-out attempt before cancelling
+          ;; its transport.  Some transports invoke callbacks synchronously.
+          (cl-incf (ellm-llm-request-attempt request))
+          (cl-incf (ellm-llm-request-retries request))
+          (when-let* ((raw (ellm-llm-request-raw request)))
+            (llm-cancel-request raw)
+            (setf (ellm-llm-request-raw request) nil))
+          (setf
+           (ellm-llm-request-timer request)
+           (run-at-time
+            ellm-request-retry-delay nil
+            #'ellm-llm--start-request
+            request provider prompt partial final on-error)))
+      (cl-incf (ellm-llm-request-attempt request))
+      (funcall on-error type message))))
+
+(defun ellm-llm--start-request
+    (request provider prompt partial final on-error)
+  "Start or retry one streaming llm.el REQUEST.
+PARTIAL, FINAL, and ON-ERROR describe one logical request; timeout and retry
+bookkeeping stays within this function."
+  (when (ellm-llm--request-live-p request)
+    (ellm-llm--cancel-request-timer request)
+    (let ((attempt (cl-incf (ellm-llm-request-attempt request))))
+      (when ellm-request-timeout
+        (setf
+         (ellm-llm-request-timer request)
+         (run-at-time
+          ellm-request-timeout nil
+          (lambda ()
+            (ellm-llm--handle-attempt-error
+             request attempt provider prompt partial final on-error
+             'llm-request-timeout
+             (format "request timed out after %s seconds"
+                     ellm-request-timeout))))))
+      (condition-case err
+          (let ((raw
+                 (let ((llm-request-plz-timeout
+                        (or ellm-request-timeout llm-request-plz-timeout)))
+                   (llm-chat-streaming
+                    provider prompt
+                    (lambda (result)
+                      (when (and (= attempt
+                                    (ellm-llm-request-attempt request))
+                                 (ellm-llm--request-live-p request))
+                        (funcall partial result)))
+                    (lambda (result)
+                      (when (and (= attempt
+                                    (ellm-llm-request-attempt request))
+                                 (ellm-llm--request-live-p request))
+                        (ellm-llm--cancel-request-timer request)
+                        (cl-incf (ellm-llm-request-attempt request))
+                        (funcall final result)))
+                    (lambda (type message)
+                      (ellm-llm--handle-attempt-error
+                       request attempt provider prompt partial final on-error
+                       type message))
+                    'multi-output))))
+            ;; A provider is allowed to complete synchronously.  Do not attach
+            ;; the returned handle to an attempt that already completed.
+            (when (= attempt (ellm-llm-request-attempt request))
+              (setf (ellm-llm-request-raw request) raw)))
+        (error
+         (ellm-llm--handle-attempt-error
+          request attempt provider prompt partial final on-error
+          (car err) (error-message-string err))))))
+  request)
+
+(defun ellm-llm--tool-call-error-p (type)
+  "Return non-nil when TYPE describes a malformed model tool call."
+  (memq 'llm-tool-call-error (get type 'error-conditions)))
+
+(defun ellm-llm--tool-call-error-message (type message tool-use)
+  "Return a model-facing explanation for malformed TOOL-USE."
+  (let ((name (llm-provider-utils-tool-use-name tool-use)))
+    (pcase type
+      ('llm-tool-unknown-tool
+       (if name
+           (format "Tool call rejected: `%s' is not an advertised tool. %s"
+                   name message)
+         "Tool call rejected: the provider returned a call without a tool name. \
+Call one of the advertised tools and include its exact name."))
+      ('llm-tool-missing-argument
+       (format "Tool call rejected because a required argument is missing. %s"
+               message))
+      ('llm-tool-unknown-argument
+       (format "Tool call rejected because it contains an unknown argument. %s"
+               message))
+      (_
+       (format "Tool call rejected as malformed. %s" message)))))
+
+(defun ellm-llm--recover-tool-call-error
+    (provider prompt previous-interaction type message)
+  "Record malformed tool calls as results and return data for rendering.
+Return (TOOL-USES TOOL-RESULTS IDS), or nil when no call was recoverable."
+  (when-let* ((uses (ellm-llm--new-prompt-tool-uses
+                     prompt previous-interaction)))
+    (let (rendered-uses rendered-results prompt-results ids)
+      (dolist (use uses)
+        (let* ((id (or (llm-provider-utils-tool-use-id use)
+                       (ellm-llm--gen-call-id)))
+               (name (llm-provider-utils-tool-use-name use))
+               (result (ellm-llm--tool-call-error-message
+                        type message use)))
+          (setf (llm-provider-utils-tool-use-id use) id)
+          (push id ids)
+          (push (list :id id :name name
+                      :args (llm-provider-utils-tool-use-args use))
+                rendered-uses)
+          (push (cons name result) rendered-results)
+          (push (make-llm-chat-prompt-tool-result
+                 :call-id id :tool-name name :result result)
+                prompt-results)))
+      (llm-provider-append-to-prompt
+       provider prompt nil (nreverse prompt-results))
+      (list (nreverse rendered-uses)
+            (nreverse rendered-results)
+            (cons (nreverse ids) (nreverse ids))))))
+
 (defun ellm-llm--send-once (provider prompt buf)
   "Stream PROVIDER's reply for PROMPT into the trailing assistant turn of BUF.
 Uses multi-output mode.  If the LLM emits tool calls, llm.el executes
@@ -447,7 +642,9 @@ is text-only, a fresh trailing `user' turn is appended."
            (start (copy-marker (point-max) nil))
            (end   (copy-marker (point-max) t))
            reasoning-state-id
-           request
+           (request
+            (ellm-llm--make-request
+             :buffer buf :generation ellm--request-generation))
            (partial-render
             (lambda (result)
               (when-let* ((state
@@ -484,23 +681,57 @@ is text-only, a fresh trailing `user' turn is appended."
            (on-error
              (lambda (type msg)
                (ellm-llm--ensure-buffer buf request)
-               (with-current-buffer buf
-                 (ellm--set-active-request nil)
-                 (ellm--persistence-checkpoint)
-                 (ellm--notify-request-finished))
-               (signal type (list msg)))))
+               (if (ellm-llm--tool-call-error-p type)
+                   (if-let* ((recovery
+                              (ellm-llm--recover-tool-call-error
+                               provider prompt previous-interaction
+                               type msg)))
+                       (with-current-buffer buf
+                         (ellm--preserve-user-position
+                           (ellm--set-active-request nil)
+                           (ellm-llm--render-tool-uses
+                            (nth 0 recovery) (nth 1 recovery)
+                            (nth 2 recovery))
+                           (when ellm-fold-reasoning-blocks
+                             (ellm-llm--fold-reasoning-in-region start end))
+                           (ellm--persistence-checkpoint)
+                           (ellm-llm--send-once provider prompt buf)))
+                     ;; Argument JSON can fail before llm.el has a structured
+                     ;; tool use to pair with a result.  Give the model a
+                     ;; correction as an ordinary interaction instead.
+                     (let ((correction
+                            (format "Your previous tool call was malformed and \
+could not be executed: %s. Retry it using an advertised tool and valid arguments."
+                                    msg)))
+                       (setf (llm-chat-prompt-interactions prompt)
+                             (append
+                              (llm-chat-prompt-interactions prompt)
+                              (list (make-llm-chat-prompt-interaction
+                                     :role 'user :content correction))))
+                       (with-current-buffer buf
+                         (ellm--preserve-user-position
+                           (ellm--set-active-request nil)
+                           (ellm--insert-turn "assistant" :continuation t)
+                           (insert (ellm--ensure-newline correction))
+                           (ellm--persistence-checkpoint)
+                           (ellm-llm--send-once provider prompt buf)))))
+                 (with-current-buffer buf
+                   (ellm--set-active-request nil)
+                   (ellm--ensure-next-user-turn)
+                   (ellm--persistence-checkpoint)
+                   (ellm--notify-request-finished)
+                   (message "ellm: %s" msg))))))
       (ellm--set-active-request ellm--request-starting)
       (condition-case err
           (progn
-            (setq request (llm-chat-streaming
-                           provider prompt
-                           partial-render final-render on-error
-                           'multi-output))
+            (ellm-llm--start-request
+             request provider prompt partial-render final-render on-error)
             (when (eq ellm--active-request ellm--request-starting)
-              (ellm--set-active-request (ellm-llm--make-request :raw request))))
+              (ellm--set-active-request request)))
         (error
          (when (eq ellm--active-request ellm--request-starting)
            (ellm--set-active-request nil)
+           (ellm--ensure-next-user-turn)
            (ellm--persistence-checkpoint)
            (ellm--notify-request-finished))
          (signal (car err) (cdr err)))))))
@@ -539,7 +770,9 @@ when they later re-enter the buffer."
 (defun ellm-llm--ensure-buffer (buf &optional request-to-cancel)
   (unless (buffer-live-p buf)
     (when request-to-cancel
-      (llm-cancel-request request-to-cancel))
+      (if (ellm-llm-request-p request-to-cancel)
+          (ellm-backend-cancel request-to-cancel)
+        (llm-cancel-request request-to-cancel)))
     (user-error "ellm :: Buffer is gone")))
 
 (defun ellm-llm--fold-reasoning-in-region (start end)
