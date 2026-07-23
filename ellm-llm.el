@@ -115,11 +115,39 @@ In this case there is no real session, so we just close the in-flight requests."
 ;;;;; Tool handling
 
 (defun ellm-llm--gen-call-id (&rest _)
-  "Return a fresh synthetic tool-call ID for buffer serialization.
-Provider IDs are not surfaced through `llm.el's multi-output result, so
-ellm assigns its own opaque IDs to pair `tool-call' and `tool-result'
-turns across re-parses."
+  "Return a fresh fallback tool-call ID for buffer serialization.
+`llm.el's multi-output result omits provider IDs.  ellm recovers them from
+the populated prompt when possible and uses this opaque ID otherwise."
   (format "call_%08x" (random (expt 2 32))))
+
+(defun ellm-llm--persistable-call-id-p (id)
+  "Return non-nil when provider call ID can be stored in a turn attribute."
+  (and (stringp id)
+       (not (string-empty-p id))
+       (not (string-match-p "[[:space:][:cntrl:]]" id))))
+
+(defun ellm-llm--new-prompt-tool-call-ids (prompt previous-interaction)
+  "Return tool-use and result IDs added to PROMPT after PREVIOUS-INTERACTION.
+The return value is a cons of (TOOL-USE-IDS . TOOL-RESULT-IDS), retaining
+nil entries so each ID stays aligned with its corresponding prompt object."
+  (let* ((interactions (llm-chat-prompt-interactions prompt))
+         (new-interactions
+          (if previous-interaction
+              (cdr (memq previous-interaction interactions))
+            interactions))
+         tool-use-ids tool-result-ids)
+    (dolist (interaction new-interactions)
+      (let ((content (llm-chat-prompt-interaction-content interaction)))
+        (when (and (consp content)
+                   (cl-every #'llm-provider-utils-tool-use-p content))
+          (dolist (tool-use content)
+            (push (llm-provider-utils-tool-use-id tool-use)
+                  tool-use-ids))))
+      (dolist (tool-result
+               (llm-chat-prompt-interaction-tool-results interaction))
+        (push (llm-chat-prompt-tool-result-call-id tool-result)
+              tool-result-ids)))
+    (cons (nreverse tool-use-ids) (nreverse tool-result-ids))))
 
 (defun ellm-llm--provider-current-model (provider)
   "Return PROVIDER's `chat-model' slot when present and meaningful."
@@ -239,8 +267,12 @@ turns across re-parses."
                                  (ellm-turn-content tr)))
                        results)
                 (setq rest (cdr rest))))
-            (llm-provider-utils-append-to-prompt
-             prompt nil (nreverse results))))
+            ;; Providers do not all represent tool results with the generic
+            ;; `tool-results' role.  In particular, Claude requires them to be
+            ;; user messages, so let the provider choose the wire role just as
+            ;; `llm.el' does for a live tool call.
+            (llm-provider-append-to-prompt
+             provider prompt nil (nreverse results))))
          ((equal role "tool-param")
           (setq rest (cdr rest)))
          ((and (equal role "assistant")
@@ -278,18 +310,37 @@ When ARGS is non-nil, include its single-line values in the folded heading."
            (ellm-tools--transform-tool-result name nil nil result)))
   (ellm--flush-pending-fold))
 
-(defun ellm-llm--render-tool-uses (tool-uses tool-results)
+(defun ellm-llm--render-tool-uses (tool-uses tool-results &optional call-ids)
   "Insert `tool-call' / `tool-result' turns for TOOL-USES and TOOL-RESULTS.
-When `ellm-fold-tool-calls' is non-nil each inserted turn is folded."
-  (let ((ids (mapcar #'ellm-llm--gen-call-id tool-uses)))
+When `ellm-fold-tool-calls' is non-nil each inserted turn is folded.
+CALL-IDS is an optional cons of provider tool-use and tool-result ID lists."
+  (let* ((provider-use-ids (car-safe call-ids))
+         (provider-result-ids (cdr-safe call-ids))
+         (ids
+          (cl-loop for tool-use in tool-uses
+                   for index from 0
+                   for id = (or (plist-get tool-use :id)
+                                (nth index provider-use-ids))
+                   collect (if (ellm-llm--persistable-call-id-p id)
+                               id
+                             (ellm-llm--gen-call-id)))))
     (cl-loop for id in ids
              for tu in tool-uses
              do (ellm-llm--insert-tool-call id tu))
-    (cl-loop for id in ids
-             for tu in tool-uses
-             for tr in tool-results
+    (cl-loop for tr in tool-results
+             for index from 0
+             repeat (length ids)
+             for provider-id = (nth index provider-result-ids)
+             for id = (if (and (ellm-llm--persistable-call-id-p provider-id)
+                               (member provider-id ids))
+                          provider-id
+                        (nth index ids))
+             for use-index = (cl-position id ids :test #'equal)
+             for tu = (or (nth use-index tool-uses)
+                          (nth index tool-uses))
              do (ellm-llm--insert-tool-result
-                 id (plist-get tu :name) (cdr tr) (plist-get tu :args)))))
+                 id (or (plist-get tu :name) (car-safe tr))
+                 (cdr tr) (plist-get tu :args)))))
 
 ;;;;; Parsing & sending
 
@@ -311,20 +362,25 @@ FRONTMATTER, when supplied, is the already parsed YAML frontmatter alist."
          (fm-system   (alist-get 'system fm))
          (has-system  (and turns
                            (equal (ellm-turn-role (car turns)) "system")))
+         (system      (if has-system
+                          (ellm-turn-content (car turns))
+                        fm-system))
          (reasoning   (alist-get 'reasoning fm))
          (tools       (ellm-llm--resolve-tools fm))
-         (initial     (and (not has-system) fm-system
-                           (list (make-llm-chat-prompt-interaction
-                                  :role 'system
-                                  :content fm-system))))
          (prompt      (make-llm-chat-prompt
-                       :interactions initial
+                       ;; `llm.el' models system instructions as prompt
+                       ;; context.  A literal system interaction is outside
+                       ;; its public interaction-role contract and some
+                       ;; providers (notably Claude) serialize it with no
+                       ;; valid wire role.
+                       :context      system
                        :tools        tools
                        :temperature  (alist-get 'temperature fm)
                        :max-tokens   (alist-get 'max-tokens fm)
                        :reasoning    (and reasoning
                                           (intern (format "%s" reasoning))))))
-    (ellm-llm--apply-turns-to-prompt provider turns prompt)
+    (ellm-llm--apply-turns-to-prompt
+     provider (if has-system (cdr turns) turns) prompt)
     prompt))
 
 (defun ellm-llm--render-streaming-response
@@ -386,7 +442,9 @@ callback fires; this function then writes corresponding `tool-call' /
 and recurses with the (already populated) PROMPT.  When the response
 is text-only, a fresh trailing `user' turn is appended."
   (with-current-buffer buf
-    (let* ((start (copy-marker (point-max) nil))
+    (let* ((previous-interaction
+            (car (last (llm-chat-prompt-interactions prompt))))
+           (start (copy-marker (point-max) nil))
            (end   (copy-marker (point-max) t))
            reasoning-state-id
            request
@@ -409,7 +467,10 @@ is text-only, a fresh trailing `user' turn is appended."
                     (if-let* ((tool-uses (plist-get result :tool-uses))
                               (tool-results (plist-get result :tool-results)))
                         (progn
-                          (ellm-llm--render-tool-uses tool-uses tool-results)
+                          (ellm-llm--render-tool-uses
+                           tool-uses tool-results
+                           (ellm-llm--new-prompt-tool-call-ids
+                            prompt previous-interaction))
                           (setq recurse t))
                       (ellm--insert-turn "user"))
                     ;; Fold reasoning after the following turn gives it a
