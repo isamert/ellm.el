@@ -153,6 +153,9 @@ an optional list of model candidates used for frontmatter completion."
    (last-message-key
     :initform nil
     :accessor ellm-acp--connection-last-message-key)
+   (history-replay-suppressed
+    :initform nil
+    :accessor ellm-acp--connection-history-replay-suppressed)
    (rendered-tools
     :initform (make-hash-table :test 'equal)
     :accessor ellm-acp--connection-rendered-tools)
@@ -998,6 +1001,37 @@ SESSION-ID, when non-nil, is included for load/resume requests."
      "ellm ACP: agent does not support session/resume or session/load for saved session `%s'"
      session-id))))
 
+(defun ellm-acp--buffer-has-persisted-history-p (connection)
+  "Return non-nil when CONNECTION's buffer already contains conversation history.
+Ignore a trailing user input and the empty assistant placeholder created by
+`ellm-send', since those belong to the pending prompt rather than saved history."
+  (when-let* ((buffer (ellm-acp--connection-buffer connection))
+              ((buffer-live-p buffer)))
+    (with-current-buffer buffer
+      (let ((turns (ellm--parse-turns)))
+        (when (and turns
+                   (equal (ellm-turn-role (car (last turns))) "assistant")
+                   (string-empty-p
+                    (ellm-turn-content (car (last turns)))))
+          (setq turns (butlast turns)))
+        (when (and turns
+                   (equal (ellm-turn-role (car (last turns))) "user"))
+          (setq turns (butlast turns)))
+        (cl-some (lambda (turn)
+                   (not (equal (ellm-turn-role turn) "system")))
+                 turns)))))
+
+(defun ellm-acp--begin-history-replay (connection)
+  "Prepare CONNECTION for history emitted by `session/load'."
+  (setf (ellm-acp--connection-last-message-key connection) nil
+        (ellm-acp--connection-history-replay-suppressed connection)
+        (ellm-acp--buffer-has-persisted-history-p connection)))
+
+(defun ellm-acp--end-history-replay (connection)
+  "Finish `session/load' history handling for CONNECTION."
+  (setf (ellm-acp--connection-last-message-key connection) nil
+        (ellm-acp--connection-history-replay-suppressed connection) nil))
+
 (defun ellm-acp--resume-session-sync (connection provider frontmatter session-id)
   "Synchronously resume ACP SESSION-ID without replaying history."
   (setf (ellm-acp--connection-session-id connection) session-id)
@@ -1013,7 +1047,12 @@ SESSION-ID, when non-nil, is included for load/resume requests."
   (setf (ellm-acp--connection-session-id connection) session-id)
   (let* ((params (ellm-acp--session-lifecycle-params
                   connection provider frontmatter session-id additional-directories))
-         (result (ellm-acp--request-sync connection :session/load params)))
+         (result
+          (progn
+            (ellm-acp--begin-history-replay connection)
+            (unwind-protect
+                (ellm-acp--request-sync connection :session/load params)
+              (ellm-acp--end-history-replay connection)))))
     (ellm-acp--update-model-candidates
      connection (plist-get result :configOptions))))
 
@@ -1088,13 +1127,23 @@ SESSION-ID, when non-nil, is included for load/resume requests."
   (ellm-acp--with-lifecycle-params
    connection provider frontmatter session-id additional-directories on-error
    (lambda (params)
-     (ellm-acp--request
-      connection :session/load params
-      :success-fn (lambda (result)
-                    (ellm-acp--update-model-candidates
-                     connection (plist-get result :configOptions))
-                    (funcall on-ready))
-      :error-fn on-error))))
+     (ellm-acp--begin-history-replay connection)
+     (condition-case err
+         (ellm-acp--request
+          connection :session/load params
+          :success-fn
+          (lambda (result)
+            (ellm-acp--end-history-replay connection)
+            (ellm-acp--update-model-candidates
+             connection (plist-get result :configOptions))
+            (funcall on-ready))
+          :error-fn
+          (lambda (error-object)
+            (ellm-acp--end-history-replay connection)
+            (funcall on-error error-object)))
+       (error
+        (ellm-acp--end-history-replay connection)
+        (signal (car err) (cdr err)))))))
 
 (defun ellm-acp--persist-session-id (connection session-id)
   "Persist ACP SESSION-ID in CONNECTION's conversation frontmatter."
@@ -1696,16 +1745,9 @@ When SELECT is non-nil, choose a session from `session/list'."
       (ellm-acp--initialize-sync connection)
       (unless (ellm-acp--capability connection '(loadSession))
         (user-error "ellm ACP: agent does not support session/load"))
-      (setf (ellm-acp--connection-session-id connection) session-id)
-      (ellm-acp--update-model-candidates
-       connection
-       (plist-get
-        (ellm-acp--request-sync
-         connection :session/load
-         (ellm-acp--session-lifecycle-params
-          connection provider frontmatter session-id
-          (or (plist-get session :additionalDirectories) [])))
-        :configOptions))
+      (ellm-acp--load-existing-session-sync
+       connection provider frontmatter session-id
+       (or (plist-get session :additionalDirectories) []))
       (goto-char (point-max))
       (unless (equal (ellm-acp--last-turn-role) "user")
         (ellm--insert-turn "user"))
@@ -1725,40 +1767,51 @@ When SELECT is non-nil, choose a session from `session/list'."
             (unless (eq (ellm-acp--run-extension-session-update
                          connection update 'pre-render)
                         :handled)
-              (pcase (plist-get update :sessionUpdate)
-                ("user_message_chunk"
-                 (ellm-acp--insert-content connection "user"
-                                           (plist-get update :content)
-                                           (plist-get update :messageId)))
-                ("agent_message_chunk"
-                 (ellm-acp--insert-content connection "assistant"
-                                           (plist-get update :content)
-                                           (plist-get update :messageId)))
-                ("agent_thought_chunk"
-                 (ellm-acp--insert-content connection "reasoning"
-                                           (plist-get update :content)
-                                           (plist-get update :messageId)))
-                ("tool_call"
-                 (setf (ellm-acp--connection-last-message-key connection) nil)
-                 (ellm-acp--insert-tool-call update connection))
-                ("tool_call_update"
-                 (setf (ellm-acp--connection-last-message-key connection) nil)
-                 (ellm-acp--insert-tool-update update connection))
-                ("plan"
-                 (setf (ellm-acp--connection-last-message-key connection) nil)
-                 (ellm-acp--insert-plan update))
-                ("available_commands_update"
-                 (setf (ellm-acp--connection-available-commands connection)
-                       (plist-get update :availableCommands)))
-                ("session_info_update"
-                 (ellm-acp--handle-session-info-update connection update))
-                ("config_option_update"
-                 (ellm-acp--update-model-candidates
-                  connection (plist-get update :configOptions)))
-                ("usage_update"
-                 (setf (ellm-acp--connection-last-message-key connection) nil)
-                 (ellm-acp--update-usage update))
-                (_ nil)))
+              (let ((kind (plist-get update :sessionUpdate)))
+                (unless
+                    (and
+                     (ellm-acp--connection-history-replay-suppressed connection)
+                     (member kind
+                             '("user_message_chunk"
+                               "agent_message_chunk"
+                               "agent_thought_chunk"
+                               "tool_call"
+                               "tool_call_update"
+                               "plan")))
+                  (pcase kind
+                    ("user_message_chunk"
+                     (ellm-acp--insert-content connection "user"
+                                               (plist-get update :content)
+                                               (plist-get update :messageId)))
+                    ("agent_message_chunk"
+                     (ellm-acp--insert-content connection "assistant"
+                                               (plist-get update :content)
+                                               (plist-get update :messageId)))
+                    ("agent_thought_chunk"
+                     (ellm-acp--insert-content connection "reasoning"
+                                               (plist-get update :content)
+                                               (plist-get update :messageId)))
+                    ("tool_call"
+                     (setf (ellm-acp--connection-last-message-key connection) nil)
+                     (ellm-acp--insert-tool-call update connection))
+                    ("tool_call_update"
+                     (setf (ellm-acp--connection-last-message-key connection) nil)
+                     (ellm-acp--insert-tool-update update connection))
+                    ("plan"
+                     (setf (ellm-acp--connection-last-message-key connection) nil)
+                     (ellm-acp--insert-plan update))
+                    ("available_commands_update"
+                     (setf (ellm-acp--connection-available-commands connection)
+                           (plist-get update :availableCommands)))
+                    ("session_info_update"
+                     (ellm-acp--handle-session-info-update connection update))
+                    ("config_option_update"
+                     (ellm-acp--update-model-candidates
+                      connection (plist-get update :configOptions)))
+                    ("usage_update"
+                     (setf (ellm-acp--connection-last-message-key connection) nil)
+                     (ellm-acp--update-usage update))
+                    (_ nil)))))
             (ellm-acp--run-extension-session-update
              connection update 'post-render)))))))
 
