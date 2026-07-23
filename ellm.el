@@ -1853,35 +1853,17 @@ WINDOW defaults to a window displaying the current buffer."
 (defun ellm--make-rule-overlay (bol win)
   "Create a rule overlay at BOL sized for WIN.
 
-The rule is drawn by covering the real newline character that ends the
-preceding line (the char in [BOL-1, BOL)) with a `display' property that
-re-emits that newline, the rule, and a closing newline.  This keeps both
-BOL-1 (end of the previous line) and BOL (start of the delimiter line)
-as real, point-accessible buffer positions with the rule rendered as its
-own screen line between them.
-
-This matters for point motion and scrolling: a `before-string' /
-`after-string' that contains a newline on a zero-length overlay creates
-a phantom screen line with no corresponding buffer position.  Line-based
-vertical motion and scrolling (e.g. `scroll-up') cannot place point
-inside that display string and gets stuck at it, so scrolling appears to
-stop at each rule.  Covering an existing newline instead avoids
-introducing a phantom line."
-  (if (> bol (point-min))
-      (let ((ov (make-overlay (1- bol) bol)))
-        (overlay-put ov 'ellm-rule t)
-        ;; Cover the preceding newline and re-emit it after the rule, so
-        ;; the rule occupies its own screen line without adding a phantom
-        ;; (position-less) newline.
-        (overlay-put ov 'display (concat "\n" (ellm--rule-string win) "\n"))
-        ov)
-    ;; No preceding newline to anchor to (rule would be at BOB); fall
-    ;; back to the zero-length overlay form.
-    (let ((ov (make-overlay bol bol)))
-      (overlay-put ov 'ellm-rule t)
-      (overlay-put ov 'before-string
-                   (concat (ellm--rule-string win) "\n"))
-      ov)))
+The non-empty overlay covers the first character of the following delimiter
+line and draws the rule with `before-string'.  This attaches the visual rule
+to the turn it introduces instead of to the preceding turn's newline, so
+selecting or editing the previous body does not include the rule.  Keeping a
+real character in the overlay also avoids the scrolling problems caused by a
+newline-bearing `before-string' on a zero-length overlay."
+  (let ((ov (make-overlay bol (min (1+ bol) (point-max)))))
+    (overlay-put ov 'ellm-rule t)
+    (overlay-put ov 'before-string
+                 (concat (ellm--rule-string win) "\n"))
+    ov))
 
 (defun ellm--put-turn-rules (beg end &optional window)
   "Place rule overlays on turn delimiter lines between BEG and END.
