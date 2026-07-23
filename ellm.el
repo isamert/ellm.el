@@ -1677,13 +1677,11 @@ can't collapse any overlays, so they're ignored."
     (when (ellm--turn-delimiter-in-region-p beg end)
       (setq ellm--pending-delimiter-deletion (cons beg end)))))
 
-(defun ellm--refresh-rules-around (pos &optional window)
+(defun ellm--refresh-rules-around (pos)
   "Rebuild rule overlays in the local neighborhood of POS.
 The neighborhood spans from the previous turn delimiter line (or
 `point-min') to the next one (or `point-max'), so any merging or
-splitting of turns caused by an edit at POS is reflected.
-
-Optional WINDOW determines the rule width."
+splitting of turns caused by an edit at POS is reflected."
   (when ellm-turn-rules
     (let ((rb (save-excursion
                 (goto-char pos)
@@ -1697,7 +1695,7 @@ Optional WINDOW determines the rule width."
                 (if (re-search-forward ellm-turn-regexp nil t)
                     (line-end-position)
                   (point-max)))))
-      (ellm--put-turn-rules rb re window))))
+      (ellm--put-turn-rules rb re))))
 
 (defun ellm--turn-neighborhood-bounds (beg end)
   "Return bounds of turn bodies adjacent to the change at BEG..END."
@@ -1833,25 +1831,16 @@ re-shaded, leaving unshaded gaps at line beginnings/ends."
 ;;;; Overlays
 ;;;;;; Turn rules (---)
 
-(defun ellm--rule-window (&optional buffer)
-  "Return the window whose width should size rules for BUFFER.
-BUFFER defaults to the current buffer.  Prefer a window currently
-displaying BUFFER (preferring the selected window if it shows BUFFER)
-over the selected window, since the selected window may be on an
-unrelated buffer."
-  (let ((buf (or buffer (current-buffer))))
-    (or (and (eq (window-buffer) buf) (selected-window))
-        (get-buffer-window buf t)
-        (selected-window))))
+(defun ellm--rule-string ()
+  "Return a full-width horizontal rule display string.
+A stretch space aligns to the right fringe dynamically, avoiding assumptions
+about the pixel width of a rule glyph or the active font."
+  (propertize " "
+              'face 'ellm-turn-rule
+              'display '(space :align-to (- right-fringe 1))))
 
-(defun ellm--rule-string (&optional window)
-  "Return a full-width horizontal rule string sized for WINDOW.
-WINDOW defaults to a window displaying the current buffer."
-  (let ((w (or window (ellm--rule-window))))
-    (propertize (make-string (window-width w) ?─) 'face 'ellm-turn-rule)))
-
-(defun ellm--make-rule-overlay (bol win)
-  "Create a rule overlay at BOL sized for WIN.
+(defun ellm--make-rule-overlay (bol)
+  "Create a rule overlay at BOL.
 
 The non-empty overlay covers the first character of the following delimiter
 line and draws the rule with `before-string'.  This attaches the visual rule
@@ -1862,10 +1851,10 @@ newline-bearing `before-string' on a zero-length overlay."
   (let ((ov (make-overlay bol (min (1+ bol) (point-max)))))
     (overlay-put ov 'ellm-rule t)
     (overlay-put ov 'before-string
-                 (concat (ellm--rule-string win) "\n"))
+                 (concat (ellm--rule-string) "\n"))
     ov))
 
-(defun ellm--put-turn-rules (beg end &optional window)
+(defun ellm--put-turn-rules (beg end)
   "Place rule overlays on turn delimiter lines between BEG and END.
 Continuation delimiter lines (those using `ellm-turn-header-2', e.g.
 `tool-call', `tool-result', or an indented `assistant') do not get a
@@ -1875,56 +1864,30 @@ top-level turn.
 This is the local refresh path used by `ellm--fontify-region' and
 `ellm--refresh-rules-around'.  It only touches overlays in [BEG, END]
 and assumes no orphaned rule overlays exist in that range from outside
-it.  The buffer-wide refresh, used on window resize, is
-`ellm--rebuild-turn-rules'.
-
-Optional WINDOW determines the rule width; defaults to a window
-displaying the current buffer."
+it."
   (when ellm-turn-rules
     (remove-overlays beg end 'ellm-rule t)
-    (let ((win (or window (ellm--rule-window))))
-      (save-excursion
-        (goto-char beg)
-        (while (re-search-forward ellm-turn-regexp end t)
-          (let ((bol (line-beginning-position))
-                (header (match-string-no-properties 1)))
-            (unless (or (= bol (point-min))
-                        (ellm--continuation-header-p header))
-              (ellm--make-rule-overlay bol win))))))))
+    (save-excursion
+      (goto-char beg)
+      (while (re-search-forward ellm-turn-regexp end t)
+        (let ((bol (line-beginning-position))
+              (header (match-string-no-properties 1)))
+          (unless (or (= bol (point-min))
+                      (ellm--continuation-header-p header))
+            (ellm--make-rule-overlay bol)))))))
 
-(defun ellm--rebuild-turn-rules (&optional window)
-  "Rebuild all rule overlays in the current buffer from scratch.
-Used on window resize, where every rule needs its width refreshed.
-Cost is O(buffer overlays + buffer size); rule overlays are sparse
-(one per top-level turn).
-
-Optional WINDOW determines the rule width; defaults to a window
-displaying the current buffer."
+(defun ellm--rebuild-turn-rules ()
+  "Rebuild all rule overlays in the current buffer from scratch."
   (when ellm-turn-rules
     (remove-overlays (point-min) (point-max) 'ellm-rule t)
-    (let ((win (or window (ellm--rule-window))))
-      (save-excursion
-        (goto-char (point-min))
-        (while (re-search-forward ellm-turn-regexp nil t)
-          (let ((bol (line-beginning-position))
-                (header (match-string-no-properties 1)))
-            (unless (or (= bol (point-min))
-                        (ellm--continuation-header-p header))
-              (ellm--make-rule-overlay bol win))))))))
-
-(defun ellm--update-rules (&optional frame-or-window)
-  "Refresh all turn rule widths in ellm buffers visible on FRAME-OR-WINDOW.
-Each buffer's rules are sized for the window currently displaying it,
-not for the selected window (which may be on an unrelated buffer)."
-  (when ellm-turn-rules
-    (let ((frame (cond
-                  ((framep frame-or-window) frame-or-window)
-                  ((windowp frame-or-window) (window-frame frame-or-window))
-                  (t (selected-frame)))))
-      (dolist (win (window-list frame 'no-minibuf))
-        (with-current-buffer (window-buffer win)
-          (when (and ellm-turn-rules (derived-mode-p 'ellm-mode))
-            (ellm--rebuild-turn-rules win)))))))
+    (save-excursion
+      (goto-char (point-min))
+      (while (re-search-forward ellm-turn-regexp nil t)
+        (let ((bol (line-beginning-position))
+              (header (match-string-no-properties 1)))
+          (unless (or (= bol (point-min))
+                      (ellm--continuation-header-p header))
+            (ellm--make-rule-overlay bol)))))))
 
 (defvar-local ellm--was-narrowed-p nil
   "Non-nil if this buffer was narrowed after the previous command.")
@@ -1944,14 +1907,15 @@ subsequent edit happens near them."
 (defun ellm--configure-turn-rules (&optional defer-rebuild)
   "Enable or disable ruler maintenance in the current ellm buffer.
 When DEFER-REBUILD is non-nil, fontification will create the initial rules."
+  ;; Remove the pre-stretch-space resize hook from buffers created by older
+  ;; versions.  Dynamically aligned rules need no resize maintenance.
+  (remove-hook 'window-size-change-functions 'ellm--update-rules t)
   (if ellm-turn-rules
       (progn
-        (add-hook 'window-size-change-functions #'ellm--update-rules nil t)
         (add-hook 'post-command-hook #'ellm--refresh-rules-after-widen nil t)
         (setq ellm--was-narrowed-p (buffer-narrowed-p))
         (unless defer-rebuild
           (ellm--rebuild-turn-rules)))
-    (remove-hook 'window-size-change-functions #'ellm--update-rules t)
     (remove-hook 'post-command-hook #'ellm--refresh-rules-after-widen t)
     (setq ellm--pending-delimiter-deletion nil)
     (save-restriction
