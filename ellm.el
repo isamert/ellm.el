@@ -3654,9 +3654,10 @@ preserved."
 (defun ellm--format-tool-param-value (value)
   "Return a stable buffer representation for tool parameter VALUE."
   (cond
-   ((null value) "")
+   ((null value) "null")
    ((stringp value) value)
-   (t (json-serialize value :false-object :json-false :null-object nil))))
+   ((memq value '(:false :json-false)) "false")
+   (t (json-serialize value))))
 
 (defun ellm--tool-header-title (name params)
   "Return a concise tool title from NAME and PARAMS.

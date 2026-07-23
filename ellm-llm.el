@@ -98,6 +98,38 @@ In this case there is no real session, so we just close the in-flight requests."
   "Compatibility fallback matching direct `llm.el' backend dispatch."
   (ellm-llm--config-effect provider path))
 
+(cl-defmethod ellm-provider-reasoning-state
+  ((provider llm-standard-chat-provider) result)
+  "Return durable generic `llm.el' reasoning metadata from RESULT."
+  (when-let* ((multi-turn (plist-get result :multi-turn)))
+    (let ((state
+           (list :version 1
+                 :provider (symbol-name (type-of provider))
+                 :multi-turn multi-turn)))
+      (and (ignore-errors (ellm--reasoning-state-json state))
+           state))))
+
+(cl-defmethod ellm-provider-restore-reasoning
+  ((provider llm-standard-chat-provider) prompt summary state)
+  "Restore generic `llm.el' reasoning STATE or fall back to SUMMARY."
+  (if (and (equal (plist-get state :version) 1)
+           (equal (plist-get state :provider)
+                  (symbol-name (type-of provider)))
+           (plist-member state :multi-turn))
+      (setf (llm-chat-prompt-interactions prompt)
+            (append
+             (llm-chat-prompt-interactions prompt)
+             (list
+              (make-llm-chat-prompt-interaction
+               :role 'assistant
+               :multi-turn-plist (plist-get state :multi-turn)))))
+    (unless (string-empty-p summary)
+      (setf (llm-chat-prompt-interactions prompt)
+            (append
+             (llm-chat-prompt-interactions prompt)
+             (list (make-llm-chat-prompt-interaction
+                    :role 'assistant :content summary)))))))
+
 (defun ellm-llm--config-effect (provider path)
   "Return the `llm.el' application effect for PROVIDER's config PATH."
   (let ((capabilities (ignore-errors (llm-capabilities provider))))
@@ -137,11 +169,8 @@ the populated prompt when possible and uses this opaque ID otherwise."
   "Return tool-use and result IDs added to PROMPT after PREVIOUS-INTERACTION.
 The return value is a cons of (TOOL-USE-IDS . TOOL-RESULT-IDS), retaining
 nil entries so each ID stays aligned with its corresponding prompt object."
-  (let* ((interactions (llm-chat-prompt-interactions prompt))
-         (new-interactions
-          (if previous-interaction
-              (cdr (memq previous-interaction interactions))
-            interactions))
+  (let* ((new-interactions
+          (ellm-llm--interactions-after prompt previous-interaction))
          tool-use-ids tool-result-ids)
     (dolist (interaction new-interactions)
       (let ((content (llm-chat-prompt-interaction-content interaction)))
@@ -156,13 +185,19 @@ nil entries so each ID stays aligned with its corresponding prompt object."
               tool-result-ids)))
     (cons (nreverse tool-use-ids) (nreverse tool-result-ids))))
 
+(defun ellm-llm--interactions-after (prompt previous-interaction)
+  "Return PROMPT interactions following PREVIOUS-INTERACTION.
+Use object identity for the boundary because provider serializers may prepend
+interactions while preparing a request."
+  (let ((interactions (llm-chat-prompt-interactions prompt)))
+    (if previous-interaction
+        (cdr (memq previous-interaction interactions))
+      interactions)))
+
 (defun ellm-llm--new-prompt-tool-uses (prompt previous-interaction)
   "Return tool uses added to PROMPT after PREVIOUS-INTERACTION."
-  (let* ((interactions (llm-chat-prompt-interactions prompt))
-         (new-interactions
-          (if previous-interaction
-              (cdr (memq previous-interaction interactions))
-            interactions))
+  (let* ((new-interactions
+          (ellm-llm--interactions-after prompt previous-interaction))
          result)
     (dolist (interaction new-interactions)
       (let ((content (llm-chat-prompt-interaction-content interaction)))
@@ -170,6 +205,82 @@ nil entries so each ID stays aligned with its corresponding prompt object."
                    (cl-every #'llm-provider-utils-tool-use-p content))
           (setq result (append result content)))))
     result))
+
+(defun ellm-llm--canonical-text (text)
+  "Return TEXT with buffer-only boundary whitespace removed."
+  (if (stringp text) (string-trim text) text))
+
+(defun ellm-llm--tool-arg-spec (tool name)
+  "Return TOOL's argument specification named NAME, or nil."
+  (cl-find name (and tool
+                     (if (llm-tool-p tool)
+                         (llm-tool-args tool)
+                       (ellm-tool-args tool)))
+           :key (lambda (spec) (format "%s" (plist-get spec :name)))
+           :test #'equal))
+
+(defun ellm-llm--deserialize-tool-param (text spec)
+  "Deserialize persisted tool parameter TEXT according to SPEC.
+String parameters remain strings.  Invalid edited values also remain strings
+so the provider can report a useful malformed-call error."
+  (if (or (null spec) (eq (plist-get spec :type) 'string))
+      text
+    (condition-case nil
+        (json-parse-string text :object-type 'alist
+                          :array-type 'array
+                          :null-object nil
+                          :false-object :false)
+      (error text))))
+
+(defun ellm-llm--canonical-tool-param (tool name value)
+  "Return VALUE as it will be reconstructed from TOOL parameter NAME."
+  (let* ((spec (ellm-llm--tool-arg-spec tool name))
+         (serialized (ellm--format-tool-param-value value))
+         (transformed
+          (ellm-tools--transform-tool-result
+           (and tool (llm-tool-name tool))
+           (list (cons (intern name) value)) nil serialized))
+         (text (ellm-llm--canonical-text
+                (ellm-tools--unescape-tool-body transformed))))
+    (ellm-llm--deserialize-tool-param text spec)))
+
+(defun ellm-llm--canonical-tool-result (result)
+  "Return RESULT as it will be reconstructed from its serialized turn."
+  (ellm-llm--canonical-text
+   (ellm-tools--unescape-tool-body
+    (ellm-tools--transform-tool-result
+     (llm-chat-prompt-tool-result-tool-name result) nil nil
+     (llm-chat-prompt-tool-result-result result)))))
+
+(defun ellm-llm--canonicalize-new-interactions
+    (prompt previous-interaction)
+  "Canonicalize interactions appended to PROMPT after PREVIOUS-INTERACTION.
+This makes an immediate tool-loop request byte-stable with the same history
+reconstructed from the conversation buffer later."
+  (dolist (interaction
+           (ellm-llm--interactions-after prompt previous-interaction))
+    (let ((content (llm-chat-prompt-interaction-content interaction)))
+      (cond
+       ((stringp content)
+        (setf (llm-chat-prompt-interaction-content interaction)
+              (ellm-llm--canonical-text content)))
+       ((and (consp content)
+             (cl-every #'llm-provider-utils-tool-use-p content))
+        (dolist (tool-use content)
+          (when-let* ((tool
+                       (cl-find
+                        (llm-provider-utils-tool-use-name tool-use)
+                        (llm-chat-prompt-tools prompt)
+                        :key #'llm-tool-name :test #'equal)))
+            (dolist (arg (llm-provider-utils-tool-use-args tool-use))
+              (setcdr arg
+                      (ellm-llm--canonical-tool-param
+                       tool (format "%s" (car arg)) (cdr arg)))))))))
+    (dolist (result
+             (llm-chat-prompt-interaction-tool-results interaction))
+      (setf (llm-chat-prompt-tool-result-result result)
+            (ellm-llm--canonical-tool-result result))))
+  prompt)
 
 (defun ellm-llm--provider-current-model (provider)
   "Return PROVIDER's `chat-model' slot when present and meaningful."
@@ -226,7 +337,13 @@ nil entries so each ID stays aligned with its corresponding prompt object."
 
 (defun ellm-llm--collect-tool-call-args (tool-call-turn following-turns base-prompt)
   "Return (ARGS . TURNS-CONSUMED) for TOOL-CALL-TURN."
-  (let ((params nil)
+  (let* ((tool-name
+          (alist-get "arg" (ellm-turn-attrs tool-call-turn)
+                     nil nil #'equal))
+         (tool
+          (cl-find tool-name (llm-chat-prompt-tools base-prompt)
+                   :key #'llm-tool-name :test #'equal))
+         (params nil)
         (consumed 0)
         (rest following-turns))
     (while (and rest
@@ -234,10 +351,14 @@ nil entries so each ID stays aligned with its corresponding prompt object."
                   (and (equal (ellm-turn-role nx) "tool-param")
                        (eql (ellm-turn-depth nx) 3))))
       (let* ((p (car rest))
-             (pname (alist-get "arg" (ellm-turn-attrs p) nil nil #'equal)))
-        (push (cons (intern (or pname "_"))
-                    (ellm-tools--unescape-tool-body
-                     (ellm-turn-content p)))
+             (pname (or (alist-get "arg" (ellm-turn-attrs p)
+                                   nil nil #'equal)
+                        "_"))
+             (text (ellm-tools--unescape-tool-body
+                    (ellm-turn-content p))))
+        (push (cons (intern pname)
+                    (ellm-llm--deserialize-tool-param
+                     text (ellm-llm--tool-arg-spec tool pname)))
               params))
       (setq rest (cdr rest))
       (cl-incf consumed))
@@ -246,16 +367,10 @@ nil entries so each ID stays aligned with its corresponding prompt object."
             (params (nreverse params))
             ((not (string-empty-p
                    (string-trim (ellm-turn-content tool-call-turn))))
-             (let* ((name (alist-get "arg"
-                                     (ellm-turn-attrs tool-call-turn)
-                                     nil nil #'equal))
-                    (tool (or (cl-find name
-                                       (llm-chat-prompt-tools base-prompt)
-                                       :key #'llm-tool-name
-                                       :test #'equal)
-                              (cl-find name ellm-tools-list
-                                       :key #'ellm-tool-name
-                                       :test #'equal)))
+             (let* ((tool
+                     (or tool
+                         (cl-find tool-name ellm-tools-list
+                                  :key #'ellm-tool-name :test #'equal)))
                     (arg-name (and tool
                                    (if (llm-tool-p tool)
                                        (and (llm-tool-args tool)
@@ -266,8 +381,11 @@ nil entries so each ID stays aligned with its corresponding prompt object."
                                                      :name))))))
                 (when arg-name
                   (list (cons (intern arg-name)
-                              (ellm-tools--unescape-tool-body
-                               (ellm-turn-content tool-call-turn)))))))
+                              (ellm-llm--deserialize-tool-param
+                               (ellm-tools--unescape-tool-body
+                                (ellm-turn-content tool-call-turn))
+                               (ellm-llm--tool-arg-spec
+                                tool arg-name)))))))
             (t nil))))
       (cons args consumed))))
 
@@ -295,7 +413,7 @@ nil entries so each ID stays aligned with its corresponding prompt object."
                 (setq rest (nthcdr (1+ consumed) rest))))
             (llm-provider-populate-tool-uses
              provider prompt (nreverse tool-uses))))
-          ((equal role "reasoning")
+         ((equal role "reasoning")
            (ellm-provider-restore-reasoning
             provider prompt
             (ellm--unescape-turn-delimiters (ellm-turn-content turn))
@@ -329,15 +447,24 @@ nil entries so each ID stays aligned with its corresponding prompt object."
                (string-empty-p (ellm-turn-content turn)))
            (setq rest (cdr rest)))
          (t
-          (setf (llm-chat-prompt-interactions prompt)
-                (append (llm-chat-prompt-interactions prompt)
-                         (list (make-llm-chat-prompt-interaction
-                                :role (intern role)
-                                :content
-                                (if (equal role "assistant")
-                                    (ellm--unescape-turn-delimiters
-                                     (ellm-turn-content turn))
-                                  (ellm-turn-content turn))))))
+          (let ((content
+                 (if (equal role "assistant")
+                     (ellm--unescape-turn-delimiters
+                      (ellm-turn-content turn))
+                   (ellm-turn-content turn)))
+                (previous
+                 (car (last (llm-chat-prompt-interactions prompt)))))
+            (if (and (equal role "assistant")
+                     previous
+                     (null (llm-chat-prompt-interaction-content previous))
+                     (llm-chat-prompt-interaction-multi-turn-plist previous))
+                (setf (llm-chat-prompt-interaction-content previous) content)
+              (setf (llm-chat-prompt-interactions prompt)
+                    (append
+                     (llm-chat-prompt-interactions prompt)
+                     (list (make-llm-chat-prompt-interaction
+                            :role (intern role)
+                            :content content))))))
           (setq rest (cdr rest)))))))
   prompt)
 
@@ -412,9 +539,10 @@ FRONTMATTER, when supplied, is the already parsed YAML frontmatter alist."
          (fm-system   (alist-get 'system fm))
          (has-system  (and turns
                            (equal (ellm-turn-role (car turns)) "system")))
-         (system      (if has-system
-                          (ellm-turn-content (car turns))
-                        fm-system))
+         (system      (ellm-llm--canonical-text
+                       (if has-system
+                           (ellm-turn-content (car turns))
+                         fm-system)))
          (reasoning   (alist-get 'reasoning fm))
          (tools       (ellm-llm--resolve-tools fm))
          (prompt      (make-llm-chat-prompt
@@ -668,6 +796,8 @@ is text-only, a fresh trailing `user' turn is appended."
                            tool-uses tool-results
                            (ellm-llm--new-prompt-tool-call-ids
                             prompt previous-interaction))
+                          (ellm-llm--canonicalize-new-interactions
+                           prompt previous-interaction)
                           (setq recurse t))
                       (ellm--insert-turn "user"))
                     ;; Fold reasoning after the following turn gives it a
@@ -692,6 +822,8 @@ is text-only, a fresh trailing `user' turn is appended."
                            (ellm-llm--render-tool-uses
                             (nth 0 recovery) (nth 1 recovery)
                             (nth 2 recovery))
+                           (ellm-llm--canonicalize-new-interactions
+                            prompt previous-interaction)
                            (when ellm-fold-reasoning-blocks
                              (ellm-llm--fold-reasoning-in-region start end))
                            (ellm--persistence-checkpoint)
