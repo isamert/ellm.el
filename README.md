@@ -185,6 +185,25 @@ OAuth credentials are stored in `~/.config/ellm/codex-auth.json` by default;
 customize `ellm-codex-auth-file` to change that location.  The credential file
 is mode `0600` and its directory is mode `0700`.
 
+On the first send, ellm creates an opaque `codex.prompt-cache-key` in the
+conversation's YAML frontmatter and reuses it for every Codex request in that
+conversation, including tool-loop requests.  No manual cache configuration is
+needed.  Assistant turn headers report `cached-tokens` when Codex reads a
+cached prefix and `cache-write-tokens` when the API reports tokens written to
+the cache.  A first request, a changed prompt prefix, or an ineligible short
+prompt can still report zero cached tokens.
+
+To disable cache reads and writes for a GPT-5.6 or later conversation, set:
+
+```yaml
+codex:
+  cache: false
+```
+
+This uses explicit cache mode without defining a breakpoint.  Older models do
+not support that API control, so ellm reports an error instead of silently
+leaving automatic caching enabled.
+
 Codex responses contain encrypted reasoning data that must be replayed exactly
 on later requests.  The readable reasoning summary remains in the conversation
 buffer, whose delimiter includes a content-addressed reference such as

@@ -122,6 +122,74 @@ not set those prompt fields."
    :auth-file (expand-file-name auth-file)
    :default-chat-non-standard-params default-chat-non-standard-params))
 
+(defun ellm-codex--new-prompt-cache-key ()
+  "Return a new opaque prompt cache key for the current conversation."
+  (concat
+   "ellm-"
+   (substring
+    (secure-hash
+     'sha256
+     (format "%S"
+             (list (current-time) (emacs-pid) (random) (buffer-name))))
+    0 32)))
+
+(defun ellm-codex--ensure-prompt-cache-key ()
+  "Return the current conversation's prompt cache key, creating it if needed."
+  (let ((key (ellm--frontmatter-value '(codex prompt-cache-key))))
+    (cond
+     ((null key)
+      (setq key (ellm-codex--new-prompt-cache-key))
+      (ellm--set-frontmatter-value '(codex prompt-cache-key) key)
+      key)
+     ((and (stringp key) (not (string-empty-p key)))
+      key)
+     (t
+      (user-error
+       "ellm Codex: codex.prompt-cache-key must be a non-empty string")))))
+
+(defun ellm-codex--prompt-cache-param-p (param)
+  "Return non-nil when PARAM configures Responses prompt caching."
+  (member (car-safe param)
+          '(prompt_cache_key :prompt_cache_key "prompt_cache_key"
+            prompt_cache_options :prompt_cache_options "prompt_cache_options")))
+
+(defun ellm-codex--cache-enabled-p (frontmatter)
+  "Return whether FRONTMATTER enables Codex prompt caching."
+  (if-let* ((cell
+             (ellm--alist-get-nested-cell frontmatter '(codex cache))))
+      (let ((value (cdr cell)))
+        (cond
+         ((eq value t) t)
+         ((memq value '(:false :json-false)) nil)
+         ((and (stringp value) (equal (downcase value) "true")) t)
+         ((and (stringp value) (equal (downcase value) "false")) nil)
+         (t
+          (user-error "ellm Codex: codex.cache must be true or false"))))
+    t))
+
+(defun ellm-codex--explicit-cache-mode-supported-p (provider)
+  "Return non-nil when PROVIDER supports explicit prompt cache mode."
+  (let ((model (llm-openai-chat-model provider)))
+    (and (stringp model)
+         (string-match "\\`gpt-\\([0-9]+\\(?:\\.[0-9]+\\)?\\)" model)
+         (version<= "5.6" (match-string 1 model)))))
+
+(defun ellm-codex--provider-with-cache-policy (provider enabled key)
+  "Return a copy of PROVIDER with prompt caching ENABLED using KEY.
+When ENABLED is nil, configure explicit mode without any breakpoints, which
+disables prompt cache reads and writes on supported models."
+  (let ((copy (copy-sequence provider)))
+    (setf
+     (llm-standard-chat-provider-default-chat-non-standard-params copy)
+     (append
+      (if enabled
+          (list (cons 'prompt_cache_key key))
+        '((prompt_cache_options . ((mode . "explicit")))))
+      (cl-remove-if
+       #'ellm-codex--prompt-cache-param-p
+       (llm-standard-chat-provider-default-chat-non-standard-params provider))))
+    copy))
+
 (cl-defstruct (ellm-codex-request
                (:constructor ellm-codex--make-request))
   "A cancellable Codex request which may replace its process after refresh."
@@ -730,7 +798,13 @@ The handler passes partial results to RECEIVER and errors to ERR-RECEIVER."
        . ,(lambda (event)
             (when-let* ((data (ellm-codex--event-json event))
                         (response (plist-get data :response)))
-              (let ((usage (plist-get response :usage)))
+              (let* ((usage (plist-get response :usage))
+                     (input-details
+                      (plist-get usage :input_tokens_details))
+                     (cached-tokens
+                      (plist-get input-details :cached_tokens))
+                     (cache-write-tokens
+                      (plist-get input-details :cache_write_tokens)))
                 (funcall
                  receiver
                  (append
@@ -738,7 +812,11 @@ The handler passes partial results to RECEIVER and errors to ERR-RECEIVER."
                   (when usage
                     (list :input-tokens (plist-get usage :input_tokens)
                           :output-tokens
-                          (plist-get usage :output_tokens)))))))))
+                          (plist-get usage :output_tokens)))
+                  (when (numberp cached-tokens)
+                    (list :cached-tokens cached-tokens))
+                  (when (numberp cache-write-tokens)
+                    (list :cache-write-tokens cache-write-tokens))))))))
       (response.output_text.delta
        . ,(lambda (event)
             (when-let* ((delta (plist-get (ellm-codex--event-json event)
@@ -966,8 +1044,49 @@ SSE responses whose server omits the Content-Type header."
 (cl-defmethod ellm-provider-config-effect
   ((_provider ellm-codex-provider) path _buffer)
   "Return when Codex configuration PATH takes effect."
-  (when (member path '((system) (model) (reasoning) (tools) (cwd)))
+  (when (member path '((system) (model) (reasoning) (tools) (cwd)
+                       (codex cache)))
     'next-send))
+
+(cl-defmethod ellm-provider-frontmatter-entries
+  ((_provider ellm-codex-provider) path _buffer)
+  "Return Codex-specific persisted metadata entries under PATH."
+  (when (null path)
+    '(("codex" :ann "metadata"
+       :desc "Codex request settings and metadata."
+       :children
+       (("cache" :ann "boolean"
+         :desc "Enable prompt cache reads and writes for this conversation."
+         :type boolean :editable t :default t
+         :values
+         (("true" :desc "Enable Codex prompt caching.")
+          ("false" :desc "Disable caching on GPT-5.6 and later models.")))
+        ("prompt-cache-key" :ann "string"
+         :desc "Stable per-conversation key used for prompt cache affinity."))))))
+
+(cl-defmethod ellm-backend-send
+  ((provider ellm-codex-provider) _frontmatter buffer)
+  "Send BUFFER through Codex with a stable per-conversation cache key."
+  (unless (buffer-live-p buffer)
+    (user-error "ellm Codex: buffer is not live"))
+  (with-current-buffer buffer
+    (let* ((frontmatter (ellm--parse-frontmatter))
+           (cache-enabled (ellm-codex--cache-enabled-p frontmatter)))
+      (unless (or cache-enabled
+                  (ellm-codex--explicit-cache-mode-supported-p provider))
+        (user-error
+         "ellm Codex: model %s cannot disable automatic prompt caching"
+         (llm-openai-chat-model provider)))
+      (let* ((key (and cache-enabled
+                       (ellm-codex--ensure-prompt-cache-key)))
+             (configured
+              (ellm-codex--provider-with-cache-policy
+               provider cache-enabled key)))
+        (when cache-enabled
+          ;; Save a newly generated key before starting the asynchronous request.
+          (ellm--persistence-checkpoint))
+        (ellm-llm--backend-send
+         configured (ellm--parse-frontmatter) buffer)))))
 
 (cl-defmethod llm-chat-streaming
   ((provider ellm-codex-provider) prompt partial-callback response-callback

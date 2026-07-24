@@ -44,6 +44,16 @@
   "Active request handle for the `llm.el' backend."
   raw buffer generation cancelled timer (attempt 0) (retries 0))
 
+(defvar-local ellm-llm--request-usage nil
+  "Accumulated token usage for the current top-level `llm.el' request.")
+
+(defconst ellm-llm--turn-usage-attrs
+  '((:input-tokens . "input-tokens")
+    (:output-tokens . "output-tokens")
+    (:cached-tokens . "cached-tokens")
+    (:cache-write-tokens . "cache-write-tokens"))
+  "Mapping from `llm.el' usage keys to assistant turn attributes.")
+
 ;;;; Interface implementation
 
 (cl-defmethod ellm-backend-send ((provider llm-standard-chat-provider)
@@ -530,6 +540,35 @@ CALL-IDS is an optional cons of provider tool-use and tool-result ID lists."
           copy)
       (error provider))))
 
+(defun ellm-llm--merge-leg-usage (usage result)
+  "Return per-leg USAGE updated with numeric usage values from RESULT.
+Streaming multi-output results are cumulative, so values from RESULT replace
+earlier observations from the same request leg."
+  (dolist (spec ellm-llm--turn-usage-attrs usage)
+    (let* ((key (car spec))
+           (value (plist-get result key)))
+      (when (numberp value)
+        (setq usage (plist-put usage key value))))))
+
+(defun ellm-llm--record-turn-usage (usage)
+  "Add one request leg's USAGE to the current assistant turn header."
+  (let (attrs)
+    (dolist (spec ellm-llm--turn-usage-attrs)
+      (let* ((key (car spec))
+             (value (plist-get usage key)))
+        (when (numberp value)
+          (let ((total (+ value
+                          (or (plist-get ellm-llm--request-usage key) 0))))
+            (setq ellm-llm--request-usage
+                  (plist-put ellm-llm--request-usage key total))
+            (push (cons (cdr spec) (number-to-string total)) attrs)))))
+    (when (and attrs
+               (markerp ellm--request-assistant-marker)
+               (eq (marker-buffer ellm--request-assistant-marker)
+                   (current-buffer)))
+      (ellm--set-turn-header-attrs
+       ellm--request-assistant-marker (nreverse attrs)))))
+
 (cl-defun ellm-llm--parse-buffer-as-chat
     (provider &optional (frontmatter (ellm--parse-frontmatter)))
   "Build an `llm-chat-prompt' from the current buffer for PROVIDER.
@@ -770,11 +809,14 @@ is text-only, a fresh trailing `user' turn is appended."
            (start (copy-marker (point-max) nil))
            (end   (copy-marker (point-max) t))
            reasoning-state-id
+           leg-usage
            (request
             (ellm-llm--make-request
              :buffer buf :generation ellm--request-generation))
            (partial-render
             (lambda (result)
+              (setq leg-usage
+                    (ellm-llm--merge-leg-usage leg-usage result))
               (when-let* ((state
                            (ellm-provider-reasoning-state provider result)))
                 (setq reasoning-state-id
@@ -787,6 +829,7 @@ is text-only, a fresh trailing `user' turn is appended."
               (funcall partial-render result)
               (with-current-buffer buf
                 (ellm--preserve-user-position
+                  (ellm-llm--record-turn-usage leg-usage)
                   (let ((recurse nil))
                     (ellm--set-active-request nil)
                     (if-let* ((tool-uses (plist-get result :tool-uses))
@@ -893,6 +936,7 @@ when they later re-enter the buffer."
 (defun ellm-llm--backend-send (provider frontmatter buffer)
   "Send BUFFER through a normal `llm.el' PROVIDER."
   (with-current-buffer buffer
+    (setq ellm-llm--request-usage nil)
     (ellm-llm--apply-cwd frontmatter)
     (let ((prompt (ellm-llm--parse-buffer-as-chat provider frontmatter)))
       (ellm-llm--send-once provider prompt buffer))))
