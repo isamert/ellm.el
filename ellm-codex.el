@@ -1064,9 +1064,9 @@ SSE responses whose server omits the Content-Type header."
         ("prompt-cache-key" :ann "string"
          :desc "Stable per-conversation key used for prompt cache affinity."))))))
 
-(cl-defmethod ellm-backend-send
+(cl-defmethod ellm-backend-create
   ((provider ellm-codex-provider) _frontmatter buffer)
-  "Send BUFFER through Codex with a stable per-conversation cache key."
+  "Create a Codex driver with a stable per-conversation cache key."
   (unless (buffer-live-p buffer)
     (user-error "ellm Codex: buffer is not live"))
   (with-current-buffer buffer
@@ -1085,7 +1085,7 @@ SSE responses whose server omits the Content-Type header."
         (when cache-enabled
           ;; Save a newly generated key before starting the asynchronous request.
           (ellm--persistence-checkpoint))
-        (ellm-llm--backend-send
+        (ellm-llm--backend-create
          configured (ellm--parse-frontmatter) buffer)))))
 
 (cl-defmethod llm-chat-streaming

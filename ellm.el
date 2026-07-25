@@ -2769,12 +2769,100 @@ accepted."
                                 (ellm--plistish-get (cdr server) 'category))
                               ellm-mcp-servers))))))
 
-;;;;; Frontmatter completion
+;;;;; Request and display state
+
+(cl-defstruct (ellm-buffer-state (:constructor ellm--make-buffer-state))
+  "Buffer state used by `ellm-mode' displays."
+  (todos nil
+         :type list
+         :documentation "Normalized todo entries displayed for the buffer.")
+  (context-size nil
+                :type (or null integer)
+                :documentation "Maximum context window size in tokens.")
+  (context-usage nil
+                 :type (or null integer)
+                 :documentation "Number of context-window tokens currently used.")
+  (cost-amount nil
+               :type (or null number)
+               :documentation "Accumulated monetary cost reported by the backend.")
+  (cost-currency nil
+                 :type (or null string)
+                 :documentation "Currency code associated with `cost-amount'."))
+
+(defvar-local ellm-buffer-state (ellm--make-buffer-state)
+  "State used by the current ellm buffer's displays.")
+
+(cl-defstruct (ellm-request (:constructor ellm--make-request))
+  "Core-owned state for one logical conversation request.
+BACKEND is an opaque driver created by `ellm-backend-create'.  Backends may
+keep protocol-specific mutable state there, but lifecycle state lives here."
+  (buffer nil
+          :type buffer
+          :documentation "Conversation buffer owned by this request.")
+  (provider nil
+            :type t
+            :documentation "Provider selected when the request was created.")
+  (frontmatter nil
+               :type list
+               :documentation "Parsed frontmatter snapshot used for the request.")
+  (backend nil
+           :type t
+           :documentation "Opaque protocol driver created by the backend.")
+  (transport nil
+             :type t
+             :documentation "Current backend transport handle, or nil.")
+  (generation 0
+              :type integer
+              :documentation "Buffer request generation used to reject stale events.")
+  (attempt 0
+           :type integer
+           :documentation "Monotonic backend-start attempt identifier.")
+  (retries 0
+           :type integer
+           :documentation "Retry count for the current replay-safe operation.")
+  (retry-timer nil
+               :type (or null timer)
+               :documentation "Timer waiting to start a retry, or nil.")
+  (state 'starting
+         :type symbol
+         :documentation "Current core lifecycle state.")
+  (streams nil
+           :type (or null hash-table)
+           :documentation "Map of cumulative stream IDs to rendered regions.")
+  (last-stream-key nil
+                   :type (or null cons)
+                   :documentation "Channel and message ID of the last append stream.")
+  (usage nil
+         :type list
+         :documentation "Accumulated normalized token-usage property list."))
+
+(cl-defstruct (ellm-stream-region (:constructor ellm--make-stream-region))
+  "Marker-backed rendered region for one cumulative stream."
+  (start nil
+         :type marker
+         :documentation "Marker at the beginning of the rendered stream.")
+  (end nil
+       :type marker
+       :documentation "Insertion-type marker at the end of the rendered stream."))
+
+(defconst ellm--request-terminal-states '(completed failed cancelled)
+  "Terminal values of `ellm-request-state'.")
+
+(defconst ellm-backend-event-types
+  '(stream usage tool-call tool-update tool-result extension
+    operation continue complete failure)
+  "Event types accepted by the core request reducer.
+
+`stream' uses `:mode' `append' with `:channel', `:text', and optional `:id',
+or `snapshot' with an ordered `:channels' alist and stable `:id'.  `usage'
+accepts normalized token, context, and cost fields.  Tool and `extension'
+events are rendered through `ellm-backend-render-event'.  `operation' resets
+the retry budget after a backend phase succeeds; `continue' starts the next
+tool-loop leg.  `complete' and `failure' are terminal unless a failure is
+explicitly marked `:retryable' and the core retry budget remains.")
 
 (defvar-local ellm--active-request nil
-  "Active backend request handle for this buffer, or nil.
-Set by `ellm-send' to the object returned by `ellm-backend-send'.
-Cleared on completion, error, or cancellation.")
+  "Core `ellm-request' currently owning this buffer, or nil.")
 
 (defvar-local ellm--request-generation 0
   "Monotonic identity of the current request lifecycle.")
@@ -2819,17 +2907,6 @@ streaming backend insertions.  Nil REQUEST restores the previous
             ellm--request-read-only-state nil
             ellm--request-read-only-state-saved-p nil)))
   request)
-
-(defun ellm--request-current-p (buffer generation)
-  "Return non-nil when GENERATION is still active in BUFFER."
-  (and (buffer-live-p buffer)
-       (with-current-buffer buffer
-         (and ellm--active-request
-              (= generation ellm--request-generation)))))
-
-(defun ellm--invalidate-current-request ()
-  "Invalidate callbacks belonging to the current request."
-  (cl-incf ellm--request-generation))
 
 (defun ellm--ensure-next-user-turn ()
   "Append an empty user turn unless the final turn is already a user turn."
@@ -2878,6 +2955,315 @@ Return non-nil when a live top-level assistant header was updated."
     (ellm--flush-pending-fold)
     (setq ellm--request-finished-notified-p t)
     (run-hooks 'ellm-request-finished-hook)))
+
+(defun ellm--request-terminal-p (request)
+  "Return non-nil when REQUEST has reached a terminal state."
+  (memq (ellm-request-state request) ellm--request-terminal-states))
+
+(defun ellm--request-event-current-p (request attempt)
+  "Return non-nil when an event for REQUEST ATTEMPT may mutate its buffer."
+  (and (ellm-request-p request)
+       (not (ellm--request-terminal-p request))
+       (= attempt (ellm-request-attempt request))
+       (let ((buffer (ellm-request-buffer request)))
+         (and (buffer-live-p buffer)
+              (with-current-buffer buffer
+                (and (eq ellm--active-request request)
+                     (= (ellm-request-generation request)
+                        ellm--request-generation)))))))
+
+(defun ellm--request-cancel-retry-timer (request)
+  "Cancel REQUEST's pending retry timer."
+  (when-let* ((timer (ellm-request-retry-timer request)))
+    (cancel-timer timer)
+    (setf (ellm-request-retry-timer request) nil)))
+
+(defun ellm--request-release-streams (request)
+  "Detach all rendered stream markers owned by REQUEST."
+  (when-let* ((streams (ellm-request-streams request)))
+    (maphash
+     (lambda (_id region)
+       (set-marker (ellm-stream-region-start region) nil)
+       (set-marker (ellm-stream-region-end region) nil))
+     streams)
+    (setf (ellm-request-streams request) nil)))
+
+(defun ellm--request-stream-region (request id)
+  "Return REQUEST's stream region named ID, creating it at buffer end."
+  (let* ((streams (or (ellm-request-streams request)
+                      (setf (ellm-request-streams request)
+                            (make-hash-table :test #'equal))))
+         (region (gethash id streams)))
+    (or region
+        (let ((start (copy-marker (point-max) nil))
+              (end (copy-marker (point-max) t)))
+          (setq region (ellm--make-stream-region :start start :end end))
+          (puthash id region streams)
+          region))))
+
+(defun ellm--request-snapshot-string (event)
+  "Return serialized continuation turns for snapshot EVENT."
+  (let ((channels (plist-get event :channels))
+        (reasoning-state (plist-get event :reasoning-state)))
+    (mapconcat
+     (lambda (entry)
+       (let* ((channel (car entry))
+              (role (if (symbolp channel) (symbol-name channel) channel))
+              (content (cdr entry)))
+         (when (or (and (stringp content)
+                        (not (string-empty-p content)))
+                   (and (equal role "reasoning") reasoning-state))
+           (concat
+            (if (and (equal role "reasoning") reasoning-state)
+                (ellm--get-turn "reasoning" :continuation t
+                                :reasoning-state reasoning-state)
+              (ellm--get-turn role :continuation t))
+            "\n"
+            (ellm--ensure-newline
+             (ellm--escape-turn-delimiters (or content "")))))))
+     channels "")))
+
+(defun ellm--request-render-snapshot (request event)
+  "Render cumulative stream snapshot EVENT for REQUEST."
+  (let* ((id (or (plist-get event :id) (ellm-request-attempt request)))
+         (region (ellm--request-stream-region request id))
+         (start (ellm-stream-region-start region))
+         (end (ellm-stream-region-end region))
+         (new-text (ellm--request-snapshot-string event))
+         (current-text (buffer-substring-no-properties start end))
+         (prefix-length
+          (length (fill-common-string-prefix current-text new-text))))
+    (goto-char (+ start prefix-length))
+    (delete-region (point) end)
+    (insert (substring new-text prefix-length))
+    (when (and (not (string-empty-p new-text))
+               (string-match-p
+                (concat "^"
+                        (ellm--turn-header-prefix-regexp ellm-turn-header-2))
+                new-text))
+      (ellm--flush-pending-fold 2))
+    (when (and ellm-fold-reasoning-blocks
+               (alist-get 'reasoning (plist-get event :channels))
+               (alist-get 'assistant (plist-get event :channels)))
+      (save-excursion
+        (goto-char start)
+        (when (re-search-forward
+               (concat "^"
+                       (ellm--turn-header-prefix-regexp ellm-turn-header-2)
+                       "reasoning\\b")
+               end t)
+          (ellm--fold-subtree-at (match-beginning 0)))))))
+
+(defun ellm--request-last-turn-role ()
+  "Return the final turn role without parsing the whole buffer."
+  (save-excursion
+    (save-match-data
+      (goto-char (point-max))
+      (when (re-search-backward ellm-turn-regexp nil t)
+        (match-string-no-properties 2)))))
+
+(defun ellm--request-last-turn-body-empty-p ()
+  "Return non-nil when the final turn body contains only whitespace."
+  (save-excursion
+    (save-match-data
+      (goto-char (point-max))
+      (when (re-search-backward ellm-turn-regexp nil t)
+        (goto-char (min (1+ (line-end-position)) (point-max)))
+        (skip-chars-forward " \t\n\r")
+        (eobp)))))
+
+(defun ellm--request-render-chunk (request event)
+  "Append normalized streaming chunk EVENT for REQUEST."
+  (let* ((channel (plist-get event :channel))
+         (role (if (symbolp channel) (symbol-name channel) channel))
+         (message-id (plist-get event :id))
+         (content (plist-get event :text))
+         (key (cons role message-id))
+         (last-key (ellm-request-last-stream-key request)))
+    (when (and (stringp content) (not (string-empty-p content)))
+      (goto-char (point-max))
+      (unless
+          (and (equal (ellm--request-last-turn-role) role)
+               (or (not message-id)
+                   (if last-key
+                       (equal last-key key)
+                     (ellm--request-last-turn-body-empty-p))))
+        (apply
+         #'ellm--insert-turn role
+         (append
+          (when (and (not (equal role "user"))
+                     (not (and (equal role "assistant")
+                               (equal (ellm--request-last-turn-role) "user"))))
+            (list :continuation t))
+          (when message-id (list :message-id message-id)))))
+      (setf (ellm-request-last-stream-key request) key)
+      (if (not (member role '("assistant" "reasoning")))
+          (insert content)
+        (let ((beg (copy-marker (point) nil))
+              (escaped
+               (ellm--escape-turn-delimiters-for-insertion content (bolp))))
+          (insert escaped)
+          (let ((end (copy-marker (point) t)))
+            (ellm--escape-turn-delimiters-in-region beg end)
+            (set-marker end nil))
+          (set-marker beg nil))))))
+
+(defun ellm--request-merge-usage (request event)
+  "Merge normalized usage EVENT into REQUEST and update buffer status."
+  (let ((token-keys '(:input-tokens :output-tokens :cached-tokens
+                      :cache-write-tokens))
+        (usage (ellm-request-usage request)))
+    (dolist (key token-keys)
+      (when-let* ((value (plist-get event key)))
+        (setq usage
+              (plist-put usage key (+ (or (plist-get usage key) 0) value)))))
+    (setf (ellm-request-usage request) usage)
+    (when (plist-member event :context-usage)
+      (setf (ellm-buffer-state-context-usage ellm-buffer-state)
+            (plist-get event :context-usage)))
+    (when (plist-member event :context-size)
+      (setf (ellm-buffer-state-context-size ellm-buffer-state)
+            (plist-get event :context-size)))
+    (when (plist-member event :cost-amount)
+      (setf (ellm-buffer-state-cost-amount ellm-buffer-state)
+            (plist-get event :cost-amount)
+            (ellm-buffer-state-cost-currency ellm-buffer-state)
+            (plist-get event :cost-currency)))
+    (force-mode-line-update)))
+
+(defun ellm--request-record-usage (request)
+  "Persist REQUEST's accumulated token usage on its assistant turn."
+  (when-let* ((usage (ellm-request-usage request))
+              (marker ellm--request-assistant-marker)
+              ((marker-buffer marker)))
+    (let ((mapping '((:input-tokens . "input-tokens")
+                     (:output-tokens . "output-tokens")
+                     (:cached-tokens . "cached-tokens")
+                     (:cache-write-tokens . "cache-write-tokens")))
+          attrs)
+      (dolist (entry mapping)
+        (when-let* ((value (plist-get usage (car entry))))
+          (push (cons (cdr entry) (number-to-string value)) attrs)))
+      (when attrs
+        (ellm--set-turn-header-attrs marker (nreverse attrs))))))
+
+(defun ellm--request-terminal-transition (request state &optional message-text)
+  "Move REQUEST to terminal STATE and perform core-owned finalization.
+MESSAGE-TEXT is reported after cleanup when non-nil."
+  (unless (ellm--request-terminal-p request)
+    (setf (ellm-request-state request) state)
+    (ellm--request-cancel-retry-timer request)
+    (ignore-errors
+      (ellm-backend-finish (ellm-request-backend request) state))
+    (when-let* ((buffer (ellm-request-buffer request))
+                ((buffer-live-p buffer)))
+      (with-current-buffer buffer
+        (when (eq ellm--active-request request)
+          (ellm--preserve-user-position
+            (ellm--request-record-usage request)
+            (ellm--set-active-request nil)
+            (ellm--ensure-next-user-turn)
+            (ellm--persistence-checkpoint)
+            (ellm--notify-request-finished)))))
+    (ellm--request-release-streams request)
+    (setf (ellm-request-transport request) nil)
+    (when message-text
+      (message "ellm: %s" message-text))))
+
+(defun ellm--request-schedule-retry (request message-text)
+  "Put REQUEST in retry wait after MESSAGE-TEXT."
+  (cl-incf (ellm-request-retries request))
+  ;; Invalidate the failed attempt immediately; it may still have queued
+  ;; transport callbacks while the retry timer is waiting.
+  (cl-incf (ellm-request-attempt request))
+  (setf (ellm-request-state request) 'retry-wait)
+  (ellm--request-cancel-retry-timer request)
+  (setf
+   (ellm-request-retry-timer request)
+   (run-at-time
+    ellm-request-retry-delay nil
+    (lambda ()
+      (setf (ellm-request-retry-timer request) nil)
+      (when-let* ((buffer (ellm-request-buffer request))
+                  ((buffer-live-p buffer)))
+        (with-current-buffer buffer
+          (when (eq ellm--active-request request)
+            (ellm--request-start-backend request)))))))
+  (when (and message-text (> ellm-request-retry-delay 0))
+    (message "ellm: %s; retrying" message-text)))
+
+(defun ellm--request-handle-event (request attempt event)
+  "Reduce backend EVENT for REQUEST ATTEMPT."
+  (when (ellm--request-event-current-p request attempt)
+    (with-current-buffer (ellm-request-buffer request)
+      (condition-case err
+          (ellm--preserve-user-position
+            (pcase (plist-get event :type)
+          ('stream
+           (setf (ellm-request-state request) 'streaming)
+           (pcase (plist-get event :mode)
+             ('snapshot (ellm--request-render-snapshot request event))
+             ('append (ellm--request-render-chunk request event))
+             (_ (error "ellm: invalid stream event mode: %S"
+                       (plist-get event :mode)))))
+          ('usage
+           (ellm--request-merge-usage request event))
+          ((or 'tool-call 'tool-update 'tool-result)
+           (setf (ellm-request-state request) 'tool-loop
+                 (ellm-request-last-stream-key request) nil)
+           (ellm-backend-render-event
+            (ellm-request-backend request) event request))
+          ('extension
+           (ellm-backend-render-event
+            (ellm-request-backend request) event request)
+           (when (plist-get event :checkpoint)
+             (ellm--persistence-checkpoint)))
+          ('operation
+           (setf (ellm-request-retries request) 0
+                 (ellm-request-state request) 'starting))
+          ('continue
+           (setf (ellm-request-retries request) 0
+                 (ellm-request-state request) 'starting
+                 (ellm-request-last-stream-key request) nil)
+           (ellm--persistence-checkpoint)
+           (ellm--request-start-backend request))
+          ('complete
+           (ellm--request-terminal-transition request 'completed))
+          ('failure
+           (let ((text (or (plist-get event :message) "request failed")))
+             (if (and (plist-get event :retryable)
+                      (< (ellm-request-retries request)
+                         ellm-request-retries))
+                 (ellm--request-schedule-retry request text)
+               (ellm--request-terminal-transition request 'failed text))))
+              (_
+               (error "ellm: unknown backend event: %S" event))))
+        (error
+         (ellm--request-terminal-transition
+          request 'failed (error-message-string err)))))))
+
+(defun ellm--request-start-backend (request)
+  "Start or resume REQUEST's backend driver."
+  (when (and (ellm-request-p request)
+             (not (ellm--request-terminal-p request)))
+    (let* ((attempt (cl-incf (ellm-request-attempt request)))
+           (emit (lambda (event)
+                   (ellm--request-handle-event request attempt event))))
+      (setf (ellm-request-state request) 'starting
+            (ellm-request-transport request) nil)
+      (condition-case err
+          (let ((transport
+                 (ellm-backend-start (ellm-request-backend request) emit)))
+            (when (ellm--request-event-current-p request attempt)
+              (setf (ellm-request-transport request) transport)))
+        (error
+         (funcall emit
+                  `(:type failure
+                    :message ,(error-message-string err)
+                    :condition ,err))))))
+  request)
+
+;;;;; Frontmatter completion
 
 (defconst ellm--default-reasoning-candidates
   '(("light" :desc "Prefer a small reasoning budget.")
@@ -4017,9 +4403,6 @@ one, then narrows to its outline subtree."
 
 ;;;; Sending
 
-(defconst ellm--request-starting :ellm-request-starting
-  "Internal sentinel used while `ellm-send' starts a backend request.")
-
 (defun ellm--ensure-trailing-user-turn ()
   "Signal `user-error' unless the buffer ends with a `user' turn."
   (let* ((turns (ellm--parse-turns))
@@ -4034,8 +4417,8 @@ one, then narrows to its outline subtree."
 The buffer must end in a `user' turn.  An `assistant' turn is appended
 and the streamed response is inserted into it as it arrives.
 
-Backend implementations decide how provider requests, tool calls, and
-results are handled.
+Backend drivers emit events; the core request state machine owns all
+lifecycle transitions and buffer finalization.
 
 Errors during streaming are signalled normally."
   (interactive)
@@ -4044,7 +4427,7 @@ Errors during streaming are signalled normally."
     (user-error "ellm: a request is already in flight; M-x ellm-cancel"))
   (ellm--ensure-trailing-user-turn)
   (setq ellm--request-finished-notified-p nil)
-  (ellm--invalidate-current-request)
+  (cl-incf ellm--request-generation)
   (let* ((fm       (ellm--parse-frontmatter))
          (provider (ellm--resolve-provider fm))
          (buf      (current-buffer))
@@ -4064,24 +4447,19 @@ Errors during streaming are signalled normally."
             (let ((marker (point-marker)))
               (set-marker-insertion-type marker nil)
               marker)))
-    (ellm--set-active-request ellm--request-starting)
+    (setq request
+          (ellm--make-request
+           :buffer buf :provider provider :frontmatter fm
+           :generation ellm--request-generation))
+    (ellm--set-active-request request)
     (condition-case err
         (progn
-          (setq request (ellm-backend-send provider fm buf))
-          ;; Some backends can complete synchronously while `ellm-backend-send' is
-          ;; still on the stack.  In that case completion already cleared
-          ;; `ellm--active-request'; do not resurrect a stale request handle here.
-          (when (eq ellm--active-request ellm--request-starting)
-            (ellm--set-active-request request))
-          (unless ellm--active-request
-            (ellm--persistence-checkpoint)
-            (ellm--notify-request-finished)))
+          (setf (ellm-request-backend request)
+                (ellm-backend-create provider fm buf))
+          (ellm--request-start-backend request))
       (error
-       (ellm--invalidate-current-request)
-       (ellm--set-active-request nil)
-       (ellm--ensure-next-user-turn)
-       (ellm--persistence-checkpoint)
-       (ellm--notify-request-finished)
+       (ellm--request-terminal-transition
+        request 'failed (error-message-string err))
        (signal (car err) (cdr err))))))
 
 (defun ellm-cancel (&optional quiet)
@@ -4094,13 +4472,12 @@ If QUIET is non-nil, then do not print any messages."
     (let ((request ellm--active-request))
       ;; Invalidate first: a synchronous cancellation callback must already be
       ;; stale before the backend is asked to stop its transport.
-      (ellm--invalidate-current-request)
+      (cl-incf (ellm-request-attempt request))
+      (setf (ellm-request-state request) 'cancelling)
+      (ellm--request-cancel-retry-timer request)
       (unwind-protect
-          (ellm-backend-cancel request)
-        (ellm--set-active-request nil)
-        (ellm--ensure-next-user-turn)
-        (ellm--persistence-checkpoint)
-        (ellm--notify-request-finished)))
+          (ellm-backend-cancel (ellm-request-backend request))
+        (ellm--request-terminal-transition request 'cancelled)))
     (unless quiet
       (message "ellm: request cancelled"))))
 
@@ -4405,6 +4782,8 @@ When PROMPT-TO-CLEAR is non-nil, ask whether to clear the conversation while
 keeping frontmatter and an empty user prompt."
   (interactive (list t))
   (ellm--ensure-no-config-in-flight)
+  (when ellm--active-request
+    (ellm-cancel t))
   (let* ((fm (ellm--command-frontmatter))
          (provider (ellm--command-provider fm)))
     (ellm-provider-close-session provider fm (current-buffer))
@@ -4615,28 +4994,37 @@ When SELECT is non-nil, implementations may prompt for the session to delete.")
   "Default session delete implementation for providers without sessions."
   (user-error "ellm: provider does not support session delete"))
 
-(cl-defgeneric ellm-backend-send (provider frontmatter buffer)
-  "Send BUFFER's trailing user turn through PROVIDER.
-FRONTMATTER is the parsed YAML frontmatter alist for BUFFER.
-Implementations should stream into the assistant turn already appended by
-`ellm-send' and return a backend-specific request handle suitable for
-`ellm-backend-cancel'.")
+(cl-defgeneric ellm-backend-create (provider frontmatter buffer)
+  "Create a backend driver for PROVIDER, FRONTMATTER, and BUFFER.
+The returned object stores protocol state but must not own the request
+lifecycle or finalize BUFFER.")
 
-(cl-defgeneric ellm-backend-cancel (request)
-  "Cancel backend-specific REQUEST created by `ellm-backend-send'.")
+(cl-defgeneric ellm-backend-start (backend emit)
+  "Start or resume BACKEND and send normalized events to EMIT.
+Return the current cancellable transport handle.  Synchronous event delivery,
+including terminal delivery before this method returns, is supported.  BACKEND
+must retain enough phase state for this method to restart the current operation
+when the core retries it; only failures safe to replay may set `:retryable'.")
+
+(cl-defgeneric ellm-backend-cancel (backend)
+  "Cancel BACKEND's current transport without finalizing its buffer.")
+
+(cl-defgeneric ellm-backend-render-event (backend event request)
+  "Render BACKEND-specific normalized EVENT for core REQUEST.")
+
+(cl-defmethod ellm-backend-render-event (_backend _event _request)
+  "Ignore extension events for backends without a renderer."
+  nil)
+
+(cl-defgeneric ellm-backend-finish (backend outcome)
+  "Release BACKEND protocol state after terminal OUTCOME.
+This hook must not perform core lifecycle or conversation-buffer finalization.")
+
+(cl-defmethod ellm-backend-finish (_backend _outcome)
+  "Default backend terminal cleanup."
+  nil)
 
 ;;;; Major mode
-
-;;;;; State
-
-(cl-defstruct (ellm-buffer-state (:constructor ellm--make-buffer-state))
-  "Buffer state used by `ellm-mode' displays."
-  todos
-  context-size context-usage
-  cost-amount cost-currency)
-
-(defvar-local ellm-buffer-state (ellm--make-buffer-state)
-  "State used by the current ellm buffer's displays.")
 
 ;;;;; Todos
 

@@ -70,10 +70,58 @@ provide request defaults that may be overridden by `kagi:' frontmatter."
   thinking-preset)
 
 (cl-defstruct (ellm-kagi-request (:constructor ellm-kagi--make-request))
-  "Active Kagi request and cumulative stream state."
-  provider buffer process conversation-id branch-id stream-url cancel-url
-  start end wire-input body-started sse-input completed cancelled cancel-sent
-  phase retry-timer)
+  "Protocol driver and cumulative stream state for a Kagi request."
+  (provider nil
+            :type ellm-kagi-provider
+            :documentation "Kagi provider configuration serving the request.")
+  (buffer nil
+          :type buffer
+          :documentation "Conversation buffer associated with the request.")
+  (process nil
+           :type (or null process)
+           :documentation "Current cancellable HTTP transport process, or nil.")
+  (conversation-id nil
+                   :type (or null string)
+                   :documentation "Remote Kagi conversation identifier.")
+  (branch-id nil
+             :type (or null string)
+             :documentation "Remote branch receiving and streaming the response.")
+  (stream-url nil
+              :type (or null string)
+              :documentation "Relative endpoint used to consume response events.")
+  (cancel-url nil
+              :type (or null string)
+              :documentation "Relative endpoint used to cancel remote generation.")
+  (wire-input nil
+              :type (or null string)
+              :documentation "Unconsumed bytes while parsing HTTP response headers.")
+  (body-started nil
+                :type boolean
+                :documentation "Non-nil after the HTTP response body has begun.")
+  (sse-input nil
+             :type (or null string)
+             :documentation "Incomplete Server-Sent Events input carried between reads.")
+  (completed nil
+             :type boolean
+             :documentation "Non-nil after the protocol driver has terminated.")
+  (cancelled nil
+             :type boolean
+             :documentation "Non-nil after local cancellation was requested.")
+  (cancel-sent nil
+               :type boolean
+               :documentation "Non-nil while remote cancellation has been sent.")
+  (phase nil
+         :type (member nil creating posting streaming done)
+         :documentation "Replay phase currently owned by the protocol driver.")
+  (payload nil
+           :type list
+           :documentation "JSON-ready message payload replayed by safe retries.")
+  (emit nil
+        :type (or null function)
+        :documentation "Core event sink, or nil after request finalization.")
+  (serial 0
+          :type integer
+          :documentation "Generation counter used to reject stale HTTP callbacks."))
 
 ;;;; Backend interface
 
@@ -144,12 +192,14 @@ provide request defaults that may be overridden by `kagi:' frontmatter."
   "Cancel BUFFER's active request without deleting its Kagi conversation."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
-      (when (ellm-kagi-request-p ellm--active-request)
+      (when (and (ellm-request-p ellm--active-request)
+                 (ellm-kagi-request-p
+                  (ellm-request-backend ellm--active-request)))
         (ellm-cancel t)))))
 
-(cl-defmethod ellm-backend-send
+(cl-defmethod ellm-backend-create
   ((provider ellm-kagi-provider) frontmatter buffer)
-  "Send BUFFER's last user turn through Kagi PROVIDER using FRONTMATTER."
+  "Create a Kagi driver for BUFFER using FRONTMATTER."
   (unless (buffer-live-p buffer)
     (user-error "Ellm Kagi: buffer is not live"))
   (let ((model (ellm-kagi-provider-model provider)))
@@ -163,29 +213,68 @@ provide request defaults that may be overridden by `kagi:' frontmatter."
              :conversation-id
              (ellm--alist-get-nested frontmatter '(kagi conversation-id))
              :branch-id
-             (ellm--alist-get-nested frontmatter '(kagi branch-id))
-             :start (copy-marker (point-max) nil)
-             :end (copy-marker (point-max) t)))
+             (ellm--alist-get-nested frontmatter '(kagi branch-id))))
            (message (ellm-kagi--last-user-content))
            (payload (ellm-kagi--message-payload provider frontmatter message)))
-      (if (ellm-kagi-request-branch-id request)
-          (ellm-kagi--post-message request payload)
-        (ellm-kagi--create-conversation request payload))
+      (setf (ellm-kagi-request-payload request) payload)
       request)))
+
+(cl-defmethod ellm-backend-start ((request ellm-kagi-request) emit)
+  "Start or retry REQUEST's current Kagi operation."
+  (setf (ellm-kagi-request-emit request) emit)
+  (cl-incf (ellm-kagi-request-serial request))
+  (pcase (ellm-kagi-request-phase request)
+    ((or 'nil 'creating)
+     (if (ellm-kagi-request-branch-id request)
+         (ellm-kagi--post-message request (ellm-kagi-request-payload request))
+       (ellm-kagi--create-conversation
+        request (ellm-kagi-request-payload request))))
+    ('posting
+     (ellm-kagi--post-message request (ellm-kagi-request-payload request)))
+    ('streaming
+     (ellm-kagi--start-stream request))
+    ('done nil)
+    (_ (error "ellm Kagi: invalid request phase: %S"
+              (ellm-kagi-request-phase request))))
+  (ellm-kagi-request-process request))
 
 (cl-defmethod ellm-backend-cancel ((request ellm-kagi-request))
   "Cancel Kagi REQUEST locally and on Kagi when a branch exists."
   (setf (ellm-kagi-request-cancelled request) t)
+  (cl-incf (ellm-kagi-request-serial request))
   (ellm-kagi--stop-request request))
+
+(cl-defmethod ellm-backend-finish ((request ellm-kagi-request) outcome)
+  "Release Kagi REQUEST after terminal OUTCOME."
+  (when (memq outcome '(failed cancelled))
+    (ellm-kagi--stop-request request))
+  (setf (ellm-kagi-request-completed request) t
+        (ellm-kagi-request-phase request) 'done
+        (ellm-kagi-request-emit request) nil
+        (ellm-kagi-request-process request) nil))
+
+(cl-defmethod ellm-backend-render-event
+  ((request ellm-kagi-request) event _core-request)
+  "Render Kagi metadata EVENT."
+  (pcase (plist-get event :kind)
+    ('title
+     (ellm-kagi--update-title-direct request (plist-get event :title)))
+    ('session
+     (ellm-kagi--persist-session-direct request))))
+
+(defun ellm-kagi--emit (request event)
+  "Emit EVENT from live Kagi REQUEST."
+  (when (and (not (ellm-kagi-request-cancelled request))
+             (not (ellm-kagi-request-completed request)))
+    (when-let* ((emit (ellm-kagi-request-emit request)))
+      (funcall emit event))))
 
 (defun ellm-kagi--stop-request (request)
   "Stop REQUEST's current transport and cancel remote generation once."
-  (when-let* ((timer (ellm-kagi-request-retry-timer request)))
-    (cancel-timer timer)
-    (setf (ellm-kagi-request-retry-timer request) nil))
   (when-let* ((process (ellm-kagi-request-process request)))
     (when (and (processp process) (process-live-p process))
-      (delete-process process)))
+      (delete-process process))
+    (setf (ellm-kagi-request-process request) nil))
   (when-let* (((not (ellm-kagi-request-cancel-sent request)))
               (cancel-url (ellm-kagi-request-cancel-url request)))
     (setf (ellm-kagi-request-cancel-sent request) t)
@@ -258,69 +347,58 @@ ACCEPT is the expected response type.  CONTENT-TYPE is included when non-nil."
   "Send a managed JSON request through PROVIDER.
 METHOD and PATH identify the endpoint.  BODY is a plist or nil.  THEN and ELSE
 are terminal callbacks.  When REQUEST is non-nil, keep its cancellable process
-and retry timer current."
-  (let ((attempt 0)
-        (done nil)
+current.  Retryable failures are surfaced to the core request state machine."
+  (let ((done nil)
+        (serial (and request (ellm-kagi-request-serial request)))
         process)
     (cl-labels
         ((live-p ()
            (and (not done)
                 (or (not request)
-                    (not (ellm-kagi-request-cancelled request)))))
-         (start ()
+                    (and (not (ellm-kagi-request-cancelled request))
+                         (= serial (ellm-kagi-request-serial request)))))))
+      (setq
+       process
+       (plz method (ellm-kagi--url provider path)
+         :headers (ellm-kagi--headers
+                   provider "application/json"
+                   (and body "application/json"))
+         :body (and body
+                    (json-serialize
+                     body :null-object nil
+                     :false-object :json-false))
+         :as 'string
+         :then
+         (lambda (response-body)
            (when (live-p)
-             (cl-incf attempt)
-             (setq
-              process
-              (plz method (ellm-kagi--url provider path)
-                :headers (ellm-kagi--headers
-                          provider "application/json"
-                          (and body "application/json"))
-                :body (and body
-                           (json-serialize
-                            body :null-object nil
-                            :false-object :json-false))
-                :as 'string
-                :then
-                (lambda (response-body)
-                  (when (live-p)
-                    (let (result parse-error)
-                      (condition-case err
-                          (setq result
-                                (json-parse-string
-                                 response-body
-                                 :object-type 'plist
-                                 :array-type 'list
-                                 :null-object nil
-                                 :false-object :json-false))
-                        (error (setq parse-error err)))
-                      (setq done t)
-                      (if parse-error
-                          (funcall
-                           else
-                           (make-plz-error
-                            :message
-                            (format "invalid JSON response: %s"
-                                    (error-message-string parse-error))))
-                        (funcall then result)))))
-                :else
-                (lambda (error)
-                  (when (live-p)
-                    (if (and (ellm-kagi--transient-error-p error)
-                             (<= attempt ellm-request-retries))
-                        (let ((timer
-                               (run-at-time ellm-request-retry-delay nil
-                                            #'start)))
-                          (when request
-                            (setf (ellm-kagi-request-retry-timer request)
-                                  timer)))
-                      (setq done t)
-                      (funcall else error))))
-                :timeout ellm-request-timeout
-                :noquery t))
-             (when request
-               (setf (ellm-kagi-request-process request) process)))))
-      (start))
+             (let (result parse-error)
+               (condition-case err
+                   (setq result
+                         (json-parse-string
+                          response-body
+                          :object-type 'plist
+                          :array-type 'list
+                          :null-object nil
+                          :false-object :json-false))
+                 (error (setq parse-error err)))
+               (setq done t)
+               (if parse-error
+                   (funcall
+                    else
+                    (make-plz-error
+                     :message
+                     (format "invalid JSON response: %s"
+                             (error-message-string parse-error))))
+                 (funcall then result)))))
+         :else
+         (lambda (error)
+           (when (live-p)
+             (setq done t)
+             (funcall else error)))
+         :timeout ellm-request-timeout
+         :noquery t))
+      (when request
+        (setf (ellm-kagi-request-process request) process)))
     process))
 
 (defun ellm-kagi--models-from-init (result)
@@ -432,6 +510,7 @@ to `ellm-provider' or the first Kagi entry in `ellm-provider-alist'."
                    conversation-id
                    (ellm-kagi-request-branch-id request) branch-id)
              (ellm-kagi--persist-session request)
+             (ellm-kagi--emit request '(:type operation))
              (ellm-kagi--post-message request payload)))))
      (lambda (error)
        (ellm-kagi--finish-plz-error request "creating conversation" error))
@@ -470,6 +549,7 @@ to `ellm-provider' or the first Kagi entry in `ellm-provider-alist'."
                      (format "/api/branches/%s/stream/cancel"
                              (ellm-kagi-request-branch-id request))))
            (ellm-kagi--persist-session request)
+           (ellm-kagi--emit request '(:type operation))
            (ellm-kagi--start-stream request))))
      (lambda (error)
        (ellm-kagi--finish-plz-error request "posting message" error))
@@ -653,76 +733,41 @@ to `ellm-provider' or the first Kagi entry in `ellm-provider-alist'."
                         (string-join sources "\n"))))
       content)))
 
-(defun ellm-kagi--snapshot-string (content)
-  "Return ellm continuation text for Kagi CONTENT.
-CONTENT is a (REASONING . TEXT) pair."
-  (let ((reasoning (car content))
-        (text (cdr content)))
-    (concat
-     (when (and reasoning (not (string-empty-p reasoning)))
-       (concat (ellm--get-turn "reasoning" :continuation t) "\n"
-               (ellm--ensure-newline
-                (ellm--escape-turn-delimiters reasoning))))
-     (when (and text (not (string-empty-p text)))
-       (concat (ellm--get-turn "assistant" :continuation t) "\n"
-               (ellm--ensure-newline
-                (ellm--escape-turn-delimiters text)))))))
-
-(defun ellm-kagi--render-snapshot (request content)
-  "Replace Kagi REQUEST's rendered region with cumulative CONTENT."
-  (when-let* ((buffer (ellm-kagi-request-buffer request)))
-    (when (buffer-live-p buffer)
-      (with-current-buffer buffer
-        (ellm--preserve-user-position
-          (let* ((start (ellm-kagi-request-start request))
-                 (end (ellm-kagi-request-end request))
-                 (new-text (ellm-kagi--snapshot-string content))
-                 (current-text (buffer-substring-no-properties start end))
-                 (prefix-length
-                  (length (fill-common-string-prefix current-text new-text))))
-            (goto-char (+ start prefix-length))
-            (delete-region (point) end)
-            (insert (substring new-text prefix-length))
-            (when (and ellm-fold-reasoning-blocks
-                       (car content)
-                       (cdr content)
-                       (not (string-empty-p (cdr content))))
-              (ellm-kagi--fold-reasoning request))))))))
-
-(defun ellm-kagi--fold-reasoning (request)
-  "Fold the reasoning turn rendered for REQUEST when it has a boundary."
-  (save-excursion
-    (goto-char (ellm-kagi-request-start request))
-    (when (re-search-forward
-           (concat "^" (ellm--turn-header-prefix-regexp ellm-turn-header-2)
-                   "reasoning\\b")
-           (ellm-kagi-request-end request) t)
-      (ellm--fold-subtree-at (match-beginning 0)))))
-
 (defun ellm-kagi--handle-event (request event)
   "Handle one parsed Kagi stream EVENT for REQUEST."
   (unless (or (ellm-kagi-request-cancelled request)
               (ellm-kagi-request-completed request))
     (when-let* ((title (plist-get event :conversation_title)))
-      (ellm-kagi--update-title request title))
+      (ellm-kagi--emit
+       request `(:type extension :kind title :title ,title)))
     (cond
      ((plist-member event :error)
       (ellm-kagi--finish-error
        request (format "%s" (or (plist-get event :error) "stream failed"))))
      ((eq (plist-get event :is_final) t)
-      (ellm-kagi--render-snapshot
-       request
-       (ellm-kagi--append-references
-        (ellm-kagi--split-final-text (or (plist-get event :text) ""))
-        (plist-get event :references)))
+      (let ((content
+             (ellm-kagi--append-references
+              (ellm-kagi--split-final-text
+               (or (plist-get event :text) ""))
+              (plist-get event :references))))
+        (ellm-kagi--emit
+         request
+         `(:type stream :mode snapshot :id kagi
+           :channels ((reasoning . ,(car content))
+                      (assistant . ,(cdr content))))))
       (ellm-kagi--update-usage request event)
       (ellm-kagi--finish-success request))
      ((plist-get event :html_content)
-      (ellm-kagi--render-snapshot
-       request (ellm-kagi--split-partial-html
-                (plist-get event :html_content)))))))
+      (let ((content
+             (ellm-kagi--split-partial-html
+              (plist-get event :html_content))))
+        (ellm-kagi--emit
+         request
+         `(:type stream :mode snapshot :id kagi
+           :channels ((reasoning . ,(car content))
+                      (assistant . ,(cdr content))))))))))
 
-(defun ellm-kagi--update-title (request title)
+(defun ellm-kagi--update-title-direct (request title)
   "Store TITLE and rename Kagi REQUEST's buffer."
   (when-let* ((buffer (ellm-kagi-request-buffer request)))
     (when (buffer-live-p buffer)
@@ -732,23 +777,25 @@ CONTENT is a (REASONING . TEXT) pair."
         (ellm-update-session-title title buffer)))))
 
 (defun ellm-kagi--update-usage (request event)
-  "Update REQUEST's buffer status from final Kagi EVENT."
-  (when-let* ((buffer (ellm-kagi-request-buffer request)))
-    (when (buffer-live-p buffer)
-      (with-current-buffer buffer
-        (let ((context (plist-get event :context_usage))
-              (usage (plist-get event :usage)))
-          (setf (ellm-buffer-state-context-usage ellm-buffer-state)
-                (plist-get context :total_used)
-                (ellm-buffer-state-context-size ellm-buffer-state)
-                (plist-get context :context_window)
-                (ellm-buffer-state-cost-amount ellm-buffer-state)
-                (plist-get usage :cost_usd)
-                (ellm-buffer-state-cost-currency ellm-buffer-state)
-                (and (plist-member usage :cost_usd) "USD"))
-          (force-mode-line-update))))))
+  "Emit normalized usage from final Kagi EVENT."
+  (let ((context (plist-get event :context_usage))
+        (usage (plist-get event :usage)))
+    (ellm-kagi--emit
+     request
+     `(:type usage
+       :context-usage ,(plist-get context :total_used)
+       :context-size ,(plist-get context :context_window)
+       :cost-amount ,(plist-get usage :cost_usd)
+       :cost-currency ,(and (plist-member usage :cost_usd) "USD")))))
 
 (defun ellm-kagi--persist-session (request)
+  "Emit Kagi REQUEST's conversation metadata."
+  (if (ellm-kagi-request-emit request)
+      (ellm-kagi--emit
+       request '(:type extension :kind session :checkpoint t))
+    (ellm-kagi--persist-session-direct request)))
+
+(defun ellm-kagi--persist-session-direct (request)
   "Persist Kagi REQUEST's conversation and branch IDs in frontmatter."
   (when-let* ((buffer (ellm-kagi-request-buffer request)))
     (when (buffer-live-p buffer)
@@ -762,19 +809,9 @@ CONTENT is a (REASONING . TEXT) pair."
             (ellm--set-frontmatter-value '(kagi branch-id) branch-id)))))))
 
 (defun ellm-kagi--finish-success (request)
-  "Finish Kagi REQUEST and append the next user turn."
+  "Emit successful completion for Kagi REQUEST."
   (unless (ellm-kagi-request-completed request)
-    (setf (ellm-kagi-request-completed request) t
-          (ellm-kagi-request-phase request) 'done)
-    (when-let* ((buffer (ellm-kagi-request-buffer request)))
-      (when (buffer-live-p buffer)
-        (with-current-buffer buffer
-          (ellm--preserve-user-position
-            (ellm--set-active-request nil)
-            (goto-char (point-max))
-            (ellm--insert-turn "user")
-            (ellm--persistence-checkpoint)
-            (ellm--notify-request-finished)))))))
+    (ellm-kagi--emit request '(:type complete))))
 
 (defun ellm-kagi--finish-plz-error (request action error)
   "Finish REQUEST after ACTION failed with a `plz' ERROR."
@@ -782,7 +819,9 @@ CONTENT is a (REASONING . TEXT) pair."
       (ellm-kagi--stop-request request)
     (ellm-kagi--finish-error
      request
-     (format "%s: %s" action (ellm-kagi--plz-error-message error)))))
+     (format "%s: %s" action (ellm-kagi--plz-error-message error))
+     (and (memq (ellm-kagi-request-phase request) '(creating posting))
+          (ellm-kagi--transient-error-p error)))))
 
 (defun ellm-kagi--plz-error-message (error)
   "Return a concise message for a `plz' ERROR."
@@ -801,21 +840,14 @@ CONTENT is a (REASONING . TEXT) pair."
     (format "%s" (cdr (plz-error-curl-error error))))
    (t "request failed")))
 
-(defun ellm-kagi--finish-error (request message-text)
-  "Finish Kagi REQUEST with MESSAGE-TEXT."
+(defun ellm-kagi--finish-error (request message-text &optional retryable)
+  "Emit Kagi failure MESSAGE-TEXT, marked RETRYABLE when safe."
   (unless (or (ellm-kagi-request-cancelled request)
               (ellm-kagi-request-completed request))
-    (setf (ellm-kagi-request-completed request) t)
-    (ellm-kagi--stop-request request)
-    (setf (ellm-kagi-request-phase request) 'done)
-    (when-let* ((buffer (ellm-kagi-request-buffer request)))
-      (when (buffer-live-p buffer)
-        (with-current-buffer buffer
-          (ellm--set-active-request nil)
-          (ellm--ensure-next-user-turn)
-          (ellm--persistence-checkpoint)
-          (ellm--notify-request-finished))))
-    (message "ellm Kagi: %s" message-text)))
+    (ellm-kagi--emit
+     request
+     `(:type failure :message ,(concat "Kagi: " message-text)
+       :retryable ,(and retryable t)))))
 
 ;;;; Footer
 

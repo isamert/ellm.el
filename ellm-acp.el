@@ -176,8 +176,25 @@ an optional list of model candidates used for frontmatter completion."
   call-beg params-beg params-end result-beg result-body-beg result-end)
 
 (cl-defstruct (ellm-acp-request (:constructor ellm-acp--make-request))
-  "Active request handle for the ACP backend."
-  connection buffer generation cancelled)
+  "Protocol driver for one ACP conversation request."
+  (connection nil
+              :type ellm-acp-connection
+              :documentation "ACP connection carrying this conversation request.")
+  (provider nil
+            :type ellm-acp-provider
+            :documentation "ACP provider configuration for the connection.")
+  (frontmatter nil
+               :type list
+               :documentation "Parsed frontmatter snapshot applied before prompting.")
+  (prompt nil
+          :type string
+          :documentation "User prompt sent after session configuration.")
+  (emit nil
+        :type (or null function)
+        :documentation "Core event sink, or nil after request finalization.")
+  (cancelled nil
+             :type boolean
+             :documentation "Non-nil once events from this request must be ignored."))
 
 (defvar-local ellm-acp--connection nil
   "ACP connection associated with the current ellm buffer.")
@@ -462,33 +479,45 @@ Call ON-READY with its effect on success, or ON-ERROR on failure."
   "Delete an ACP session for PROVIDER."
   (ellm-acp-delete-session provider frontmatter buffer select))
 
-(cl-defmethod ellm-backend-send ((provider ellm-acp-provider) frontmatter buffer)
-  "Send BUFFER's trailing user turn through ACP PROVIDER."
+(cl-defmethod ellm-backend-create ((provider ellm-acp-provider)
+                                   frontmatter buffer)
+  "Create an ACP protocol driver for BUFFER."
   (with-current-buffer buffer
     (let* ((connection (ellm-acp--ensure-connection provider buffer))
            (prompt-text (ellm-acp--last-user-content))
            (request
             (ellm-acp--make-request
-             :connection connection :buffer buffer
-             :generation ellm--request-generation)))
+             :connection connection :provider provider
+             :frontmatter frontmatter :prompt prompt-text)))
       (setf (ellm-acp--connection-current-request connection) request)
-      (ellm-acp--ensure-session
-       connection provider frontmatter
-       (lambda ()
-         (ellm-acp--ensure-frontmatter-model
-          connection frontmatter
-          (lambda ()
-            (ellm-acp--ensure-frontmatter-config
-             provider connection frontmatter
-             (lambda ()
-               (ellm-acp--send-prompt connection buffer prompt-text))
-             (lambda (error-object)
-               (ellm-acp--finish-with-error buffer error-object))))
-          (lambda (error-object)
-            (ellm-acp--finish-with-error buffer error-object))))
-       (lambda (error-object)
-         (ellm-acp--finish-with-error buffer error-object)))
       request)))
+
+(cl-defmethod ellm-backend-start ((request ellm-acp-request) emit)
+  "Start REQUEST and emit ACP events through EMIT."
+  (setf (ellm-acp-request-emit request) emit
+        (ellm-acp-request-cancelled request) nil)
+  (let ((connection (ellm-acp-request-connection request))
+        (provider (ellm-acp-request-provider request))
+        (frontmatter (ellm-acp-request-frontmatter request))
+        (prompt (ellm-acp-request-prompt request)))
+    (setf (ellm-acp--connection-current-request connection) request)
+    (ellm-acp--ensure-session
+     connection provider frontmatter
+     (lambda ()
+       (ellm-acp--ensure-frontmatter-model
+        connection frontmatter
+        (lambda ()
+          (ellm-acp--ensure-frontmatter-config
+           provider connection frontmatter
+           (lambda ()
+             (ellm-acp--send-prompt connection prompt))
+           (lambda (error-object)
+             (ellm-acp--emit-failure request error-object))))
+        (lambda (error-object)
+          (ellm-acp--emit-failure request error-object))))
+     (lambda (error-object)
+       (ellm-acp--emit-failure request error-object)))
+    connection))
 
 (cl-defmethod ellm-backend-cancel ((request ellm-acp-request))
   "Cancel ACP REQUEST."
@@ -508,6 +537,49 @@ Call ON-READY with its effect on success, or ON-ERROR on failure."
         ;; Closing the local transport is the only way to guarantee that late
         ;; updates cannot be mistaken for a subsequent prompt.
         (jsonrpc-shutdown connection)))))
+
+(cl-defmethod ellm-backend-finish ((request ellm-acp-request) _outcome)
+  "Release REQUEST from its ACP connection."
+  ;; Keep the inactive driver as a tombstone until the next prompt replaces
+  ;; it.  ACP updates carry only a session id, so clearing this slot would let
+  ;; late updates from a finished prompt look like replay traffic.
+  (setf (ellm-acp-request-cancelled request) t
+        (ellm-acp-request-emit request) nil))
+
+(cl-defmethod ellm-backend-render-event
+  ((_request ellm-acp-request) event _core-request)
+  "Render normalized ACP tool and extension EVENT."
+  (let ((connection (plist-get event :connection))
+        (update (plist-get event :update)))
+    (pcase (plist-get event :type)
+      ('tool-call (ellm-acp--insert-tool-call update connection))
+      ('tool-update (ellm-acp--insert-tool-update update connection))
+      ('extension
+       (pcase (plist-get event :kind)
+         ('plan (ellm-acp--insert-plan update)))))))
+
+(defun ellm-acp--emit-event (request event)
+  "Emit EVENT from live ACP REQUEST."
+  (when (and request
+             (not (ellm-acp-request-cancelled request)))
+    (when-let* ((emit (ellm-acp-request-emit request)))
+      (funcall emit event))))
+
+(defun ellm-acp--emit-conversation-event (connection event)
+  "Emit EVENT for CONNECTION's live conversation request.
+Return non-nil when an event sink accepted it."
+  (when-let* ((request (ellm-acp--connection-current-request connection))
+              ((ellm-acp--request-live-p request)))
+    (ellm-acp--emit-event request event)
+    t))
+
+(defun ellm-acp--emit-failure (request error-object)
+  "Emit terminal ERROR-OBJECT from ACP REQUEST."
+  (ellm-acp--emit-event
+   request
+   `(:type failure
+     :message ,(or (plist-get error-object :message) "ACP request failed")
+     :condition ,error-object)))
 
 ;;;; JSON-RPC newline transport
 
@@ -615,8 +687,9 @@ Call ON-READY with its effect on success, or ON-ERROR on failure."
                (equal (plist-get message :id) prompt-id)
                (plist-get (plist-get message :result) :stopReason))
       (setf (ellm-acp--connection-prompt-request-id connection) nil)
-      (when-let* ((buffer (ellm-acp--connection-buffer connection)))
-        (ellm-acp--finish-prompt buffer)))))
+      (when-let* ((request
+                   (ellm-acp--connection-current-request connection)))
+        (ellm-acp--emit-event request '(:type complete))))))
 
 (defun ellm-acp--log-wire (connection direction line)
   "Log raw ACP JSON LINE for CONNECTION with DIRECTION when enabled."
@@ -648,21 +721,24 @@ Call ON-READY with its effect on success, or ON-ERROR on failure."
           (when-let* ((request
                        (ellm-acp--connection-current-request connection))
                       ((ellm-acp--request-live-p request)))
-            (setf (ellm-acp-request-cancelled request) t
-                  (ellm-acp--connection-current-request connection) nil)
-            (ellm--invalidate-current-request)
-            (ellm--set-active-request nil)
-            (ellm--ensure-next-user-turn)
-            (ellm--persistence-checkpoint)
-            (ellm--notify-request-finished)
-            (message "ellm ACP: process exited: %s" (string-trim event))))))))
+            (ellm-acp--emit-event
+             request
+             `(:type failure
+               :message ,(format "ACP process exited: %s"
+                                 (string-trim event))))))))))
 
 (defun ellm-acp--dispatch-notification (connection method params)
   "Dispatch ACP notification METHOD with PARAMS for CONNECTION."
   (pcase method
     ('session/update
-     (let ((request (ellm-acp--connection-current-request connection)))
-       (when (or (not request) (ellm-acp--request-live-p request))
+     (let* ((request (ellm-acp--connection-current-request connection))
+            (kind (plist-get (plist-get params :update) :sessionUpdate)))
+       (when (or (not request)
+                 (ellm-acp--request-live-p request)
+                 (member kind
+                         '("available_commands_update"
+                           "session_info_update"
+                           "config_option_update")))
          (ellm-acp--handle-session-update connection params))))
     (_
      (ellm-acp--run-extension-notification connection method params))))
@@ -670,9 +746,10 @@ Call ON-READY with its effect on success, or ON-ERROR on failure."
 (defun ellm-acp--request-live-p (request)
   "Return non-nil when ACP REQUEST still owns its buffer lifecycle."
   (and (not (ellm-acp-request-cancelled request))
-       (ellm--request-current-p
-        (ellm-acp-request-buffer request)
-        (ellm-acp-request-generation request))))
+       (functionp (ellm-acp-request-emit request))
+       (eq (ellm-acp--connection-current-request
+            (ellm-acp-request-connection request))
+           request)))
 
 (cl-defun ellm-acp--request
     (connection method params &key success-fn error-fn)
@@ -1547,16 +1624,22 @@ called with the raw response before ON-READY."
                   (list id :ann "saved" :type 'string :editable t
                         :desc "Saved ACP option not advertised by the live session.")))))))
 
-(defun ellm-acp--send-prompt (connection buffer text)
-  "Send TEXT as BUFFER's pending user prompt through CONNECTION."
+(defun ellm-acp--send-prompt (connection text)
+  "Send TEXT as the pending user prompt through CONNECTION."
   (let ((params `(:sessionId ,(ellm-acp--connection-session-id connection)
                   :prompt [(:type "text" :text ,(or text ""))])))
     (ellm-acp--request
      connection :session/prompt params
      :success-fn (lambda (_result)
-                   (ellm-acp--finish-prompt buffer))
+                   (when-let* ((request
+                                (ellm-acp--connection-current-request
+                                 connection)))
+                     (ellm-acp--emit-event request '(:type complete))))
      :error-fn (lambda (error-object)
-                 (ellm-acp--finish-with-error buffer error-object)))))
+                 (when-let* ((request
+                              (ellm-acp--connection-current-request
+                               connection)))
+                   (ellm-acp--emit-failure request error-object))))))
 
 (defun ellm-acp--last-turn-role ()
   "Return the role of the final turn in the current buffer, or nil."
@@ -1780,26 +1863,62 @@ When SELECT is non-nil, choose a session from `session/list'."
                                "plan")))
                   (pcase kind
                     ("user_message_chunk"
-                     (ellm-acp--insert-content connection "user"
-                                               (plist-get update :content)
-                                               (plist-get update :messageId)))
+                     (unless
+                         (ellm-acp--emit-conversation-event
+                          connection
+                          `(:type stream :mode append :channel user
+                            :id ,(plist-get update :messageId)
+                            :text ,(ellm-acp--content-text
+                                    (plist-get update :content))))
+                       (ellm-acp--insert-content
+                        connection "user" (plist-get update :content)
+                        (plist-get update :messageId))))
                     ("agent_message_chunk"
-                     (ellm-acp--insert-content connection "assistant"
-                                               (plist-get update :content)
-                                               (plist-get update :messageId)))
+                     (unless
+                         (ellm-acp--emit-conversation-event
+                          connection
+                          `(:type stream :mode append :channel assistant
+                            :id ,(plist-get update :messageId)
+                            :text ,(ellm-acp--content-text
+                                    (plist-get update :content))))
+                       (ellm-acp--insert-content
+                        connection "assistant" (plist-get update :content)
+                        (plist-get update :messageId))))
                     ("agent_thought_chunk"
-                     (ellm-acp--insert-content connection "reasoning"
-                                               (plist-get update :content)
-                                               (plist-get update :messageId)))
+                     (unless
+                         (ellm-acp--emit-conversation-event
+                          connection
+                          `(:type stream :mode append :channel reasoning
+                            :id ,(plist-get update :messageId)
+                            :text ,(ellm-acp--content-text
+                                    (plist-get update :content))))
+                       (ellm-acp--insert-content
+                        connection "reasoning" (plist-get update :content)
+                        (plist-get update :messageId))))
                     ("tool_call"
                      (setf (ellm-acp--connection-last-message-key connection) nil)
-                     (ellm-acp--insert-tool-call update connection))
+                     (unless
+                         (ellm-acp--emit-conversation-event
+                          connection
+                          `(:type tool-call :connection ,connection
+                            :update ,update))
+                       (ellm-acp--insert-tool-call update connection)))
                     ("tool_call_update"
                      (setf (ellm-acp--connection-last-message-key connection) nil)
-                     (ellm-acp--insert-tool-update update connection))
+                     (unless
+                         (ellm-acp--emit-conversation-event
+                          connection
+                          `(:type tool-update :connection ,connection
+                            :update ,update))
+                       (ellm-acp--insert-tool-update update connection)))
                     ("plan"
                      (setf (ellm-acp--connection-last-message-key connection) nil)
-                     (ellm-acp--insert-plan update))
+                     (unless
+                         (ellm-acp--emit-conversation-event
+                          connection
+                          `(:type extension :kind plan
+                            :connection ,connection :update ,update))
+                       (ellm-acp--insert-plan update)))
                     ("available_commands_update"
                      (setf (ellm-acp--connection-available-commands connection)
                            (plist-get update :availableCommands)))
@@ -1810,7 +1929,23 @@ When SELECT is non-nil, choose a session from `session/list'."
                       connection (plist-get update :configOptions)))
                     ("usage_update"
                      (setf (ellm-acp--connection-last-message-key connection) nil)
-                     (ellm-acp--update-usage update))
+                     (let* ((cost (plist-get update :cost))
+                            (event
+                             `(:type usage
+                               :context-usage ,(plist-get update :used)
+                               :context-size ,(plist-get update :size))))
+                       (when (plist-member update :cost)
+                         (setq event
+                               (append
+                                event
+                                `(:cost-amount
+                                  ,(and cost (plist-get cost :amount))
+                                  :cost-currency
+                                  ,(and cost (plist-get cost :currency))))))
+                       (unless
+                           (ellm-acp--emit-conversation-event
+                            connection event)
+                         (ellm-acp--update-usage update))))
                     (_ nil)))))
             (ellm-acp--run-extension-session-update
              connection update 'post-render)))))))
@@ -2460,36 +2595,6 @@ If the matched turn has nested child turns, delete those children too."
                  value)))
    (or turns (ellm--parse-turns))
    :from-end t))
-
-(defun ellm-acp--finish-prompt (buffer)
-  "Finish ACP prompt in BUFFER."
-  (when (buffer-live-p buffer)
-    (with-current-buffer buffer
-      (ellm--preserve-user-position
-        (goto-char (point-max))
-        (unless (equal (ellm-acp--last-turn-role) "user")
-          (ellm--insert-turn "user"))
-        (when ellm-acp--connection
-          (setf (ellm-acp--connection-current-request ellm-acp--connection)
-                nil))
-        (ellm--set-active-request nil)
-        (ellm--persistence-checkpoint)
-        (ellm--notify-request-finished)))))
-
-(defun ellm-acp--finish-with-error (buffer error-object)
-  "Finish the ACP request in BUFFER and report ERROR-OBJECT."
-  (when (buffer-live-p buffer)
-    (with-current-buffer buffer
-      (when ellm-acp--connection
-        (setf (ellm-acp--connection-current-request ellm-acp--connection)
-              nil))
-      (ellm--set-active-request nil)
-      (ellm--ensure-next-user-turn)
-      (ellm--persistence-checkpoint)
-      (ellm--notify-request-finished)))
-  (message "ellm ACP: %s"
-           (or (plist-get error-object :message)
-               "request failed")))
 
 ;;;; Permission requests
 

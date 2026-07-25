@@ -40,12 +40,32 @@
 (unless (get 'not-implemented 'error-conditions)
   (define-error 'not-implemented "Operation is not implemented for this LLM provider"))
 
-(cl-defstruct (ellm-llm-request (:constructor ellm-llm--make-request))
-  "Active request handle for the `llm.el' backend."
-  raw buffer generation cancelled timer (attempt 0) (retries 0))
-
-(defvar-local ellm-llm--request-usage nil
-  "Accumulated token usage for the current top-level `llm.el' request.")
+(cl-defstruct (ellm-llm-driver (:constructor ellm-llm--make-driver))
+  "Protocol driver for one logical `llm.el' request."
+  (provider nil
+            :type t
+            :documentation "The `llm.el' provider serving this request.")
+  (buffer nil
+          :type buffer
+          :documentation "Conversation buffer from which the prompt was built.")
+  (prompt nil
+          :type llm-chat-prompt
+          :documentation "Mutable prompt shared across recursive tool legs.")
+  (raw nil
+       :type t
+       :documentation "Current cancellable transport handle, or nil.")
+  (emit nil
+        :type (or null function)
+        :documentation "Core event sink installed for the current attempt.")
+  (timer nil
+         :type (or null timer)
+         :documentation "Deadline timer for the current transport, or nil.")
+  (serial 0
+          :type integer
+          :documentation "Generation counter used to invalidate stale callbacks.")
+  (leg 0
+       :type integer
+       :documentation "Tool-loop leg number used to identify cumulative streams."))
 
 (defconst ellm-llm--turn-usage-attrs
   '((:input-tokens . "input-tokens")
@@ -56,27 +76,42 @@
 
 ;;;; Interface implementation
 
-(cl-defmethod ellm-backend-send ((provider llm-standard-chat-provider)
-                                 frontmatter buffer)
-  "Send BUFFER through a standard `llm.el' chat PROVIDER."
-  (ellm-llm--backend-send provider frontmatter buffer))
+(cl-defmethod ellm-backend-create ((provider llm-standard-chat-provider)
+                                   frontmatter buffer)
+  "Create a standard `llm.el' driver for BUFFER."
+  (ellm-llm--backend-create provider frontmatter buffer))
 
-(cl-defmethod ellm-backend-send (provider frontmatter buffer)
-  "Compatibility fallback for direct `llm.el' PROVIDER objects.
-Backend-specific provider types should define a more specific
-`ellm-backend-send' method, as `ellm-acp-provider' does."
-  (ellm-llm--backend-send provider frontmatter buffer))
+(cl-defmethod ellm-backend-create (provider frontmatter buffer)
+  "Fallback driver creation for direct `llm.el' PROVIDER objects."
+  (ellm-llm--backend-create provider frontmatter buffer))
 
-(cl-defmethod ellm-backend-cancel ((request ellm-llm-request))
-  "Cancel an active `llm.el' REQUEST."
-  (setf (ellm-llm-request-cancelled request) t)
-  (cl-incf (ellm-llm-request-attempt request))
-  (when-let* ((timer (ellm-llm-request-timer request)))
-    (cancel-timer timer)
-    (setf (ellm-llm-request-timer request) nil))
-  (when-let* ((raw (ellm-llm-request-raw request)))
+(cl-defmethod ellm-backend-cancel ((driver ellm-llm-driver))
+  "Cancel DRIVER's active `llm.el' transport."
+  (cl-incf (ellm-llm-driver-serial driver))
+  (ellm-llm--cancel-driver-timer driver)
+  (when-let* ((raw (ellm-llm-driver-raw driver)))
     (llm-cancel-request raw)
-    (setf (ellm-llm-request-raw request) nil)))
+    (setf (ellm-llm-driver-raw driver) nil)))
+
+(cl-defmethod ellm-backend-render-event
+  ((_driver ellm-llm-driver) event _request)
+  "Render normalized llm.el tool and correction EVENT."
+  (pcase (plist-get event :kind)
+    ('tool-batch
+     (ellm-llm--render-tool-uses
+      (plist-get event :tool-uses)
+      (plist-get event :tool-results)
+      (plist-get event :call-ids)))
+    ('correction
+     (ellm--insert-turn "assistant" :continuation t)
+     (insert (ellm--ensure-newline (plist-get event :text))))))
+
+(cl-defmethod ellm-backend-finish ((driver ellm-llm-driver) _outcome)
+  "Release DRIVER's timers and transport reference."
+  (cl-incf (ellm-llm-driver-serial driver))
+  (ellm-llm--cancel-driver-timer driver)
+  (setf (ellm-llm-driver-raw driver) nil
+        (ellm-llm-driver-emit driver) nil))
 
 (cl-defmethod ellm-provider-current-model ((provider llm-standard-chat-provider))
   "Return PROVIDER's `llm.el' chat model name, or nil when unset."
@@ -550,25 +585,6 @@ earlier observations from the same request leg."
       (when (numberp value)
         (setq usage (plist-put usage key value))))))
 
-(defun ellm-llm--record-turn-usage (usage)
-  "Add one request leg's USAGE to the current assistant turn header."
-  (let (attrs)
-    (dolist (spec ellm-llm--turn-usage-attrs)
-      (let* ((key (car spec))
-             (value (plist-get usage key)))
-        (when (numberp value)
-          (let ((total (+ value
-                          (or (plist-get ellm-llm--request-usage key) 0))))
-            (setq ellm-llm--request-usage
-                  (plist-put ellm-llm--request-usage key total))
-            (push (cons (cdr spec) (number-to-string total)) attrs)))))
-    (when (and attrs
-               (markerp ellm--request-assistant-marker)
-               (eq (marker-buffer ellm--request-assistant-marker)
-                   (current-buffer)))
-      (ellm--set-turn-header-attrs
-       ellm--request-assistant-marker (nreverse attrs)))))
-
 (cl-defun ellm-llm--parse-buffer-as-chat
     (provider &optional (frontmatter (ellm--parse-frontmatter)))
   "Build an `llm-chat-prompt' from the current buffer for PROVIDER.
@@ -600,149 +616,24 @@ FRONTMATTER, when supplied, is the already parsed YAML frontmatter alist."
      provider (if has-system (cdr turns) turns) prompt)
     prompt))
 
-(defun ellm-llm--render-streaming-response
-    (buf request start end result &optional reasoning-state-id)
-  (ellm-llm--ensure-buffer buf request)
-  (with-current-buffer buf
-    (ellm--preserve-user-position
-      (let* ((reasoning-raw (plist-get result :reasoning))
-             (text-raw      (plist-get result :text))
-             (reasoning (and reasoning-raw
-                             (ellm--escape-turn-delimiters reasoning-raw)))
-             (text      (and text-raw
-                             (ellm--escape-turn-delimiters text-raw)))
-             (new-text
-              (concat
-               (when (or reasoning-state-id
-                         (and reasoning (not (string-empty-p reasoning))))
-                 (concat (if reasoning-state-id
-                             (ellm--get-turn
-                              "reasoning" :continuation t
-                              :reasoning-state reasoning-state-id)
-                           (ellm--get-turn "reasoning" :continuation t))
-                         "\n"
-                         (if reasoning
-                             (ellm--ensure-newline reasoning)
-                           "")))
-               (when (and text (not (string-empty-p text)))
-                 (concat (ellm--get-turn "assistant" :continuation t) "\n"
-                         (ellm--ensure-newline text))))))
-        (goto-char start)
-        (let* ((current-text
-                (buffer-substring-no-properties start end))
-               (prefix-length
-                (length (fill-common-string-prefix
-                          current-text new-text))))
-          (goto-char (+ start prefix-length))
-          (delete-region (point) end)
-          (insert (substring new-text prefix-length)))
-        (when (and (not (string-empty-p new-text))
-                   (save-excursion
-                      (goto-char start)
-                      (re-search-forward
-                       (concat "^"
-                               (ellm--turn-header-prefix-regexp
-                                ellm-turn-header-2))
-                       end t)))
-          (ellm--flush-pending-fold 2))
-        (when (and ellm-fold-reasoning-blocks
-                   reasoning (not (string-empty-p reasoning))
-                   text (not (string-empty-p text)))
-          (ellm-llm--fold-reasoning-in-region start end))))))
-
-(defun ellm-llm--request-live-p (request)
-  "Return non-nil when REQUEST may still invoke buffer callbacks."
-  (and (not (ellm-llm-request-cancelled request))
-       (ellm--request-current-p
-        (ellm-llm-request-buffer request)
-        (ellm-llm-request-generation request))))
-
-(defun ellm-llm--cancel-request-timer (request)
-  "Cancel REQUEST's current deadline or retry timer."
-  (when-let* ((timer (ellm-llm-request-timer request)))
+(defun ellm-llm--cancel-driver-timer (driver)
+  "Cancel DRIVER's current request deadline."
+  (when-let* ((timer (ellm-llm-driver-timer driver)))
     (cancel-timer timer)
-    (setf (ellm-llm-request-timer request) nil)))
+    (setf (ellm-llm-driver-timer driver) nil)))
 
 (defun ellm-llm--retryable-error-p (type)
   "Return non-nil when an llm.el error TYPE is transient."
   (memq type '(llm-request-error llm-request-timeout)))
 
-(defun ellm-llm--handle-attempt-error
-    (request attempt provider prompt partial final on-error type message)
-  "Handle one llm.el request failure, retrying transient failures."
-  (when (and (= attempt (ellm-llm-request-attempt request))
-             (ellm-llm--request-live-p request))
-    (ellm-llm--cancel-request-timer request)
-    (if (and (ellm-llm--retryable-error-p type)
-             (< (ellm-llm-request-retries request) ellm-request-retries))
-        (progn
-          ;; Invalidate callbacks from the timed-out attempt before cancelling
-          ;; its transport.  Some transports invoke callbacks synchronously.
-          (cl-incf (ellm-llm-request-attempt request))
-          (cl-incf (ellm-llm-request-retries request))
-          (when-let* ((raw (ellm-llm-request-raw request)))
-            (llm-cancel-request raw)
-            (setf (ellm-llm-request-raw request) nil))
-          (setf
-           (ellm-llm-request-timer request)
-           (run-at-time
-            ellm-request-retry-delay nil
-            #'ellm-llm--start-request
-            request provider prompt partial final on-error)))
-      (cl-incf (ellm-llm-request-attempt request))
-      (funcall on-error type message))))
+(defun ellm-llm--driver-live-p (driver serial)
+  "Return non-nil when callbacks for DRIVER SERIAL are current."
+  (= serial (ellm-llm-driver-serial driver)))
 
-(defun ellm-llm--start-request
-    (request provider prompt partial final on-error)
-  "Start or retry one streaming llm.el REQUEST.
-PARTIAL, FINAL, and ON-ERROR describe one logical request; timeout and retry
-bookkeeping stays within this function."
-  (when (ellm-llm--request-live-p request)
-    (ellm-llm--cancel-request-timer request)
-    (let ((attempt (cl-incf (ellm-llm-request-attempt request))))
-      (when ellm-request-timeout
-        (setf
-         (ellm-llm-request-timer request)
-         (run-at-time
-          ellm-request-timeout nil
-          (lambda ()
-            (ellm-llm--handle-attempt-error
-             request attempt provider prompt partial final on-error
-             'llm-request-timeout
-             (format "request timed out after %s seconds"
-                     ellm-request-timeout))))))
-      (condition-case err
-          (let ((raw
-                 (let ((llm-request-plz-timeout
-                        (or ellm-request-timeout llm-request-plz-timeout)))
-                   (llm-chat-streaming
-                    provider prompt
-                    (lambda (result)
-                      (when (and (= attempt
-                                    (ellm-llm-request-attempt request))
-                                 (ellm-llm--request-live-p request))
-                        (funcall partial result)))
-                    (lambda (result)
-                      (when (and (= attempt
-                                    (ellm-llm-request-attempt request))
-                                 (ellm-llm--request-live-p request))
-                        (ellm-llm--cancel-request-timer request)
-                        (cl-incf (ellm-llm-request-attempt request))
-                        (funcall final result)))
-                    (lambda (type message)
-                      (ellm-llm--handle-attempt-error
-                       request attempt provider prompt partial final on-error
-                       type message))
-                    'multi-output))))
-            ;; A provider is allowed to complete synchronously.  Do not attach
-            ;; the returned handle to an attempt that already completed.
-            (when (= attempt (ellm-llm-request-attempt request))
-              (setf (ellm-llm-request-raw request) raw)))
-        (error
-         (ellm-llm--handle-attempt-error
-          request attempt provider prompt partial final on-error
-          (car err) (error-message-string err))))))
-  request)
+(defun ellm-llm--emit (driver event)
+  "Emit EVENT from DRIVER when it has a live sink."
+  (when-let* ((emit (ellm-llm-driver-emit driver)))
+    (funcall emit event)))
 
 (defun ellm-llm--tool-call-error-p (type)
   "Return non-nil when TYPE describes a malformed model tool call."
@@ -795,121 +686,132 @@ Return (TOOL-USES TOOL-RESULTS IDS), or nil when no call was recoverable."
             (nreverse rendered-results)
             (cons (nreverse ids) (nreverse ids))))))
 
-(defun ellm-llm--send-once (provider prompt buf)
-  "Stream PROVIDER's reply for PROMPT into the trailing assistant turn of BUF.
-Uses multi-output mode.  If the LLM emits tool calls, llm.el executes
-them and populates PROMPT with both calls and results before the final
-callback fires; this function then writes corresponding `tool-call' /
-`tool-result' turns into BUF, opens a continuation `assistant' turn,
-and recurses with the (already populated) PROMPT.  When the response
-is text-only, a fresh trailing `user' turn is appended."
-  (with-current-buffer buf
-    (let* ((previous-interaction
-            (car (last (llm-chat-prompt-interactions prompt))))
-           (start (copy-marker (point-max) nil))
-           (end   (copy-marker (point-max) t))
-           reasoning-state-id
-           leg-usage
-           (request
-            (ellm-llm--make-request
-             :buffer buf :generation ellm--request-generation))
-           (partial-render
-            (lambda (result)
-              (setq leg-usage
-                    (ellm-llm--merge-leg-usage leg-usage result))
-              (when-let* ((state
-                           (ellm-provider-reasoning-state provider result)))
-                (setq reasoning-state-id
-                      (ellm-reasoning-state-write state)))
-              (ellm-llm--render-streaming-response
-               buf request start end result reasoning-state-id)))
-           (final-render
-            (lambda (result)
-              (ellm-llm--ensure-buffer buf request)
-              (funcall partial-render result)
-              (with-current-buffer buf
-                (ellm--preserve-user-position
-                  (ellm-llm--record-turn-usage leg-usage)
-                  (let ((recurse nil))
-                    (ellm--set-active-request nil)
-                    (if-let* ((tool-uses (plist-get result :tool-uses))
-                              (tool-results (plist-get result :tool-results)))
-                        (progn
-                          (ellm-llm--render-tool-uses
-                           tool-uses tool-results
-                           (ellm-llm--new-prompt-tool-call-ids
-                            prompt previous-interaction))
-                          (ellm-llm--canonicalize-new-interactions
-                           prompt previous-interaction)
-                          (setq recurse t))
-                      (ellm--insert-turn "user"))
-                    ;; Fold reasoning after the following turn gives it a
-                    ;; stable boundary; covers reasoning-only responses too.
-                    (when ellm-fold-reasoning-blocks
-                      (ellm-llm--fold-reasoning-in-region start end))
-                    (ellm--persistence-checkpoint)
-                    (if recurse
-                        (ellm-llm--send-once provider prompt buf)
-                      (ellm--notify-request-finished)))))))
-           (on-error
-             (lambda (type msg)
-               (ellm-llm--ensure-buffer buf request)
-               (if (ellm-llm--tool-call-error-p type)
-                   (if-let* ((recovery
-                              (ellm-llm--recover-tool-call-error
-                               provider prompt previous-interaction
-                               type msg)))
-                       (with-current-buffer buf
-                         (ellm--preserve-user-position
-                           (ellm--set-active-request nil)
-                           (ellm-llm--render-tool-uses
-                            (nth 0 recovery) (nth 1 recovery)
-                            (nth 2 recovery))
-                           (ellm-llm--canonicalize-new-interactions
-                            prompt previous-interaction)
-                           (when ellm-fold-reasoning-blocks
-                             (ellm-llm--fold-reasoning-in-region start end))
-                           (ellm--persistence-checkpoint)
-                           (ellm-llm--send-once provider prompt buf)))
-                     ;; Argument JSON can fail before llm.el has a structured
-                     ;; tool use to pair with a result.  Give the model a
-                     ;; correction as an ordinary interaction instead.
-                     (let ((correction
-                            (format "Your previous tool call was malformed and \
+(defun ellm-llm--stream-event (driver result reasoning-state-id)
+  "Return a normalized snapshot event for DRIVER RESULT."
+  `(:type stream :mode snapshot
+    :id ,(cons 'llm (ellm-llm-driver-leg driver))
+    :channels ((reasoning . ,(plist-get result :reasoning))
+               (assistant . ,(plist-get result :text)))
+    :reasoning-state ,reasoning-state-id))
+
+(defun ellm-llm--usage-event (usage)
+  "Return a normalized usage event from llm.el USAGE."
+  (append
+   (list :type 'usage)
+   (cl-loop for key in '(:input-tokens :output-tokens :cached-tokens
+                         :cache-write-tokens)
+            when (plist-member usage key)
+            append (list key (plist-get usage key)))))
+
+(cl-defmethod ellm-backend-start ((driver ellm-llm-driver) emit)
+  "Start or resume one llm.el leg and emit normalized events."
+  (ellm-llm--cancel-driver-timer driver)
+  (setf (ellm-llm-driver-emit driver) emit)
+  (let* ((serial (cl-incf (ellm-llm-driver-serial driver)))
+         (provider (ellm-llm-driver-provider driver))
+         (prompt (ellm-llm-driver-prompt driver))
+         (previous-interaction
+          (car (last (llm-chat-prompt-interactions prompt))))
+         reasoning-state-id
+         leg-usage)
+    (cl-labels
+        ((live-p ()
+           (ellm-llm--driver-live-p driver serial))
+         (partial (result)
+           (when (live-p)
+             (setq leg-usage
+                   (ellm-llm--merge-leg-usage leg-usage result))
+             (when-let* ((state
+                          (ellm-provider-reasoning-state provider result)))
+               (setq reasoning-state-id
+                     (ellm-reasoning-state-write state)))
+             (ellm-llm--emit
+              driver
+              (ellm-llm--stream-event driver result reasoning-state-id))))
+         (continue-with-tools (tool-uses tool-results call-ids)
+           (when (live-p)
+             (cl-incf (ellm-llm-driver-serial driver)))
+           (ellm-llm--emit
+            driver
+            `(:type tool-call :kind tool-batch
+              :tool-uses ,tool-uses :tool-results ,tool-results
+              :call-ids ,call-ids))
+           (ellm-llm--canonicalize-new-interactions
+            prompt previous-interaction)
+           (cl-incf (ellm-llm-driver-leg driver))
+           (ellm-llm--emit driver '(:type continue)))
+         (final (result)
+           (when (live-p)
+             (ellm-llm--cancel-driver-timer driver)
+             (setf (ellm-llm-driver-raw driver) nil)
+             (partial result)
+             (when leg-usage
+               (ellm-llm--emit driver
+                               (ellm-llm--usage-event leg-usage)))
+             (if-let* ((tool-uses (plist-get result :tool-uses))
+                       (tool-results (plist-get result :tool-results)))
+                 (continue-with-tools
+                  tool-uses tool-results
+                 (ellm-llm--new-prompt-tool-call-ids
+                   prompt previous-interaction))
+               (progn
+                 (cl-incf (ellm-llm-driver-serial driver))
+                 (ellm-llm--emit driver '(:type complete))))))
+         (fail (type message)
+           (when (live-p)
+             (ellm-llm--cancel-driver-timer driver)
+             (setf (ellm-llm-driver-raw driver) nil)
+             (cl-incf (ellm-llm-driver-serial driver))
+             (if (ellm-llm--tool-call-error-p type)
+                 (if-let* ((recovery
+                            (ellm-llm--recover-tool-call-error
+                             provider prompt previous-interaction
+                             type message)))
+                     (continue-with-tools
+                      (nth 0 recovery) (nth 1 recovery) (nth 2 recovery))
+                   (let ((correction
+                          (format "Your previous tool call was malformed and \
 could not be executed: %s. Retry it using an advertised tool and valid arguments."
-                                    msg)))
-                       (setf (llm-chat-prompt-interactions prompt)
-                             (append
-                              (llm-chat-prompt-interactions prompt)
-                              (list (make-llm-chat-prompt-interaction
-                                     :role 'user :content correction))))
-                       (with-current-buffer buf
-                         (ellm--preserve-user-position
-                           (ellm--set-active-request nil)
-                           (ellm--insert-turn "assistant" :continuation t)
-                           (insert (ellm--ensure-newline correction))
-                           (ellm--persistence-checkpoint)
-                           (ellm-llm--send-once provider prompt buf)))))
-                 (with-current-buffer buf
-                   (ellm--set-active-request nil)
-                   (ellm--ensure-next-user-turn)
-                   (ellm--persistence-checkpoint)
-                   (ellm--notify-request-finished)
-                   (message "ellm: %s" msg))))))
-      (ellm--set-active-request ellm--request-starting)
+                                  message)))
+                     (setf (llm-chat-prompt-interactions prompt)
+                           (append
+                            (llm-chat-prompt-interactions prompt)
+                            (list (make-llm-chat-prompt-interaction
+                                   :role 'user :content correction))))
+                     (ellm-llm--emit
+                      driver
+                      `(:type extension :kind correction :text ,correction))
+                     (cl-incf (ellm-llm-driver-leg driver))
+                     (ellm-llm--emit driver '(:type continue))))
+               (ellm-llm--emit
+                driver
+                `(:type failure :condition ,type :message ,message
+                  :retryable ,(and (ellm-llm--retryable-error-p type) t)))))))
+      (when ellm-request-timeout
+        (setf
+         (ellm-llm-driver-timer driver)
+         (run-at-time
+          ellm-request-timeout nil
+          (lambda ()
+            (when (live-p)
+              (when-let* ((raw (ellm-llm-driver-raw driver)))
+                (llm-cancel-request raw)
+                (setf (ellm-llm-driver-raw driver) nil))
+              (funcall
+               #'fail 'llm-request-timeout
+               (format "request timed out after %s seconds"
+                       ellm-request-timeout)))))))
       (condition-case err
-          (progn
-            (ellm-llm--start-request
-             request provider prompt partial-render final-render on-error)
-            (when (eq ellm--active-request ellm--request-starting)
-              (ellm--set-active-request request)))
+          (let ((raw
+                 (let ((llm-request-plz-timeout
+                        (or ellm-request-timeout llm-request-plz-timeout)))
+                   (llm-chat-streaming
+                    provider prompt #'partial #'final #'fail 'multi-output))))
+            (when (live-p)
+              (setf (ellm-llm-driver-raw driver) raw)))
         (error
-         (when (eq ellm--active-request ellm--request-starting)
-           (ellm--set-active-request nil)
-           (ellm--ensure-next-user-turn)
-           (ellm--persistence-checkpoint)
-           (ellm--notify-request-finished))
-         (signal (car err) (cdr err)))))))
+         (funcall #'fail (car err) (error-message-string err)))))
+    (ellm-llm-driver-raw driver)))
 
 (defun ellm-llm--frontmatter-cwd (frontmatter)
   "Return FRONTMATTER's `cwd' as an absolute directory, or nil."
@@ -933,34 +835,13 @@ when they later re-enter the buffer."
           (setq-local default-directory cwd))
       (setq-local default-directory base))))
 
-(defun ellm-llm--backend-send (provider frontmatter buffer)
-  "Send BUFFER through a normal `llm.el' PROVIDER."
+(defun ellm-llm--backend-create (provider frontmatter buffer)
+  "Create a normal `llm.el' backend driver for BUFFER."
   (with-current-buffer buffer
-    (setq ellm-llm--request-usage nil)
     (ellm-llm--apply-cwd frontmatter)
     (let ((prompt (ellm-llm--parse-buffer-as-chat provider frontmatter)))
-      (ellm-llm--send-once provider prompt buffer))))
-
-;;;;; Utility
-
-(defun ellm-llm--ensure-buffer (buf &optional request-to-cancel)
-  (unless (buffer-live-p buf)
-    (when request-to-cancel
-      (if (ellm-llm-request-p request-to-cancel)
-          (ellm-backend-cancel request-to-cancel)
-        (llm-cancel-request request-to-cancel)))
-    (user-error "ellm :: Buffer is gone")))
-
-(defun ellm-llm--fold-reasoning-in-region (start end)
-  "Fold the `reasoning' turn located between START and END, if any."
-  (save-excursion
-    (goto-char start)
-    (when (re-search-forward
-           (concat "^"
-                   (ellm--turn-header-prefix-regexp ellm-turn-header-2)
-                   "reasoning\\b")
-           end t)
-      (ellm--fold-subtree-at (match-beginning 0)))))
+      (ellm-llm--make-driver
+       :provider provider :buffer buffer :prompt prompt))))
 
 ;;;; Footer
 
