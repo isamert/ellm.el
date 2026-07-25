@@ -88,6 +88,16 @@ path, respectively, and no implicit pattern/path arguments are appended."
   :type '(repeat string)
   :group 'ellm-tools)
 
+(defcustom ellm-tools-file-info-program "file"
+  "Executable used to identify file contents before reading them."
+  :type 'string
+  :group 'ellm-tools)
+
+(defcustom ellm-tools-file-read-program "sed"
+  "Executable used to read requested lines from text files."
+  :type 'string
+  :group 'ellm-tools)
+
 (defcustom ellm-tools-search-result-limit 200
   "Default maximum number of lines returned by file search tools."
   :type 'integer
@@ -421,36 +431,32 @@ Uses `ellm-tools-grep-program' (ripgrep by default) with
 
 (ellm-deftool files/file-edit ()
   ((file-path :string "The absolute or relative path to the file to edit.")
-   (old-string :string "The exact text to search for and replace in the file.")
+   (old-string :string "The exact text to replace, or an empty string to create a new file.")
    (new-string :string "The text to replace OLD-STRING with.")
    (replace-all :boolean "If non-nil, replace all occurrences of OLD-STRING. Otherwise replace only the first occurrence, erroring if it is not unique." &optional))
   "Edit a file by replacing OLD-STRING with NEW-STRING.
 OLD-STRING must appear exactly once in the file unless REPLACE-ALL
-is non-nil, in which case all occurrences are replaced."
+is non-nil, in which case all occurrences are replaced.  To create a
+new file, pass an empty OLD-STRING; parent directories are created and
+the operation fails if the target already exists."
   (let ((default-directory (ellm-tools--default-directory)))
     (ellm-tools--edit-tool file-path old-string new-string replace-all)))
 
-(ellm-deftool files/read-file-lines ()
+(ellm-deftool files/read-file-lines (:async t)
   ((file-path :string "Path to the file. Path is relative to the current project's root.")
    (start-line :integer "Starting line number.")
    (end-line :integer "Ending line number."))
-  "Return the contents of the file from START-LINE to END-LINE (inclusive)."
+  "Return text from START-LINE to END-LINE (inclusive).
+The file is inspected and read asynchronously.  For a non-text file,
+return metadata without reading its contents."
   (when (or (s-blank? file-path)
             (not (and (numberp start-line) (numberp end-line)))
             (< start-line 1)
             (< end-line start-line))
     (ellm-tools--error "invalid input"))
   (let ((default-directory (ellm-tools--default-directory)))
-    (with-temp-buffer
-      (insert-file-contents file-path)
-      (let ((start-pos (progn (goto-char (point-min)) (forward-line (1- start-line)) (point)))
-            (end-pos (progn (goto-char (point-min)) (forward-line end-line) (point))))
-        (let ((content (buffer-substring-no-properties start-pos end-pos)))
-          (concat
-           (format "<file_lines start_line=%s end_line=%s>\n" start-line end-line)
-           content
-           (unless (string-suffix-p "\n" content) "\n")
-           "</file_lines>"))))))
+    (ellm-tools--start-read-file-lines
+     (expand-file-name file-path) start-line end-line callback)))
 
 ;;;;; Buffers
 
@@ -849,6 +855,110 @@ when non-nil, is treated as success if STDOUT is empty."
          (unless (string-empty-p stderr)
            (concat "\n<warnings>\n" stderr "\n</warnings>"))
          (format "\n</%s>" kind)))))))
+
+;;;;;; File reading
+
+(defun ellm-tools--parse-file-info (output)
+  "Parse file(1) MIME OUTPUT into a plist, or return nil."
+  (let ((output (string-trim output)))
+    (when (string-match
+           "\\`\\([[:alnum:].+-]+/[[:alnum:].+-]+\\)\\(?:;[ \t]*charset=\\([^ \t\n]+\\)\\)?\\'"
+           output)
+      (list :content-type (match-string 1 output)
+            :charset (match-string 2 output)))))
+
+(defun ellm-tools--text-file-info-p (info)
+  "Return non-nil when file(1) INFO describes readable text."
+  (let ((content-type (plist-get info :content-type))
+        (charset (plist-get info :charset)))
+    (or (string-prefix-p "text/" content-type)
+        (equal content-type "inode/x-empty")
+        (and charset (not (equal charset "binary"))))))
+
+(defun ellm-tools--format-non-text-file-info (file-path info)
+  "Format FILE-PATH and file(1) INFO without exposing file contents."
+  (format
+   (concat "<file_info path=%S content_type=%S charset=%S>\n"
+           "Non-text file; contents were not read.\n"
+           "</file_info>")
+   file-path
+   (plist-get info :content-type)
+   (or (plist-get info :charset) "unknown")))
+
+(defun ellm-tools--format-read-file-lines
+    (start-line end-line exit-code stdout stderr)
+  "Format an asynchronous file line read result."
+  (if (not (= exit-code 0))
+      (ellm-tools--format-command-error
+       "read file" exit-code stdout stderr)
+    (concat
+     (format "<file_lines start_line=%s end_line=%s>\n"
+             start-line end-line)
+     stdout
+     (unless (string-suffix-p "\n" stdout) "\n")
+     "</file_lines>")))
+
+(defun ellm-tools--start-read-file-lines
+    (file-path start-line end-line callback)
+  "Inspect and asynchronously read lines from FILE-PATH.
+START-LINE and END-LINE are inclusive.  CALLBACK receives either text
+lines or non-text file metadata.  Return a cancellation function."
+  (let ((cancelled nil)
+        current-cancel)
+    (cl-labels
+        ((set-current-cancel
+          (handle)
+          (if cancelled
+              (ellm-tools--cancel-async-handle handle)
+            (setq current-cancel handle)))
+         (handle-file-info
+          (command-result)
+          (unless cancelled
+            (condition-case err
+                (pcase-let ((`(,exit-code ,stdout ,stderr) command-result))
+                  (let ((info (ellm-tools--parse-file-info stdout)))
+                    (cond
+                     ((not (= exit-code 0))
+                      (funcall callback
+                               (ellm-tools--format-command-error
+                                "file info" exit-code stdout stderr)))
+                     ((not info)
+                      (funcall callback
+                               (format
+                                "Error while reading file: could not determine its type\n%s"
+                                (string-trim (concat stdout "\n" stderr)))))
+                     ((not (ellm-tools--text-file-info-p info))
+                      (funcall callback
+                               (ellm-tools--format-non-text-file-info
+                                file-path info)))
+                     (t
+                      (set-current-cancel
+                       (ellm-tools--start-command
+                        "ellm-tools-read-file"
+                        ellm-tools-file-read-program
+                        (list "-n"
+                              "-e" (format "%d,%dp" start-line end-line)
+                              "-e" (format "%dq" end-line)
+                              file-path)
+                        (lambda (read-exit-code read-stdout read-stderr)
+                          (ellm-tools--format-read-file-lines
+                           start-line end-line
+                           read-exit-code read-stdout read-stderr))
+                        callback))))))
+              (error
+               (funcall callback
+                        (format "Error while reading file: %s" err)))))))
+      (set-current-cancel
+       (ellm-tools--start-command
+        "ellm-tools-file-info"
+        ellm-tools-file-info-program
+        (list "--brief" "--dereference" "--mime" "--" file-path)
+        (lambda (exit-code stdout stderr)
+          (list exit-code stdout stderr))
+        #'handle-file-info))
+      (lambda ()
+        (setq cancelled t)
+        (ellm-tools--cancel-async-handle current-cancel)))))
 
 ;;;;;; TodoTool
 
@@ -1748,8 +1858,6 @@ exactly one occurrence."
     (ellm-tools--error "`old_string' must be a string"))
   (unless (stringp new-string)
     (ellm-tools--error "`new_string' must be a string"))
-  (when (string= old-string "")
-    (ellm-tools--error "`old_string' cannot be empty"))
   (let* ((is-file? (not (bufferp buffer-or-file)))
          (name (if is-file?
                    (concat "file " buffer-or-file)
@@ -1757,6 +1865,10 @@ exactly one occurrence."
          (file-path (when is-file? (expand-file-name buffer-or-file)))
          (existing-buffer (when file-path (find-buffer-visiting file-path))))
     (cond
+     ((string-empty-p old-string)
+      (unless is-file?
+        (ellm-tools--error "`old_string' cannot be empty for buffer edits"))
+      (ellm-tools--create-file file-path new-string name existing-buffer))
      ((bufferp buffer-or-file)
       (with-current-buffer buffer-or-file
         (ellm-tools--do-edit old-string new-string replace-all name)))
@@ -1780,6 +1892,28 @@ exactly one occurrence."
                 result))
           (when (buffer-live-p temp-buf)
             (kill-buffer temp-buf))))))))
+
+(defun ellm-tools--create-file (file-path content name existing-buffer)
+  "Create FILE-PATH with CONTENT for tool target NAME.
+Refuse to overwrite an existing file or a non-empty visiting buffer.
+Refresh EXISTING-BUFFER after creation when it visits FILE-PATH."
+  (when (or (file-exists-p file-path)
+            (file-symlink-p file-path))
+    (ellm-tools--error
+     "Refusing to create %s because it already exists" name))
+  (when (and existing-buffer
+             (with-current-buffer existing-buffer
+               (or (buffer-modified-p) (> (buffer-size) 0))))
+    (ellm-tools--error
+     "Refusing to create %s because its buffer has unsaved content" name))
+  (let ((parent-directory (file-name-directory file-path)))
+    (unless (file-directory-p parent-directory)
+      (make-directory parent-directory t)))
+  (write-region content nil file-path nil 'silent nil 'excl)
+  (when (buffer-live-p existing-buffer)
+    (with-current-buffer existing-buffer
+      (revert-buffer t t t)))
+  (ellm-tools--success "Successfully created %s" name))
 
 (defun ellm-tools--do-edit (old-string new-string replace-all name)
   "Perform the replacement of OLD-STRING with NEW-STRING in the current buffer.
