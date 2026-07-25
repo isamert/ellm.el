@@ -481,7 +481,7 @@ PREVIOUS supplies values omitted by a refresh response."
                       process chunk (lambda (params) (setq result params))))))
     (unwind-protect
         (progn
-          (browse-url-firefox
+          (browse-url
            (concat
             ellm-codex--issuer "/oauth/authorize?"
             (ellm-codex--form
