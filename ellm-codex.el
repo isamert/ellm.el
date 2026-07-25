@@ -682,19 +682,46 @@ browser callback.  Interactively, the first configured Codex provider is used."
                               (ellm-codex--content-part part role))
                             parts)))))
 
+(defun ellm-codex--valid-reasoning-item-p (item)
+  "Return non-nil when ITEM is replayable Codex reasoning state."
+  (and (listp item)
+       (equal (plist-get item :type) "reasoning")
+       (stringp (plist-get item :encrypted_content))))
+
+(defun ellm-codex--normalize-reasoning-items (items)
+  "Return validated reasoning ITEMS as a list, or nil.
+ITEMS may be one legacy item or a list or vector of items."
+  (let ((items
+         (cond
+          ((vectorp items) (append items nil))
+          ((ellm-codex--valid-reasoning-item-p items) (list items))
+          ((listp items) items))))
+    (and items
+         (cl-every #'ellm-codex--valid-reasoning-item-p items)
+         items)))
+
+(defun ellm-codex--interaction-reasoning-items (multi-turn)
+  "Return validated Codex reasoning items from MULTI-TURN metadata."
+  (or (ellm-codex--normalize-reasoning-items
+       (plist-get multi-turn :ellm-codex-reasoning-items))
+      (ellm-codex--normalize-reasoning-items
+       (plist-get multi-turn :ellm-codex-reasoning))))
+
 (defun ellm-codex--input (prompt)
   "Serialize PROMPT history into Codex Responses input items."
   (vconcat
    (mapcan
     (lambda (interaction)
-      (let ((content (llm-chat-prompt-interaction-content interaction))
-            (multi-turn
-             (llm-chat-prompt-interaction-multi-turn-plist interaction)))
+      (let* ((content (llm-chat-prompt-interaction-content interaction))
+             (multi-turn
+              (llm-chat-prompt-interaction-multi-turn-plist interaction))
+             (reasoning-items
+              (ellm-codex--interaction-reasoning-items multi-turn)))
         (cond
          ((eq (llm-chat-prompt-interaction-role interaction) 'system) nil)
-         ((plist-get multi-turn :ellm-codex-reasoning)
+         (reasoning-items
           (append
-           (list (plist-get multi-turn :ellm-codex-reasoning))
+           reasoning-items
            (when (and (stringp content) (not (string-empty-p content)))
              (list (ellm-codex--message interaction)))))
          ((llm-chat-prompt-interaction-tool-results interaction)
@@ -837,7 +864,8 @@ The handler passes partial results to RECEIVER and errors to ERR-RECEIVER."
                  (when (plist-get item :encrypted_content)
                    (funcall receiver
                             (list :multi-turn
-                                  (list :ellm-codex-reasoning item)))))
+                                  (list :ellm-codex-reasoning-items
+                                        (vector item))))))
                 ("function_call"
                  (funcall
                   receiver
@@ -1006,21 +1034,21 @@ SSE responses whose server omits the Content-Type header."
 
 (cl-defmethod ellm-provider-reasoning-state
   ((_provider ellm-codex-provider) result)
-  "Extract a durable encrypted reasoning item from RESULT."
+  "Extract durable encrypted reasoning items from RESULT."
   (when-let* ((multi-turn (plist-get result :multi-turn))
-              (item (plist-get multi-turn :ellm-codex-reasoning))
-              ((equal (plist-get item :type) "reasoning"))
-              ((stringp (plist-get item :encrypted_content))))
-    (list :version 1 :provider "codex" :item item)))
+              (items (ellm-codex--interaction-reasoning-items multi-turn)))
+    (list :version 1 :provider "codex" :items (vconcat items))))
 
 (cl-defmethod ellm-provider-restore-reasoning
   ((_provider ellm-codex-provider) prompt summary state)
   "Restore encrypted reasoning STATE or human-readable SUMMARY into PROMPT."
-  (if (and (equal (plist-get state :version) 1)
-           (equal (plist-get state :provider) "codex")
-           (let ((item (plist-get state :item)))
-             (and (equal (plist-get item :type) "reasoning")
-                  (stringp (plist-get item :encrypted_content)))))
+  (if-let* (((equal (plist-get state :version) 1))
+            ((equal (plist-get state :provider) "codex"))
+            (items
+             (or (ellm-codex--normalize-reasoning-items
+                  (plist-get state :items))
+                 (ellm-codex--normalize-reasoning-items
+                  (plist-get state :item)))))
       (setf (llm-chat-prompt-interactions prompt)
             (append
              (llm-chat-prompt-interactions prompt)
@@ -1028,7 +1056,7 @@ SSE responses whose server omits the Content-Type header."
               (make-llm-chat-prompt-interaction
                :role 'assistant
                :multi-turn-plist
-               (list :ellm-codex-reasoning (plist-get state :item))))))
+               (list :ellm-codex-reasoning-items (vconcat items))))))
     (unless (string-empty-p summary)
       (setf (llm-chat-prompt-interactions prompt)
             (append
