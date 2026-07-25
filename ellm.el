@@ -3928,10 +3928,9 @@ folding a loaded buffer.  A no-op when ROLE should not be folded."
   (when (ellm--role-should-fold-p role)
     (ellm--fold-subtree-at pos)))
 
-(defun ellm--fold-configured-turns ()
-  "Fold every turn in the buffer that is configured to be folded.
-Walks the parsed turns and folds each `tool-call' / `reasoning' turn
-according to `ellm-fold-tool-calls' / `ellm-fold-reasoning-blocks'."
+(defun ellm--fold-turns-with-roles (roles)
+  "Fold every turn in the buffer whose role is a member of ROLES.
+Nested turns are folded as part of their nearest matching ancestor."
   (let* ((turns (ellm--parse-turns))
          (indexed (cl-loop for turn in turns
                            for rest on turns
@@ -3939,10 +3938,7 @@ according to `ellm-fold-tool-calls' / `ellm-fold-reasoning-blocks'."
     (pcase-dolist (`(,turn . ,rest) indexed)
       (let ((role (ellm-turn-role turn))
             (depth (ellm-turn-depth turn)))
-        (when (and (ellm--role-should-fold-p role)
-                   ;; Skip continuation-nested params etc.; only fold the
-                   ;; top of a foldable subtree.
-                   (not (equal role "tool-param")))
+        (when (member role roles)
           (let ((subtree-end
                  (or (cl-loop for next in (cdr rest)
                               when (<= (ellm-turn-depth next) depth)
@@ -3950,6 +3946,34 @@ according to `ellm-fold-tool-calls' / `ellm-fold-reasoning-blocks'."
                      (point-max))))
             (ellm--fold-region-at (ellm--turn-delimiter-beg turn)
                                   subtree-end)))))))
+
+(defun ellm-fold-all-tool-blocks ()
+  "Fold all tool call and tool result blocks in the current buffer.
+This command ignores `ellm-fold-tool-calls', which only controls
+automatic folding."
+  (interactive)
+  (ellm--fold-turns-with-roles '("tool-call" "tool-result")))
+
+(defun ellm-fold-all-reasoning-blocks ()
+  "Fold all reasoning blocks in the current buffer.
+This command ignores `ellm-fold-reasoning-blocks', which only controls
+automatic folding."
+  (interactive)
+  (ellm--fold-turns-with-roles '("reasoning")))
+
+(defun ellm-fold-all-blocks ()
+  "Fold all tool and reasoning blocks in the current buffer.
+This command ignores the automatic folding customization values."
+  (interactive)
+  (ellm--fold-turns-with-roles '("tool-call" "tool-result" "reasoning")))
+
+(defun ellm--fold-configured-turns ()
+  "Fold every turn in the buffer that is configured to be folded.
+Walks the parsed turns and folds each `tool-call' / `reasoning' turn
+according to `ellm-fold-tool-calls' / `ellm-fold-reasoning-blocks'."
+  (ellm--fold-turns-with-roles
+   (append (and ellm-fold-tool-calls '("tool-call" "tool-result"))
+           (and ellm-fold-reasoning-blocks '("reasoning")))))
 
 ;;;; Narrowing
 
