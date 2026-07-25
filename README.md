@@ -80,6 +80,66 @@ transient failures once; ACP requests time out without being resent.  Customize
 `ellm-request-retry-delay` as needed.  Cancelling always leaves a new trailing
 `user` turn ready for the next prompt.
 
+### Dynamic system prompts
+
+System prompts can contain request-time Emacs Lisp interpolation.  This works
+both in the frontmatter `system:` value and in `system` turns:
+
+```markdown
+>-| system
+You are working in this project.
+
+#{(ellm-read-agents-md)}
+
+Today is #{(format-time-string "%F")}.
+>-| user
+Review the current implementation.
+```
+
+Each interpolation must contain exactly one parenthesized form.  Its value is
+inserted as text (`nil` inserts nothing), and generated text is not expanded a
+second time.  Write `\#{` for a literal opener.
+
+Evaluation happens only when a backend consumes system prompts.  Rendered
+values are memoized by exact template text in the conversation buffer, so
+identical frontmatter and turn templates share one value.  New or edited
+template text is evaluated once; changing it back reuses its earlier value.
+`M-x ellm-refresh-system-prompts` clears the buffer's cache.  The cache is not
+saved.  `M-x ellm-show-effective-system-prompts` shows cached output without
+running any Lisp.
+
+For example, expire the caches in every live ellm buffer at midnight:
+
+```elisp
+(require 'midnight)
+
+(defun my-ellm-refresh-system-prompts-at-midnight ()
+  (dolist (buffer (buffer-list))
+    (with-current-buffer buffer
+      (when (derived-mode-p 'ellm-mode)
+        (ellm-refresh-system-prompts 'quiet)))))
+
+(add-hook 'midnight-hook #'my-ellm-refresh-system-prompts-at-midnight)
+(midnight-mode 1)
+```
+
+The default `ellm-prompt-interpolation-policy` asks before evaluating new or
+edited templates.  Set it to `allow` for trusted automated conversations or
+`deny` to disable evaluation.  Interpolation is arbitrary Emacs Lisp, so only
+enable it for prompts you trust.  Useful request-context helpers are:
+
+- `ellm-read-agents-md` — collect project instructions from the project root
+  through the request directory.
+- `ellm-prompt-read-file` — read a file relative to the request directory.
+- `ellm-prompt-frontmatter` — read the request's frontmatter snapshot.
+- `ellm-prompt-directory` and `ellm-prompt-project-root` — inspect request
+  paths.
+
+A leading `system` turn takes precedence over frontmatter `system:`.  Additional
+system turns remain at their original positions for providers that accept
+mid-conversation system instructions.  Regular user and assistant turns are
+always literal and are not interpolated.
+
 ### Interactive Configuration
 
 Run `M-x ellm-set-config` in a conversation buffer to edit frontmatter without

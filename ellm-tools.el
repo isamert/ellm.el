@@ -1203,7 +1203,12 @@ FALLBACK-PROVIDER is used when FRONTMATTER has no `provider:' key."
             (ellm-tools--frontmatter-set
              frontmatter 'tools (ellm-tools--normalize-tool-list tools))))
     (when-let* ((value (ellm-tools--present-string system)))
-      (setq frontmatter (ellm-tools--frontmatter-set frontmatter 'system value)))
+      ;; Tool arguments are model-produced text, never trusted executable
+      ;; prompt templates.
+      (setq frontmatter
+            (ellm-tools--frontmatter-set
+             frontmatter 'system
+             (ellm-escape-prompt-interpolations value))))
     (when-let* ((value (ellm-tools--present-string cwd)))
       (setq frontmatter (ellm-tools--frontmatter-set frontmatter 'cwd value)))
     (setq frontmatter

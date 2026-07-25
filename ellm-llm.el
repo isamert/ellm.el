@@ -590,14 +590,11 @@ earlier observations from the same request leg."
   "Build an `llm-chat-prompt' from the current buffer for PROVIDER.
 FRONTMATTER, when supplied, is the already parsed YAML frontmatter alist."
   (let* ((fm          frontmatter)
-         (turns       (ellm--parse-turns))
-         (fm-system   (alist-get 'system fm))
-         (has-system  (and turns
-                           (equal (ellm-turn-role (car turns)) "system")))
+         (system-state (ellm--resolve-system-prompts provider fm))
+         (turns       (plist-get system-state :turns))
+         (has-system  (plist-get system-state :leading))
          (system      (ellm-llm--canonical-text
-                       (if has-system
-                           (ellm-turn-content (car turns))
-                         fm-system)))
+                       (plist-get system-state :initial)))
          (reasoning   (alist-get 'reasoning fm))
          (tools       (ellm-llm--resolve-tools fm))
          (prompt      (make-llm-chat-prompt

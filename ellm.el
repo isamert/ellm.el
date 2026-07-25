@@ -103,6 +103,26 @@ Backends decide which failures and operations are safe to retry."
   :type 'number
   :group 'ellm)
 
+(defcustom ellm-prompt-interpolation-policy 'ask
+  "Policy for evaluating Lisp interpolation in system prompts.
+`ask' confirms before evaluating each new or modified prompt template.
+`allow' evaluates without confirmation.  `deny' rejects evaluation.
+
+Rendered values are memoized in the conversation buffer, so this policy is
+consulted only when a template must actually be evaluated."
+  :type '(choice (const :tag "Ask before evaluating" ask)
+                 (const :tag "Always allow" allow)
+                 (const :tag "Never evaluate" deny))
+  :group 'ellm)
+
+(defcustom ellm-prompt-interpolation-max-chars 131072
+  "Maximum characters allowed in a rendered prompt template.
+Nil disables the limit.  The same limit applies to project instruction text
+returned by `ellm-read-agents-md'."
+  :type '(choice (const :tag "Unlimited" nil)
+                 (natnum :tag "Characters"))
+  :group 'ellm)
+
 (defcustom ellm-subagents nil
   "Global defaults and profiles for subagent buffers.
 This has the same shape as frontmatter `subagents:'.  A buffer-local
@@ -1154,6 +1174,9 @@ Matches outside Markdown prose regions are ignored."
      (1 'ellm-italic t))
     ;; Inline code `text`
     (,(ellm--make-markdown-matcher "`\\([^`\n]+\\)`") (0 'ellm-inline-code t))
+    ;; Lisp prompt interpolation opener
+    (,(ellm--make-markdown-matcher "\\\\?#{")
+     (0 'font-lock-preprocessor-face t))
     ;; Headings
     (,(ellm--make-markdown-matcher "^# .*$") (0 'ellm-heading-1 t))
     (,(ellm--make-markdown-matcher "^## .*$") (0 'ellm-heading-2 t))
@@ -2342,6 +2365,396 @@ KEY may be a symbol/string or a list naming a nested path."
              (if-let* ((updated (ellm--alist-delete-nested fm key)))
                  (ellm--yaml-encode updated)
                ""))))))))
+
+;;;;; Prompt interpolation
+
+(defvar ellm--prompt-interpolation-context nil
+  "Dynamically bound request context for prompt interpolation.")
+
+(defvar ellm--prompt-interpolation-confirm-allowed nil
+  "Non-nil when prompt interpolation may ask for interactive approval.")
+
+(defvar ellm--prompt-interpolation-source nil
+  "Human-readable source of the prompt template being rendered.")
+
+(defvar-local ellm--system-prompt-cache nil
+  "Hash table of prompt template text to rendered text in this buffer.")
+
+(defun ellm--prompt-context-directory (frontmatter)
+  "Return the effective prompt directory for FRONTMATTER."
+  (let ((cwd (alist-get 'cwd frontmatter))
+        (base (or ellm--base-default-directory default-directory)))
+    (when (and cwd (not (stringp cwd)))
+      (user-error "ellm: frontmatter `cwd' must be a string"))
+    (let ((directory
+           (file-name-as-directory
+            (expand-file-name (or cwd base) base))))
+      (unless (file-directory-p directory)
+        (user-error "ellm: cwd does not exist: %s" directory))
+      directory)))
+
+(defun ellm--prompt-context (provider frontmatter)
+  "Return prompt interpolation context for PROVIDER and FRONTMATTER."
+  (list :buffer (current-buffer)
+        :provider provider
+        :frontmatter frontmatter
+        :directory (ellm--prompt-context-directory frontmatter)))
+
+(defun ellm-prompt-frontmatter (&optional path)
+  "Return request frontmatter, or its value at PATH.
+PATH may be a symbol/string or a list naming a nested path.  During prompt
+interpolation this reads the immutable request snapshot."
+  (let ((frontmatter
+         (if (plist-member ellm--prompt-interpolation-context :frontmatter)
+             (plist-get ellm--prompt-interpolation-context :frontmatter)
+           (and (derived-mode-p 'ellm-mode)
+                (ellm--parse-frontmatter)))))
+    (copy-tree
+     (if path
+         (ellm--alist-get-nested frontmatter path)
+       frontmatter))))
+
+(defun ellm-prompt-directory ()
+  "Return the effective directory for prompt interpolation."
+  (file-name-as-directory
+   (expand-file-name
+    (or (plist-get ellm--prompt-interpolation-context :directory)
+        default-directory))))
+
+(defun ellm-prompt-project-root ()
+  "Return the project root for prompt interpolation, or nil."
+  (let ((default-directory (ellm-prompt-directory)))
+    (funcall ellm-current-project-function)))
+
+(defun ellm-prompt-read-file (file &optional max-chars)
+  "Return text from FILE relative to `ellm-prompt-directory'.
+Signal when the text exceeds MAX-CHARS.  When MAX-CHARS is nil, use
+`ellm-prompt-interpolation-max-chars'."
+  (let ((path (expand-file-name file (ellm-prompt-directory)))
+        (limit (or max-chars ellm-prompt-interpolation-max-chars)))
+    (unless (file-readable-p path)
+      (user-error "ellm: prompt file is not readable: %s" path))
+    (unless (file-regular-p path)
+      (user-error "ellm: prompt file is not a regular file: %s" path))
+    (with-temp-buffer
+      (insert-file-contents path)
+      (when (and limit (> (buffer-size) limit))
+        (user-error "ellm: prompt file exceeds %d characters: %s"
+                    limit path))
+      (buffer-string))))
+
+(defun ellm--project-directory-chain (root directory)
+  "Return directories from ROOT through DIRECTORY."
+  (let ((root (file-name-as-directory (expand-file-name root)))
+        (cursor (file-name-as-directory (expand-file-name directory)))
+        result)
+    (while cursor
+      (push cursor result)
+      (if (file-equal-p cursor root)
+          (setq cursor nil)
+        (let ((parent
+               (file-name-directory
+                (directory-file-name cursor))))
+          (setq cursor
+                (and parent
+                     (not (file-equal-p parent cursor))
+                     (or (file-equal-p parent root)
+                         (file-in-directory-p parent root))
+                     parent)))))
+    result))
+
+(defun ellm-read-agents-md (&optional directory)
+  "Return applicable project `AGENTS.md' text for DIRECTORY.
+Files are read from the project root through DIRECTORY and joined in that
+order, so closer instructions occur later.  DIRECTORY defaults to
+`ellm-prompt-directory'."
+  (let* ((directory
+          (file-name-as-directory
+           (expand-file-name (or directory (ellm-prompt-directory)))))
+         (_ (unless (file-directory-p directory)
+              (user-error "ellm: instruction directory does not exist: %s"
+                          directory)))
+         (default-directory directory)
+         (project-root (funcall ellm-current-project-function))
+         (root
+          (if (and project-root
+                   (or (file-equal-p directory project-root)
+                       (file-in-directory-p directory project-root)))
+              project-root
+            directory))
+         contents)
+    (dolist (dir (ellm--project-directory-chain root directory))
+      (let ((file (expand-file-name "AGENTS.md" dir)))
+        (when (file-readable-p file)
+          (push (ellm-prompt-read-file file) contents))))
+    (let ((text (string-join (nreverse contents) "\n\n")))
+      (when (and ellm-prompt-interpolation-max-chars
+                 (> (length text) ellm-prompt-interpolation-max-chars))
+        (user-error "ellm: AGENTS.md instructions exceed %d characters"
+                    ellm-prompt-interpolation-max-chars))
+      text)))
+
+(defun ellm--prompt-interpolation-escaped-p (text position)
+  "Return non-nil when the interpolation opener at POSITION is escaped in TEXT."
+  (let ((index (1- position))
+        (slashes 0))
+    (while (and (>= index 0) (eq (aref text index) ?\\))
+      (cl-incf slashes)
+      (cl-decf index))
+    (cl-oddp slashes)))
+
+(defun ellm--prompt-template-interpolation-p (template)
+  "Return non-nil when TEMPLATE contains executable interpolation."
+  (let ((position 0)
+        found)
+    (while (and (not found)
+                (setq position (string-match "#{" template position)))
+      (if (ellm--prompt-interpolation-escaped-p template position)
+          (setq position (+ position 2))
+        (setq found t)))
+    found))
+
+(defun ellm-escape-prompt-interpolations (text)
+  "Return TEXT with every executable `#{' opener escaped."
+  (let ((position 0)
+        (cursor 0)
+        pieces)
+    (while (setq position (string-match "#{" text position))
+      (push (substring text cursor position) pieces)
+      (unless (ellm--prompt-interpolation-escaped-p text position)
+        (push "\\" pieces))
+      (push "#{" pieces)
+      (setq cursor (+ position 2)
+            position cursor))
+    (push (substring text cursor) pieces)
+    (apply #'concat (nreverse pieces))))
+
+(defun ellm--prompt-interpolation-location (template position)
+  "Return a line and column description for POSITION in TEMPLATE."
+  (let* ((line (1+ (cl-count ?\n template :end position)))
+         (last-newline (cl-position ?\n template :end position :from-end t))
+         (column (if last-newline
+                     (- position last-newline)
+                   (1+ position))))
+    (format "line %d, column %d" line column)))
+
+(defun ellm--authorize-prompt-interpolation ()
+  "Authorize evaluation of the dynamically bound prompt template."
+  (pcase ellm-prompt-interpolation-policy
+    ('allow t)
+    ('deny
+     (user-error "ellm: Lisp prompt interpolation is disabled"))
+    ('ask
+     (unless ellm--prompt-interpolation-confirm-allowed
+       (user-error
+        "ellm: Lisp prompt interpolation requires interactive approval"))
+     (unless
+         (yes-or-no-p
+          (format "Evaluate Lisp in %s? "
+                  (or ellm--prompt-interpolation-source "system prompt")))
+       (user-error "ellm: Lisp prompt interpolation was not approved")))
+    (_
+     (user-error "ellm: invalid prompt interpolation policy: %S"
+                 ellm-prompt-interpolation-policy))))
+
+(defun ellm--prompt-interpolation-string (value)
+  "Return interpolation VALUE as prompt text."
+  (substring-no-properties
+   (cond
+    ((null value) "")
+    ((stringp value) value)
+    (t (format "%s" value)))))
+
+(defun ellm-expand-prompt-template (template &optional context)
+  "Evaluate Lisp interpolation in TEMPLATE and return rendered text.
+CONTEXT defaults to the current buffer's prompt context.  Interpolation uses
+the syntax `#{(FORM)}'; `\\#{' inserts a literal opener.  Generated text is
+not recursively expanded."
+  (unless (stringp template)
+    (user-error "ellm: prompt template must be a string"))
+  (when (ellm--prompt-template-interpolation-p template)
+    (ellm--authorize-prompt-interpolation))
+  (let* ((context
+          (or context
+              (ellm--prompt-context
+               (plist-get ellm--prompt-interpolation-context :provider)
+               (or (plist-get ellm--prompt-interpolation-context :frontmatter)
+                   (and (derived-mode-p 'ellm-mode)
+                        (ellm--parse-frontmatter))))))
+         (buffer (or (plist-get context :buffer) (current-buffer)))
+         (directory (or (plist-get context :directory) default-directory))
+         (position 0)
+         (cursor 0)
+         pieces)
+    (while (setq position (string-match "#{" template position))
+      (if (ellm--prompt-interpolation-escaped-p template position)
+          (progn
+            (push (substring template cursor (1- position)) pieces)
+            (push "#{" pieces)
+            (setq cursor (+ position 2)
+                  position cursor))
+        (push (substring template cursor position) pieces)
+        (let ((form-start (+ position 2)))
+          (while (and (< form-start (length template))
+                      (memq (aref template form-start) '(?\s ?\t ?\r ?\n)))
+            (cl-incf form-start))
+          (unless (and (< form-start (length template))
+                       (eq (aref template form-start) ?\())
+            (user-error
+             "ellm: prompt interpolation at %s must contain one parenthesized form"
+             (ellm--prompt-interpolation-location template position)))
+          (pcase-let*
+              ((`(,form . ,form-end)
+                (condition-case err
+                    (read-from-string template form-start)
+                  (error
+                   (user-error
+                    "ellm: invalid prompt interpolation at %s: %s"
+                    (ellm--prompt-interpolation-location template position)
+                    (error-message-string err)))))
+               (closing form-end))
+            (while (and (< closing (length template))
+                        (memq (aref template closing) '(?\s ?\t ?\r ?\n)))
+              (cl-incf closing))
+            (unless (and (< closing (length template))
+                         (eq (aref template closing) ?}))
+              (user-error
+               "ellm: prompt interpolation at %s must end after one form"
+               (ellm--prompt-interpolation-location template position)))
+            (let ((ellm--prompt-interpolation-context context))
+              (push
+               (ellm--prompt-interpolation-string
+                (condition-case err
+                    (with-current-buffer buffer
+                      (let ((default-directory directory))
+                        (save-excursion
+                          (save-restriction
+                            (widen)
+                            (save-match-data
+                              (eval form t))))))
+                  (error
+                   (user-error
+                    "ellm: prompt interpolation at %s failed: %s"
+                    (ellm--prompt-interpolation-location template position)
+                    (error-message-string err)))))
+               pieces))
+            (setq cursor (1+ closing)
+                  position cursor)))))
+    (push (substring template cursor) pieces)
+    (let ((rendered (apply #'concat (nreverse pieces))))
+      (when (and ellm-prompt-interpolation-max-chars
+                 (> (length rendered) ellm-prompt-interpolation-max-chars))
+        (user-error "ellm: rendered prompt exceeds %d characters"
+                    ellm-prompt-interpolation-max-chars))
+      rendered)))
+
+(defun ellm--ensure-system-prompt-cache ()
+  "Return the current buffer's prompt cache, creating it if needed."
+  (or ellm--system-prompt-cache
+      (setq ellm--system-prompt-cache
+            (make-hash-table :test #'equal))))
+
+(defun ellm--cached-prompt-template (template)
+  "Return TEMPLATE's cached rendered text, or nil."
+  (and ellm--system-prompt-cache
+       (gethash template ellm--system-prompt-cache)))
+
+(defun ellm--memoized-prompt-template (template context label)
+  "Return TEMPLATE rendered once in this buffer.
+CONTEXT is the request context.  LABEL identifies the first source using this
+template in approval prompts and errors."
+  (or (ellm--cached-prompt-template template)
+      (let* ((ellm--prompt-interpolation-source label)
+             (rendered (ellm-expand-prompt-template template context)))
+        (puthash template rendered (ellm--ensure-system-prompt-cache))
+        rendered)))
+
+(defun ellm--clear-system-prompt-cache ()
+  "Clear every buffer-local system-prompt cache entry."
+  (setq ellm--system-prompt-cache nil))
+
+(defun ellm--resolve-system-prompts (provider frontmatter)
+  "Return resolved system state for PROVIDER and FRONTMATTER.
+The result is a plist with `:initial', `:leading', and resolved `:turns'.
+Templates are memoized by exact text across frontmatter and system turns."
+  (let* ((turns (ellm--parse-turns))
+         (leading (and turns
+                       (equal (ellm-turn-role (car turns)) "system")))
+         (context (ellm--prompt-context provider frontmatter))
+         (frontmatter-template (alist-get 'system frontmatter))
+         initial)
+    (unless leading
+      (when frontmatter-template
+        (unless (stringp frontmatter-template)
+          (user-error "ellm: frontmatter `system' must be a string"))
+        (setq initial
+              (ellm--memoized-prompt-template
+               frontmatter-template context "frontmatter system prompt"))))
+    (dolist (turn turns)
+      (when (equal (ellm-turn-role turn) "system")
+        (let* ((line (line-number-at-pos (ellm--turn-delimiter-beg turn)))
+               (rendered
+                (ellm--memoized-prompt-template
+                 (ellm-turn-content turn) context
+                 (format "system turn on line %d" line))))
+          (setf (ellm-turn-content turn) rendered))))
+    (when leading
+      (setq initial (ellm-turn-content (car turns))))
+    (list :initial initial :leading leading :turns turns)))
+
+(defun ellm-refresh-system-prompts (&optional quiet)
+  "Clear memoized system prompts in the current conversation buffer.
+When QUIET is non-nil, do not report the change.  An already-created request
+keeps its resolved prompt; clearing the cache only affects future requests."
+  (interactive)
+  (unless (derived-mode-p 'ellm-mode)
+    (user-error "ellm: not in an ellm buffer"))
+  (ellm--clear-system-prompt-cache)
+  (unless quiet
+    (message "ellm: system prompt cache cleared")))
+
+(defun ellm-show-effective-system-prompts ()
+  "Show cached effective system prompts without evaluating templates."
+  (interactive)
+  (unless (derived-mode-p 'ellm-mode)
+    (user-error "ellm: not in an ellm buffer"))
+  (let* ((frontmatter (ellm--parse-frontmatter))
+         (turns (ellm--parse-turns))
+         (leading (and turns
+                       (equal (ellm-turn-role (car turns)) "system")))
+         (conversation-name (buffer-name))
+         sources)
+    (unless leading
+      (when-let* ((cell (assq 'system frontmatter))
+                  (template (cdr cell)))
+        (push (list "Frontmatter system prompt" template
+                    (ellm--cached-prompt-template template))
+              sources)))
+    (dolist (turn turns)
+      (when (equal (ellm-turn-role turn) "system")
+        (let ((line (line-number-at-pos (ellm--turn-delimiter-beg turn))))
+          (push (list (format "System turn on line %d" line)
+                      (ellm-turn-content turn)
+                      (ellm--cached-prompt-template
+                       (ellm-turn-content turn)))
+                sources))))
+    (setq sources (nreverse sources))
+    (with-help-window "*ellm system prompts*"
+      (princ (format "Effective system prompts for %s\n\n"
+                     conversation-name))
+      (if (not sources)
+          (princ "No effective system prompts.\n")
+        (dolist (source sources)
+          (pcase-let ((`(,label ,template ,rendered) source))
+            (princ (format "%s [%s]\n"
+                           label (if rendered "cached" "not rendered")))
+            (princ "\nTemplate:\n")
+            (princ template)
+            (princ "\n\nRendered:\n")
+            (if rendered
+                (princ rendered)
+              (princ "<not available>"))
+            (princ "\n\n")))))))
 
 ;;;;; Persistence
 
@@ -4422,45 +4835,52 @@ lifecycle transitions and buffer finalization.
 
 Errors during streaming are signalled normally."
   (interactive)
-  (ellm--ensure-no-config-in-flight)
-  (when ellm--active-request
-    (user-error "ellm: a request is already in flight; M-x ellm-cancel"))
-  (ellm--ensure-trailing-user-turn)
-  (setq ellm--request-finished-notified-p nil)
-  (cl-incf ellm--request-generation)
-  (let* ((fm       (ellm--parse-frontmatter))
-         (provider (ellm--resolve-provider fm))
-         (buf      (current-buffer))
-         (started-at (ellm--now))
-         (user-turn (car (last (ellm--parse-turns))))
-         request)
-    (ellm--set-turn-header-attrs
-     (ellm--turn-delimiter-beg user-turn)
-     `(("ts" . ,(ellm--timestamp started-at))))
-    (setq ellm--request-start-time started-at)
-    (ellm--persistence-checkpoint)
-    (ellm--insert-turn "assistant")
-    (setq ellm--request-assistant-marker
-          (save-excursion
-            (goto-char (point-max))
-            (forward-line -1)
-            (let ((marker (point-marker)))
-              (set-marker-insertion-type marker nil)
-              marker)))
-    (setq request
-          (ellm--make-request
-           :buffer buf :provider provider :frontmatter fm
-           :generation ellm--request-generation))
-    (ellm--set-active-request request)
-    (condition-case err
-        (progn
-          (setf (ellm-request-backend request)
-                (ellm-backend-create provider fm buf))
-          (ellm--request-start-backend request))
-      (error
-       (ellm--request-terminal-transition
-        request 'failed (error-message-string err))
-       (signal (car err) (cdr err))))))
+  (let ((ellm--prompt-interpolation-confirm-allowed
+         (called-interactively-p 'interactive)))
+    (ellm--ensure-no-config-in-flight)
+    (when ellm--active-request
+      (user-error "ellm: a request is already in flight; M-x ellm-cancel"))
+    (ellm--ensure-trailing-user-turn)
+    (setq ellm--request-finished-notified-p nil)
+    (cl-incf ellm--request-generation)
+    (let* ((fm       (ellm--parse-frontmatter))
+           (provider (ellm--resolve-provider fm))
+           (buf      (current-buffer))
+           (started-at (ellm--now))
+           (user-turn (car (last (ellm--parse-turns))))
+           request)
+      ;; Resolve before mutating the transcript.  The llm.el backend parses the
+      ;; buffer again while creating its driver, but every system prompt is then
+      ;; a cache hit rather than a second evaluation.
+      (when (ellm-provider-config-effect provider '(system) buf)
+        (ellm--resolve-system-prompts provider fm))
+      (ellm--set-turn-header-attrs
+       (ellm--turn-delimiter-beg user-turn)
+       `(("ts" . ,(ellm--timestamp started-at))))
+      (setq ellm--request-start-time started-at)
+      (ellm--persistence-checkpoint)
+      (ellm--insert-turn "assistant")
+      (setq ellm--request-assistant-marker
+            (save-excursion
+              (goto-char (point-max))
+              (forward-line -1)
+              (let ((marker (point-marker)))
+                (set-marker-insertion-type marker nil)
+                marker)))
+      (setq request
+            (ellm--make-request
+             :buffer buf :provider provider :frontmatter fm
+             :generation ellm--request-generation))
+      (ellm--set-active-request request)
+      (condition-case err
+          (progn
+            (setf (ellm-request-backend request)
+                  (ellm-backend-create provider fm buf))
+            (ellm--request-start-backend request))
+        (error
+         (ellm--request-terminal-transition
+          request 'failed (error-message-string err))
+         (signal (car err) (cdr err)))))))
 
 (defun ellm-cancel (&optional quiet)
   "Cancel the in-flight LLM request for this buffer, if any.
@@ -5261,6 +5681,7 @@ the resulting normalized list."
 ;;;###autoload
 (define-derived-mode ellm-mode text-mode "eLLM"
   "Major mode for LLM interaction buffers."
+  (ellm--clear-system-prompt-cache)
   (setq-local ellm-buffer-state (ellm--make-buffer-state))
   (unless ellm--base-default-directory
     (setq-local ellm--base-default-directory default-directory))
