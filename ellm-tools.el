@@ -1819,6 +1819,7 @@ FALLBACK-PROVIDER is used when FRONTMATTER has no `provider:' key."
   (let ((result (copy-tree frontmatter)))
     (dolist (path '((acp session-id)
                     (acp title)
+                    (title)
                     (acp updated-at)
                     (ellm role)
                     (subagent)))

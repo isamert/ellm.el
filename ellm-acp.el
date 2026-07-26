@@ -1956,12 +1956,10 @@ When SELECT is non-nil, choose a session from `session/list'."
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
         (unless ellm-acp--inhibit-frontmatter-persist
-          (when-let* ((title (plist-get update :title)))
-            (ellm--set-frontmatter-value '(acp title) title))
           (when-let* ((updated-at (plist-get update :updatedAt)))
             (ellm--set-frontmatter-value '(acp updated-at) updated-at)))
         (when-let* ((title (plist-get update :title)))
-          (ellm-update-session-title title buffer))))))
+          (ellm-set-session-title title buffer))))))
 
 (defun ellm-acp--slash-command-candidate (command)
   "Return completion candidate for ACP slash COMMAND."

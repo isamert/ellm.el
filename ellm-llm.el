@@ -40,6 +40,17 @@
 (unless (get 'not-implemented 'error-conditions)
   (define-error 'not-implemented "Operation is not implemented for this LLM provider"))
 
+(defcustom ellm-llm-generate-title t
+  "Whether the `llm.el' backend generates a title for new conversations.
+Generation is a best-effort asynchronous request using only the first user
+prompt.  It uses the provider entry's `:small-model' when configured, and
+otherwise uses the current chat model."
+  :type 'boolean
+  :group 'ellm)
+
+(defconst ellm-llm--title-instruction
+  "Create a concise 3-7 word title for the user's message. Use the message's language. Return only the title, without quotes, markdown, a 'Title:' prefix, or explanation.")
+
 (cl-defstruct (ellm-llm-driver (:constructor ellm-llm--make-driver))
   "Protocol driver for one logical `llm.el' request."
   (provider nil
@@ -65,7 +76,16 @@
           :documentation "Generation counter used to invalidate stale callbacks.")
   (leg 0
        :type integer
-       :documentation "Tool-loop leg number used to identify cumulative streams."))
+       :documentation "Tool-loop leg number used to identify cumulative streams.")
+  (title-prompt nil
+                :type (or null string)
+                :documentation "First user prompt eligible for title generation.")
+  (title-request nil
+                 :type t
+                 :documentation "Cancellable background title request, or nil.")
+  (title-started nil
+                 :type boolean
+                 :documentation "Non-nil once title generation has been attempted."))
 
 (defconst ellm-llm--turn-usage-attrs
   '((:input-tokens . "input-tokens")
@@ -564,6 +584,86 @@ CALL-IDS is an optional cons of provider tool-use and tool-result ID lists."
                  id (or (plist-get tu :name) (car-safe tr))
                  (cdr tr) (plist-get tu :args)))))
 
+;;;;; Title stuff
+
+(defun ellm-llm--title-warning (format-string &rest args)
+  "Report a title-generation warning using FORMAT-STRING and ARGS."
+  (display-warning
+   'ellm (concat "llm title generation: "
+                 (apply #'format format-string args))
+   :warning))
+
+(defun ellm-llm--title-text (result)
+  "Return a normalized title from llm.el RESULT, or nil."
+  (when (listp result)
+    (setq result (plist-get result :text)))
+  (when (stringp result)
+    (let* ((line (car (split-string (string-trim result) "[\r\n]+" t)))
+           (title (and line
+                       (string-trim
+                        (replace-regexp-in-string
+                         "\\`[Tt]itle:[[:space:]]*" "" line)
+                        "[[:space:]\"'`]+" "[[:space:]\"'`]+"))))
+      (when (and title (not (string-empty-p title)))
+        (truncate-string-to-width title 100 nil nil t)))))
+
+(defun ellm-llm--start-title-generation (driver)
+  "Start best-effort title generation for DRIVER when eligible."
+  (when (and ellm-llm-generate-title
+             (not (ellm-llm-driver-title-started driver))
+             (ellm-llm-driver-title-prompt driver))
+    (setf (ellm-llm-driver-title-started driver) t)
+    (let* ((provider (ellm-llm-driver-provider driver))
+           (small-model (ellm-provider-small-model provider))
+           (title-provider
+            (if small-model
+                (condition-case err
+                    (ellm-provider-with-model provider small-model)
+                  (error
+                   (ellm-llm--title-warning
+                    "cannot select small model %S; using chat model: %s"
+                    small-model (error-message-string err))
+                   provider))
+              provider))
+           (buffer (ellm-llm-driver-buffer driver))
+           (prompt
+            (make-llm-chat-prompt
+             :context ellm-llm--title-instruction
+             :interactions
+             (list (make-llm-chat-prompt-interaction
+                    :role 'user
+                    :content (ellm-llm-driver-title-prompt driver))))))
+      (condition-case err
+          (setf
+           (ellm-llm-driver-title-request driver)
+           (llm-chat-streaming
+            title-provider prompt #'ignore
+            (lambda (result)
+              (setf (ellm-llm-driver-title-request driver) nil)
+              (if-let* ((title (ellm-llm--title-text result)))
+                  (when (buffer-live-p buffer)
+                    (with-current-buffer buffer
+                      ;; A title set while this request was running wins.
+                      (unless ellm--session-title
+                        (condition-case err
+                            (ellm-set-session-title title buffer)
+                          (error
+                           (ellm-llm--title-warning
+                            "could not persist title: %s"
+                            (error-message-string err)))))))
+                (ellm-llm--title-warning
+                 "provider returned no usable title: %S" result)))
+            (lambda (&rest error-data)
+              (setf (ellm-llm-driver-title-request driver) nil)
+              (ellm-llm--title-warning
+               "request failed: %s"
+               (mapconcat (lambda (value) (format "%S" value))
+                          error-data " ")))
+            'multi-output))
+        (error
+         (ellm-llm--title-warning
+          "could not start request: %s" (error-message-string err)))))))
+
 ;;;;; Parsing & sending
 
 (defun ellm-llm--provider-with-model (provider model)
@@ -704,6 +804,7 @@ Return (TOOL-USES TOOL-RESULTS IDS), or nil when no call was recoverable."
   "Start or resume one llm.el leg and emit normalized events."
   (ellm-llm--cancel-driver-timer driver)
   (setf (ellm-llm-driver-emit driver) emit)
+  (ellm-llm--start-title-generation driver)
   (let* ((serial (cl-incf (ellm-llm-driver-serial driver)))
          (provider (ellm-llm-driver-provider driver))
          (prompt (ellm-llm-driver-prompt driver))
@@ -839,9 +940,25 @@ when they later re-enter the buffer."
   "Create a normal `llm.el' backend driver for BUFFER."
   (with-current-buffer buffer
     (ellm-llm--apply-cwd frontmatter)
-    (let ((prompt (ellm-llm--parse-buffer-as-chat provider frontmatter)))
+    (let* ((prompt (ellm-llm--parse-buffer-as-chat provider frontmatter))
+           (interactions (llm-chat-prompt-interactions prompt))
+           (users (seq-filter
+                   (lambda (interaction)
+                     (eq (llm-chat-prompt-interaction-role interaction) 'user))
+                   interactions))
+           (assistants (seq-find
+                        (lambda (interaction)
+                          (eq (llm-chat-prompt-interaction-role interaction)
+                              'assistant))
+                        interactions))
+           (first-user (and (= (length users) 1)
+                            (not assistants)
+                            (llm-chat-prompt-interaction-content (car users)))))
       (ellm-llm--make-driver
-       :provider provider :buffer buffer :prompt prompt))))
+       :provider provider :buffer buffer :prompt prompt
+       :title-prompt (and (stringp first-user)
+                          (not (alist-get 'title frontmatter))
+                          first-user)))))
 
 ;;;; Footer
 

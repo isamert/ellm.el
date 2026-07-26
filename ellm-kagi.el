@@ -771,10 +771,7 @@ to `ellm-provider' or the first Kagi entry in `ellm-provider-alist'."
   "Store TITLE and rename Kagi REQUEST's buffer."
   (when-let* ((buffer (ellm-kagi-request-buffer request)))
     (when (buffer-live-p buffer)
-      (with-current-buffer buffer
-        (ellm--preserve-user-position
-          (ellm--set-frontmatter-value '(kagi title) title))
-        (ellm-update-session-title title buffer)))))
+      (ellm-set-session-title title buffer))))
 
 (defun ellm-kagi--update-usage (request event)
   "Emit normalized usage from final Kagi EVENT."

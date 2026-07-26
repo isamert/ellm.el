@@ -170,10 +170,20 @@ can be used.
 (require 'llm-openai)
 
 (setq ellm-provider-alist
-      `((openai . ,(make-llm-openai
+      `((openai . (:provider
+                  ,(make-llm-openai
                     :key (getenv "OPENAI_API_KEY")
-                    :chat-model "gpt-5.4-mini"))))
+                    :chat-model "gpt-5.4-mini")
+                  :small-model "gpt-5.4-nano"))))
 ```
+
+Provider entries may set `:small-model` for fast, inexpensive auxiliary
+requests.  The llm backend currently uses it to generate a session title from
+the first user prompt; future lightweight tasks may use it as well.  When it is
+omitted, the active chat model is used.  Set `ellm-llm-generate-title` to nil to
+disable the extra request.  Generated titles are stored in the top-level
+`title:` frontmatter key, which is shared by all backends and restored when a
+conversation is reopened.
 
 Conversation example:
 

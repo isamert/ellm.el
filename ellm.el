@@ -71,9 +71,11 @@ The car is a symbol usable from frontmatter as `provider: NAME'.  The
 cdr is either:
 
   - a provider object directly, or
-  - a plist `(:provider PROV :models (\"m1\" \"m2\" …))' where the
-    optional `:models' list constrains the candidates offered by
-    frontmatter `model:' completion.
+  - a plist `(:provider PROV :models (\"m1\" \"m2\" …)
+    :small-model \"MODEL\")'.  The optional `:models' list constrains
+    frontmatter `model:' completion.  `:small-model' selects a faster,
+    cheaper model for auxiliary work such as conversation titles; the
+    normal chat model is used when it is absent.
 
 Used by `ellm--resolve-provider' to look up the provider named in the
 buffer's frontmatter, and by `ellm--frontmatter-capf' for completion."
@@ -81,7 +83,8 @@ buffer's frontmatter, and by `ellm--frontmatter-capf' for completion."
                 :value-type
                 (choice (restricted-sexp :match-alternatives (recordp))
                         (plist :options ((:provider sexp)
-                                          (:models (repeat string))))))
+                                         (:models (repeat string))
+                                         (:small-model string)))))
   :group 'ellm)
 
 (defcustom ellm-request-timeout 120
@@ -2260,6 +2263,22 @@ stored without their leading colon, e.g. `:id call_1' becomes
           (format "*ellm (%s): %s*" project-name title)
         (format "*ellm: %s*" title)))))
 
+(defvar-local ellm--session-title nil
+  "Current generic session title, or nil.")
+
+(defun ellm-set-session-title (title &optional buffer)
+  "Persist TITLE as BUFFER's generic session title and update its name.
+BUFFER defaults to the current buffer.  Invalid or empty titles are ignored."
+  (let ((buffer (or buffer (current-buffer))))
+    (when (and (stringp title) (not (string-empty-p title))
+               (buffer-live-p buffer))
+      (with-current-buffer buffer
+        (setq ellm--session-title title)
+        (let ((inhibit-read-only t))
+          (ellm--preserve-user-position
+            (ellm--set-frontmatter-value '(title) title)))
+        (ellm-update-session-title title buffer)))))
+
 (defun ellm-update-session-title (title &optional buffer)
   "Update BUFFER's name from backend-provided session TITLE.
 BUFFER defaults to the current buffer.  Do nothing when
@@ -3059,6 +3078,16 @@ The current session store is preferred over the global cache."
 
 ;;;;; Provider resolution
 
+(defvar ellm--provider-small-models
+  (make-hash-table :test #'eq :weakness 'key)
+  "Auxiliary model names associated with resolved provider objects.")
+
+(defun ellm-provider-small-model (provider)
+  "Return PROVIDER's configured model for small auxiliary tasks.
+Provider entries in `ellm-provider-alist' configure this with
+`:small-model'.  Return nil to use the provider's current chat model."
+  (gethash provider ellm--provider-small-models))
+
 (defun ellm--provider-with-model (provider model)
   "Return PROVIDER configured with MODEL where its backend supports it."
   (ellm-provider-with-model provider model))
@@ -3074,11 +3103,12 @@ through `ellm-provider-with-model'.
 
 Signals `user-error' when no provider can be resolved."
   (let* ((named (alist-get 'provider frontmatter))
+         entry
          (provider
           (cond
            (named
-            (let* ((sym (if (stringp named) (intern named) named))
-                   (entry (alist-get sym ellm-provider-alist)))
+            (let ((sym (if (stringp named) (intern named) named)))
+              (setq entry (alist-get sym ellm-provider-alist))
               (unless entry
                 (user-error
                  "ellm: provider `%s' not found in `ellm-provider-alist'"
@@ -3087,10 +3117,14 @@ Signals `user-error' when no provider can be resolved."
            (ellm-provider ellm-provider)
            (t (user-error
                "ellm: no provider configured (set `ellm-provider' or use frontmatter `provider:')"))))
-         (model (alist-get 'model frontmatter)))
-    (if model
-        (ellm--provider-with-model provider model)
-      provider)))
+         (model (alist-get 'model frontmatter))
+         (resolved (if model
+                       (ellm--provider-with-model provider model)
+                     provider)))
+    (when-let* ((small-model (and (listp entry)
+                                  (plist-get entry :small-model))))
+      (puthash resolved small-model ellm--provider-small-models))
+    resolved))
 
 ;;;;; Tool resolution
 
@@ -3684,8 +3718,10 @@ MESSAGE-TEXT is reported after cleanup when non-nil."
            (ellm-backend-render-event
             (ellm-request-backend request) event request))
           ('extension
-           (ellm-backend-render-event
-            (ellm-request-backend request) event request)
+           (if (eq (plist-get event :kind) 'title)
+               (ellm-set-session-title (plist-get event :title))
+             (ellm-backend-render-event
+              (ellm-request-backend request) event request))
            (when (plist-get event :checkpoint)
              (ellm--persistence-checkpoint)))
           ('operation
@@ -5862,6 +5898,10 @@ the resulting normalized list."
   ;; Collapse configured turns (tool calls / reasoning) in loaded
   ;; conversations.  Safe here because every turn is already complete.
   (ellm--fold-configured-turns)
+  (when (buffer-file-name)
+    (when-let* ((title (ignore-errors (ellm--frontmatter-value '(title)))))
+      (setq ellm--session-title title)
+      (ellm-update-session-title title)))
   (ellm--persistence-recognize-buffer)
   (ellm--persistence-checkpoint))
 
