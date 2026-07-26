@@ -4855,11 +4855,14 @@ Errors during streaming are signalled normally."
            (started-at (ellm--now))
            (user-turn (car (last (ellm--parse-turns))))
            request)
-      ;; Resolve before mutating the transcript.  The llm.el backend parses the
-      ;; buffer again while creating its driver, but every system prompt is then
-      ;; a cache hit rather than a second evaluation.
+      ;; Resolve before mutating the transcript and put the rendered
+      ;; frontmatter prompt in the immutable request snapshot.  Backends that
+      ;; parse system turns themselves still use the shared cache.
       (when (ellm-provider-config-effect provider '(system) buf)
-        (ellm--resolve-system-prompts provider fm))
+        (let ((system-state (ellm--resolve-system-prompts provider fm)))
+          (unless (plist-get system-state :leading)
+            (when-let* ((cell (assq 'system fm)))
+              (setcdr cell (plist-get system-state :initial))))))
       (ellm--set-turn-header-attrs
        (ellm--turn-delimiter-beg user-turn)
        `(("ts" . ,(ellm--timestamp started-at))))
