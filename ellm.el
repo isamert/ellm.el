@@ -163,6 +163,9 @@ closest parent containing a `.git' directory."
   :type 'function
   :group 'ellm)
 
+(defvar-local ellm--base-default-directory nil
+  "Buffer default directory before applying frontmatter `cwd:'.")
+
 (defcustom ellm-persistence-enabled nil
   "When non-nil, automatically persist ellm conversation buffers.
 New main conversations receive a session directory and `main.ellm' file.
@@ -204,6 +207,42 @@ disabled or the current buffer is ephemeral."
   "Return the current project root, or nil outside a Git repository."
   (when-let* ((path (locate-dominating-file default-directory ".git")))
     (expand-file-name path)))
+
+(defun ellm--project-root-in-buffer (buffer)
+  "Return the project root associated with ellm BUFFER, or nil."
+  (with-current-buffer buffer
+    (let ((default-directory
+            (or ellm--base-default-directory default-directory)))
+      (when-let* ((root (funcall ellm-current-project-function)))
+        (file-name-as-directory (expand-file-name root))))))
+
+;;;###autoload
+(defun ellm-switch-to-project-buffer (&optional include-subagents)
+  "Switch to an ellm buffer belonging to the current project.
+With prefix argument INCLUDE-SUBAGENTS, also offer subagent buffers from
+this project.  Without it, offer only main conversation buffers."
+  (interactive "P")
+  (let ((root (ellm--project-root-in-buffer (current-buffer)))
+        buffers)
+    (unless root
+      (user-error "No current project"))
+    (dolist (buffer (buffer-list))
+      (when (and (with-current-buffer buffer
+                   (and (derived-mode-p 'ellm-mode)
+                        (or include-subagents
+                            (not (bound-and-true-p ellm-subagent-id)))))
+                 (equal root (ellm--project-root-in-buffer buffer)))
+        (push buffer buffers)))
+    (setq buffers (nreverse buffers))
+    (unless buffers
+      (user-error "No ellm buffers found for current project"))
+    (let ((names (mapcar #'buffer-name buffers)))
+      (switch-to-buffer
+       (read-buffer
+        "Switch to project ellm buffer: " nil t
+        (lambda (candidate)
+          (member (if (consp candidate) (car candidate) candidate)
+                  names)))))))
 
 (defun ellm--provider-entry-provider (entry)
   "Return the provider object from an `ellm-provider-alist' ENTRY value.
@@ -2203,9 +2242,6 @@ stored without their leading colon, e.g. `:id call_1' becomes
 
 (defvar-local ellm--frontmatter-cache-error nil
   "Cached parse error for `ellm--frontmatter-cache-body', or nil.")
-
-(defvar-local ellm--base-default-directory nil
-  "Buffer default directory before applying frontmatter `cwd:'.")
 
 (defun ellm-default-buffer-name (&optional title)
   "Return the default buffer name for backend-provided session TITLE."
