@@ -5,7 +5,7 @@
 ;; Author: Isa Mert Gurbuz <isamertgurbuz@gmail.com>
 ;; URL: https://github.com/isamert/ellm.el
 ;; Version: 0.0.1
-;; Package-Requires: ((emacs "25.2") (async "1.9.9"))
+;; Package-Requires: ((emacs "27.1") (async "1.9.9"))
 ;; Keywords: tools
 
 ;; This file is not part of GNU Emacs.
@@ -36,8 +36,6 @@
 (require 'seq)
 (require 's)
 (require 'subr-x)
-(require 'url)
-(require 'url-util)
 
 ;;;; Customization
 
@@ -116,6 +114,23 @@ path, respectively, and no implicit pattern/path arguments are appended."
 
 (defcustom ellm-tools-websearch-result-limit 5
   "Default maximum number of results returned by the `websearch' tool."
+  :type 'integer
+  :group 'ellm-tools)
+
+(defcustom ellm-tools-webfetch-user-agent
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36"
+  "User-Agent header sent by the `webfetch' tool."
+  :type 'string
+  :group 'ellm-tools)
+
+(defcustom ellm-tools-webfetch-character-limit 50000
+  "Maximum number of rendered characters returned by `webfetch'."
+  :type 'integer
+  :group 'ellm-tools)
+
+(defcustom ellm-tools-webfetch-response-byte-limit 2000000
+  "Maximum response body size processed by `webfetch', in bytes.
+Larger bodies are truncated before rendering."
   :type 'integer
   :group 'ellm-tools)
 
@@ -757,6 +772,21 @@ conversation buffer."
   (let ((limit (ellm-tools--normalized-limit
                 max-results ellm-tools-websearch-result-limit)))
     (ellm-tools--start-websearch query limit callback)))
+
+(ellm-deftool web/webfetch (:async t)
+  ((url :string "HTTP or HTTPS URL to fetch.")
+   (max-characters :integer "Maximum characters to return, capped by `ellm-tools-webfetch-character-limit'." &optional))
+  "Fetch URL and return its readable textual contents.
+HTML is rendered without images in a child Emacs process.  Textual non-HTML
+responses are returned directly; unsupported binary responses are rejected."
+  (ellm-tools--validate-webfetch-url url)
+  (let ((limit (min (ellm-tools--normalized-limit
+                     max-characters ellm-tools-webfetch-character-limit)
+                    ellm-tools-webfetch-character-limit)))
+    (ellm-tools--normalized-limit
+     ellm-tools-webfetch-response-byte-limit
+     ellm-tools-webfetch-response-byte-limit)
+    (ellm-tools--start-webfetch url limit callback)))
 
 ;;;; Tool helpers
 
@@ -2231,10 +2261,319 @@ SUBAGENT may be a remembered id or a live buffer name."
               (buffer-name buffer)
               (ellm-tools--ellm-buffer-status buffer)))))
 
+;;;;;; Webfetch
+
+(declare-function dom-by-tag "dom")
+(declare-function dom-text "dom")
+(declare-function shr-insert-document "shr")
+(declare-function url-expand-file-name "url-expand")
+(declare-function url-generic-parse-url "url-parse")
+(declare-function url-hexify-string "url-util")
+(declare-function url-host "url-parse")
+(declare-function url-recreate-url "url-parse")
+(declare-function url-retrieve "url")
+(declare-function url-retrieve-synchronously "url")
+(declare-function url-type "url-parse")
+(declare-function url-unhex-string "url-util")
+
+(defvar shr-base)
+(defvar shr-fill-text)
+(defvar shr-inhibit-images)
+(defvar shr-use-colors)
+(defvar shr-use-fonts)
+(defvar url-current-object)
+(defvar url-request-extra-headers)
+(defvar url-request-method)
+(defvar url-user-agent)
+
+(defun ellm-tools--validate-webfetch-url (url)
+  "Signal an error unless URL is an absolute HTTP or HTTPS URL."
+  (require 'url-parse)
+  (ellm-tools--validate-pattern url "url")
+  (let ((parsed (url-generic-parse-url url)))
+    (unless (and (member (downcase (or (url-type parsed) ""))
+                         '("http" "https"))
+                 (not (s-blank? (url-host parsed))))
+      (ellm-tools--error "url must be an absolute HTTP or HTTPS URL"))))
+
+(defun ellm-tools--webfetch-header (name header-end)
+  "Return response header NAME before HEADER-END in the current buffer."
+  (save-restriction
+    (narrow-to-region (point-min) header-end)
+    (mail-fetch-field name)))
+
+(defun ellm-tools--webfetch-content-type (header body)
+  "Return normalized content type from HEADER and BODY."
+  (let ((type (and header
+                   (downcase
+                    (string-trim
+                     (car (split-string header ";")))))))
+    (cond
+     ((not (s-blank? type)) type)
+     ((string-match-p
+       "\\`[[:space:]\ufeff]*<\\(?:!doctype[[:space:]]+html\\|html\\|head\\|body\\)"
+       (downcase (substring body 0 (min 1024 (length body)))))
+      "text/html")
+     (t "text/plain"))))
+
+(defun ellm-tools--webfetch-textual-content-type-p (content-type)
+  "Return non-nil when CONTENT-TYPE is suitable for textual output."
+  (or (string-prefix-p "text/" content-type)
+      (string-match-p
+       "\\`application/\\(?:[^;]+[+]\\)?\\(?:json\\|xml\\)\\'"
+       content-type)
+      (member content-type
+              '("application/javascript" "application/x-javascript"))))
+
+(defun ellm-tools--webfetch-decode-text (text content-type)
+  "Decode response TEXT according to CONTENT-TYPE."
+  (let* ((case-fold-search t)
+         (charset (and (string-match
+                        "charset=[ \t]*[\"']?\\([^; \t\"']+\\)"
+                        content-type)
+                       (match-string 1 content-type)))
+         (coding (and charset
+                      (ignore-errors
+                        (coding-system-from-name charset)))))
+    (decode-coding-string text (or coding 'utf-8) t)))
+
+(defun ellm-tools--webfetch-markdown-link (text url)
+  "Return a Markdown link for TEXT and URL."
+  (let ((label (string-replace
+                "]" "\\]"
+                (string-replace "[" "\\["
+                                (string-replace "\\" "\\\\" text))))
+        (destination (string-replace
+                      ")" "\\)" (string-replace "\\" "\\\\" url))))
+    (format "[%s](%s)" label destination)))
+
+(defun ellm-tools--webfetch-clean-text (text)
+  "Clean rendered webfetch TEXT without destroying its line structure."
+  (setq text (replace-regexp-in-string "[ \t]+$" "" text))
+  (setq text (replace-regexp-in-string "\\n\\{3,\\}" "\n\n" text))
+  (string-trim text))
+
+(defun ellm-tools--webfetch-render-html (html base-url)
+  "Render HTML with SHR using BASE-URL.
+Return a plist containing `:title' and `:content'."
+  (require 'dom)
+  (require 'shr)
+  (require 'url-expand)
+  (unless (fboundp 'libxml-parse-html-region)
+    (error "HTML rendering requires Emacs with libxml2 support"))
+  (with-temp-buffer
+    (insert html)
+    (let* ((dom (libxml-parse-html-region (point-min) (point-max)))
+           (title-node (car (dom-by-tag dom 'title)))
+           (title (and title-node
+                       (ellm-tools--clean-text (dom-text title-node))))
+           (document (or (car (dom-by-tag dom 'body)) dom)))
+      (erase-buffer)
+      (let ((shr-base base-url)
+            (shr-use-fonts nil)
+            (shr-fill-text nil)
+            (shr-use-colors nil)
+            (shr-inhibit-images t))
+        (shr-insert-document document))
+      (goto-char (point-min))
+      (while-let ((match (text-property-search-forward 'shr-url nil nil t)))
+        (let* ((begin (prop-match-beginning match))
+               (end (prop-match-end match))
+               (url (url-expand-file-name
+                     (get-text-property begin 'shr-url) base-url))
+               (text (buffer-substring-no-properties begin end))
+               (link (ellm-tools--webfetch-markdown-link text url)))
+          (replace-region-contents begin end (lambda () link))
+          (goto-char (+ begin (length link)))))
+      (list :title title
+            :content (ellm-tools--webfetch-clean-text
+                      (buffer-substring-no-properties
+                       (point-min) (point-max)))))))
+
+(defun ellm-tools--webfetch-response-body (byte-limit)
+  "Return the current HTTP response body capped at BYTE-LIMIT.
+The return value is a cons of body and whether it was truncated."
+  (goto-char (point-min))
+  (unless (re-search-forward "\r?\n\r?\n" nil t)
+    (error "malformed HTTP response"))
+  (let* ((start (point))
+         (available (- (position-bytes (point-max))
+                       (position-bytes start)))
+         (truncated (> available byte-limit))
+         (end (if truncated
+                  (or (byte-to-position (+ (position-bytes start) byte-limit))
+                      (point-max))
+                (point-max))))
+    (cons (buffer-substring-no-properties start end) truncated)))
+
+(defun ellm-tools--webfetch (url character-limit user-agent response-byte-limit)
+  "Fetch and render URL for the `webfetch' tool."
+  (require 'url)
+  (require 'url-parse)
+  (condition-case err
+      (let ((url-user-agent user-agent)
+            (url-request-method "GET")
+            (url-request-extra-headers
+             '(("Accept" . "text/html,application/xhtml+xml,application/json,text/plain;q=0.9,application/xml;q=0.8,*/*;q=0.1")))
+            (buffer (url-retrieve-synchronously url t t)))
+        (unless (buffer-live-p buffer)
+          (error "request returned no data"))
+        (unwind-protect
+            (with-current-buffer buffer
+              (goto-char (point-min))
+              (unless (looking-at "HTTP/[0-9.]+[ \t]+\\([0-9]+\\)")
+                (error "malformed HTTP status line"))
+              (let ((status (string-to-number (match-string 1))))
+                (unless (<= 200 status 299)
+                  (error "HTTP request failed with status %d" status))
+                (save-excursion
+                  (unless (re-search-forward "\r?\n\r?\n" nil t)
+                    (error "malformed HTTP response"))
+                  (let* ((header-end (point))
+                         (content-type-header
+                          (ellm-tools--webfetch-header
+                           "Content-Type" header-end))
+                         (final-url
+                          (if url-current-object
+                              (url-recreate-url url-current-object)
+                            url))
+                         (body-result
+                          (ellm-tools--webfetch-response-body
+                           response-byte-limit))
+                         (body (car body-result))
+                         (response-truncated (cdr body-result))
+                         (content-type
+                          (ellm-tools--webfetch-content-type
+                           content-type-header body))
+                         rendered)
+                    (cond
+                     ((member content-type
+                              '("text/html" "application/xhtml+xml"))
+                      (setq rendered
+                            (ellm-tools--webfetch-render-html
+                             (ellm-tools--webfetch-decode-text
+                              body (or content-type-header content-type))
+                             final-url)))
+                     ((ellm-tools--webfetch-textual-content-type-p content-type)
+                      (setq rendered
+                            (list :content
+                              (ellm-tools--webfetch-clean-text
+                               (ellm-tools--webfetch-decode-text
+                                body (or content-type-header
+                                         content-type))))))
+                     (t
+                      (error "unsupported content type: %s" content-type)))
+                    (let* ((content (or (plist-get rendered :content) ""))
+                           (output-truncated (> (length content)
+                                                character-limit)))
+                      (list :ok t
+                            :url url
+                            :final-url final-url
+                            :status status
+                            :content-type content-type
+                            :title (plist-get rendered :title)
+                            :truncated (or response-truncated output-truncated)
+                            :content (if output-truncated
+                                         (substring content 0 character-limit)
+                                       content)))))))
+          (when (buffer-live-p buffer)
+            (kill-buffer buffer))))
+    (error
+     (list :ok nil :message (error-message-string err)))))
+
+(defun ellm-tools--encode-webfetch-result (result)
+  "Encode child webfetch RESULT for safe transport through `async-start'."
+  (base64-encode-string
+   (encode-coding-string (prin1-to-string result) 'utf-8-emacs-unix)
+   t))
+
+(defun ellm-tools--decode-webfetch-result (encoded)
+  "Decode an ENCODED child webfetch result."
+  (unless (stringp encoded)
+    (error "child Emacs returned an invalid result"))
+  (car (read-from-string
+        (decode-coding-string (base64-decode-string encoded)
+                              'utf-8-emacs-unix))))
+
+(defun ellm-tools--format-webfetch-result (result)
+  "Format child webfetch RESULT for the model."
+  (if (not (plist-get result :ok))
+      (format "Web fetch failed: %s"
+              (or (plist-get result :message) "unknown child process error"))
+    (concat
+     (format
+      "<webfetch url=%S final-url=%S status=%d content-type=%S truncated=%s>\n"
+      (plist-get result :url)
+      (plist-get result :final-url)
+      (plist-get result :status)
+      (plist-get result :content-type)
+      (if (plist-get result :truncated) "true" "false"))
+     (when-let* ((title (plist-get result :title))
+                 ((not (s-blank? title))))
+       (format "Title: %s\n\n" title))
+     (plist-get result :content)
+     (when (plist-get result :truncated)
+       "\n\n[... content truncated ...]")
+     "\n</webfetch>")))
+
+(defun ellm-tools--start-webfetch (url limit callback)
+  "Fetch URL in a child Emacs and pass at most LIMIT characters to CALLBACK."
+  (let* ((async-process-noquery-on-exit t)
+         ;; Arbitrary webpage text may match `tramp-password-prompt-regexp'.
+         (async-prompt-for-password nil)
+         (completed nil)
+         (cancelled nil)
+         (process
+          (async-start
+           (ellm-tools--elisp-child-form
+            `(progn
+               (require 'ellm-tools)
+               (ellm-tools--encode-webfetch-result
+                (ellm-tools--webfetch
+                 ,url ,limit ,ellm-tools-webfetch-user-agent
+                 ,ellm-tools-webfetch-response-byte-limit)))
+            load-path exec-path default-directory load-prefer-newer)
+           (lambda (result)
+             (unless (async-message-p result)
+               (setq completed t)
+               (funcall
+                callback
+                (condition-case err
+                    (ellm-tools--format-webfetch-result
+                     (ellm-tools--decode-webfetch-result result))
+                  (error
+                   (format "Web fetch child failed: %s"
+                           (error-message-string err))))))))))
+    (let ((async-sentinel (process-sentinel process)))
+      (set-process-sentinel
+       process
+       (lambda (proc event)
+         (condition-case err
+             (when async-sentinel
+               (funcall async-sentinel proc event))
+           (error
+            (unless (or completed cancelled)
+              (setq completed t)
+              (funcall callback
+                       (format "Web fetch child failed: %s"
+                               (error-message-string err))))))
+         (when (and (not completed)
+                    (not cancelled)
+                    (memq (process-status proc) '(exit signal)))
+           (setq completed t)
+           (funcall callback
+                    (format "Web fetch child exited unexpectedly (%s)"
+                            (string-trim event)))))))
+    (lambda ()
+      (setq cancelled t)
+      (ellm-tools--cancel-elisp-process process))))
+
 ;;;;;; Websearch
 
 (defun ellm-tools--start-websearch (query limit callback)
   "Search DuckDuckGo HTML for QUERY and pass formatted LIMIT results to CALLBACK."
+  (require 'url)
+  (require 'url-util)
   (let* ((url-request-method "GET")
          (url (concat ellm-tools-websearch-url
                       (if (string-match-p "[?&]\\'" ellm-tools-websearch-url)
@@ -2350,6 +2689,7 @@ SUBAGENT may be a remembered id or a live buffer name."
 
 (defun ellm-tools--duckduckgo-result-url (href)
   "Return the destination URL for a DuckDuckGo result HREF."
+  (require 'url-util)
   (when (and href (not (s-blank? href)))
     (let ((url (ellm-tools--decode-html-entities href)))
       (when (string-prefix-p "//" url)
