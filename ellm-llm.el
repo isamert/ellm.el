@@ -59,7 +59,7 @@
         :documentation "Core event sink installed for the current attempt.")
   (timer nil
          :type (or null timer)
-         :documentation "Deadline timer for the current transport, or nil.")
+         :documentation "Timer waiting for the current transport's first response.")
   (serial 0
           :type integer
           :documentation "Generation counter used to invalidate stale callbacks.")
@@ -614,7 +614,7 @@ FRONTMATTER, when supplied, is the already parsed YAML frontmatter alist."
     prompt))
 
 (defun ellm-llm--cancel-driver-timer (driver)
-  "Cancel DRIVER's current request deadline."
+  "Cancel DRIVER's timer waiting for the first response."
   (when-let* ((timer (ellm-llm-driver-timer driver)))
     (cancel-timer timer)
     (setf (ellm-llm-driver-timer driver) nil)))
@@ -713,77 +713,80 @@ Return (TOOL-USES TOOL-RESULTS IDS), or nil when no call was recoverable."
          leg-usage)
     (cl-labels
         ((live-p ()
-           (ellm-llm--driver-live-p driver serial))
+                 (ellm-llm--driver-live-p driver serial))
          (partial (result)
-           (when (live-p)
-             (setq leg-usage
-                   (ellm-llm--merge-leg-usage leg-usage result))
-             (when-let* ((state
-                          (ellm-provider-reasoning-state provider result)))
-               (setq reasoning-state-id
-                     (ellm-reasoning-state-write state)))
-             (ellm-llm--emit
-              driver
-              (ellm-llm--stream-event driver result reasoning-state-id))))
+                  (when (live-p)
+                    ;; The request timeout guards an unresponsive provider, not the
+                    ;; total duration of an active stream.
+                    (ellm-llm--cancel-driver-timer driver)
+                    (setq leg-usage
+                          (ellm-llm--merge-leg-usage leg-usage result))
+                    (when-let* ((state
+                                 (ellm-provider-reasoning-state provider result)))
+                      (setq reasoning-state-id
+                            (ellm-reasoning-state-write state)))
+                    (ellm-llm--emit
+                     driver
+                     (ellm-llm--stream-event driver result reasoning-state-id))))
          (continue-with-tools (tool-uses tool-results call-ids)
-           (when (live-p)
-             (cl-incf (ellm-llm-driver-serial driver)))
-           (ellm-llm--emit
-            driver
-            `(:type tool-call :kind tool-batch
-              :tool-uses ,tool-uses :tool-results ,tool-results
-              :call-ids ,call-ids))
-           (ellm-llm--canonicalize-new-interactions
-            prompt previous-interaction)
-           (cl-incf (ellm-llm-driver-leg driver))
-           (ellm-llm--emit driver '(:type continue)))
+                              (when (live-p)
+                                (cl-incf (ellm-llm-driver-serial driver)))
+                              (ellm-llm--emit
+                               driver
+                               `(:type tool-call :kind tool-batch
+                                 :tool-uses ,tool-uses :tool-results ,tool-results
+                                 :call-ids ,call-ids))
+                              (ellm-llm--canonicalize-new-interactions
+                               prompt previous-interaction)
+                              (cl-incf (ellm-llm-driver-leg driver))
+                              (ellm-llm--emit driver '(:type continue)))
          (final (result)
-           (when (live-p)
-             (ellm-llm--cancel-driver-timer driver)
-             (setf (ellm-llm-driver-raw driver) nil)
-             (partial result)
-             (when leg-usage
-               (ellm-llm--emit driver
-                               (ellm-llm--usage-event leg-usage)))
-             (if-let* ((tool-uses (plist-get result :tool-uses))
-                       (tool-results (plist-get result :tool-results)))
-                 (continue-with-tools
-                  tool-uses tool-results
-                 (ellm-llm--new-prompt-tool-call-ids
-                   prompt previous-interaction))
-               (progn
-                 (cl-incf (ellm-llm-driver-serial driver))
-                 (ellm-llm--emit driver '(:type complete))))))
+                (when (live-p)
+                  (ellm-llm--cancel-driver-timer driver)
+                  (setf (ellm-llm-driver-raw driver) nil)
+                  (partial result)
+                  (when leg-usage
+                    (ellm-llm--emit driver
+                                    (ellm-llm--usage-event leg-usage)))
+                  (if-let* ((tool-uses (plist-get result :tool-uses))
+                            (tool-results (plist-get result :tool-results)))
+                      (continue-with-tools
+                       tool-uses tool-results
+                       (ellm-llm--new-prompt-tool-call-ids
+                        prompt previous-interaction))
+                    (progn
+                      (cl-incf (ellm-llm-driver-serial driver))
+                      (ellm-llm--emit driver '(:type complete))))))
          (fail (type message)
-           (when (live-p)
-             (ellm-llm--cancel-driver-timer driver)
-             (setf (ellm-llm-driver-raw driver) nil)
-             (cl-incf (ellm-llm-driver-serial driver))
-             (if (ellm-llm--tool-call-error-p type)
-                 (if-let* ((recovery
-                            (ellm-llm--recover-tool-call-error
-                             provider prompt previous-interaction
-                             type message)))
-                     (continue-with-tools
-                      (nth 0 recovery) (nth 1 recovery) (nth 2 recovery))
-                   (let ((correction
-                          (format "Your previous tool call was malformed and \
+               (when (live-p)
+                 (ellm-llm--cancel-driver-timer driver)
+                 (setf (ellm-llm-driver-raw driver) nil)
+                 (cl-incf (ellm-llm-driver-serial driver))
+                 (if (ellm-llm--tool-call-error-p type)
+                     (if-let* ((recovery
+                                (ellm-llm--recover-tool-call-error
+                                 provider prompt previous-interaction
+                                 type message)))
+                         (continue-with-tools
+                          (nth 0 recovery) (nth 1 recovery) (nth 2 recovery))
+                       (let ((correction
+                              (format "Your previous tool call was malformed and \
 could not be executed: %s. Retry it using an advertised tool and valid arguments."
-                                  message)))
-                     (setf (llm-chat-prompt-interactions prompt)
-                           (append
-                            (llm-chat-prompt-interactions prompt)
-                            (list (make-llm-chat-prompt-interaction
-                                   :role 'user :content correction))))
-                     (ellm-llm--emit
-                      driver
-                      `(:type extension :kind correction :text ,correction))
-                     (cl-incf (ellm-llm-driver-leg driver))
-                     (ellm-llm--emit driver '(:type continue))))
-               (ellm-llm--emit
-                driver
-                `(:type failure :condition ,type :message ,message
-                  :retryable ,(and (ellm-llm--retryable-error-p type) t)))))))
+                                      message)))
+                         (setf (llm-chat-prompt-interactions prompt)
+                               (append
+                                (llm-chat-prompt-interactions prompt)
+                                (list (make-llm-chat-prompt-interaction
+                                       :role 'user :content correction))))
+                         (ellm-llm--emit
+                          driver
+                          `(:type extension :kind correction :text ,correction))
+                         (cl-incf (ellm-llm-driver-leg driver))
+                         (ellm-llm--emit driver '(:type continue))))
+                   (ellm-llm--emit
+                    driver
+                    `(:type failure :condition ,type :message ,message
+                      :retryable ,(and (ellm-llm--retryable-error-p type) t)))))))
       (when ellm-request-timeout
         (setf
          (ellm-llm-driver-timer driver)
@@ -800,10 +803,10 @@ could not be executed: %s. Retry it using an advertised tool and valid arguments
                        ellm-request-timeout)))))))
       (condition-case err
           (let ((raw
-                 (let ((llm-request-plz-timeout
-                        (or ellm-request-timeout llm-request-plz-timeout)))
-                   (llm-chat-streaming
-                    provider prompt #'partial #'final #'fail 'multi-output))))
+                 ;; Do not pass `ellm-request-timeout' to plz: its timeout is
+                 ;; a total transfer deadline and would abort an active stream.
+                 (llm-chat-streaming
+                  provider prompt #'partial #'final #'fail 'multi-output)))
             (when (live-p)
               (setf (ellm-llm-driver-raw driver) raw)))
         (error
