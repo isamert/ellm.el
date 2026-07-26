@@ -446,6 +446,14 @@ These are exactly the lines that get a horizontal rule drawn above them
 by `ellm--make-rule-overlay'.  Used as the buffer-local `page-delimiter'
 so `forward-page' / `backward-page' stop at each rendered ruler.")
 
+(defconst ellm-tag-name-regexp "[[:alpha:]_][[:alnum:]_.:-]*"
+  "Regexp matching a prompt tag name.")
+
+(defconst ellm-tag-line-regexp
+  (concat "^<\\(/?\\)\\(" ellm-tag-name-regexp "\\)>[ \t]*$")
+  "Regexp matching a prompt tag occupying a complete line.
+Group 1 is non-empty for a closing tag and group 2 is the tag name.")
+
 (defconst ellm-code-block-header-regexp
   "^[ \t]*```\\(?: ?\\([a-zA-Z-]+\\)\\)?[^`\n]*\n"
   "Regexp matching the opening line of a fenced code block.
@@ -757,6 +765,11 @@ and `set-face-attribute' calls safe in non-graphical contexts."
   `((t :inherit shadow :background ,(ellm--alt-bg) :extend t))
   "Face for YAML frontmatter `---' delimiter lines."
   :group 'ellm)
+
+(defface ellm-tag
+  '((t :inherit font-lock-type-face))
+  "Face for prompt tags."
+  :group 'ellm-faces)
 
 (defface ellm-code-block-delimiter
   `((t :inherit shadow :background ,(ellm--alt-bg) :extend t))
@@ -1183,6 +1196,8 @@ Matches outside Markdown prose regions are ignored."
     ;; Lisp prompt interpolation opener
     (,(ellm--make-markdown-matcher "\\\\?#{")
      (0 'font-lock-preprocessor-face t))
+    ;; Prompt tags occupying a complete line
+    (,(ellm--make-markdown-matcher ellm-tag-line-regexp) (0 'ellm-tag t))
     ;; Headings
     (,(ellm--make-markdown-matcher "^# .*$") (0 'ellm-heading-1 t))
     (,(ellm--make-markdown-matcher "^## .*$") (0 'ellm-heading-2 t))
@@ -4573,6 +4588,47 @@ Headings inside fenced code blocks do not count."
         (goto-char pos)
         (forward-line 1)))))
 
+(defun ellm--opening-tag-at-point-p ()
+  "Return non-nil when point is on a prompt opening-tag line."
+  (save-excursion
+    (forward-line 0)
+    (and (looking-at ellm-tag-line-regexp)
+         (string-empty-p (match-string 1)))))
+
+(defun ellm--tag-fold-bounds-at-point ()
+  "Return fold bounds for the opening prompt tag on the current line.
+The result is (BODY-BEG . BODY-END), and never crosses the current turn."
+  (save-excursion
+    (forward-line 0)
+    (when (ellm--opening-tag-at-point-p)
+      (looking-at ellm-tag-line-regexp)
+      (let* ((name (match-string-no-properties 2))
+             (body-beg (line-end-position))
+             (turn-bounds (ellm--turn-body-bounds-at (point)))
+             (limit (and turn-bounds (cdr turn-bounds)))
+             (depth 1)
+             body-end)
+        (when limit
+          (forward-line 1)
+          (while (and (> depth 0)
+                      (re-search-forward ellm-tag-line-regexp limit t))
+            (when (equal name (match-string-no-properties 2))
+              (if (string-empty-p (match-string 1))
+                  (setq depth (1+ depth))
+                (setq depth (1- depth))
+                (when (= depth 0)
+                  (setq body-end (match-beginning 0))))))
+          (and body-end (< body-beg body-end)
+               (cons body-beg body-end)))))))
+
+(defun ellm-toggle-tag ()
+  "Toggle folding of the prompt tag beginning on the current line."
+  (interactive)
+  (if-let* ((bounds (ellm--tag-fold-bounds-at-point)))
+      (outline-flag-region (car bounds) (cdr bounds)
+                           (not (invisible-p (car bounds))))
+    (user-error "No complete prompt tag starts on this line")))
+
 (defun ellm-outline-cycle (&optional event)
   "Like `outline-cycle', but reveal implementation-detail assistant turns.
 When point is itself on such a turn, preserve plain `outline-cycle'
@@ -5675,10 +5731,11 @@ the resulting normalized list."
     (define-key map [remap outline-cycle] #'ellm-outline-cycle)
     (define-key map [remap outline-cycle-buffer] #'ellm-outline-cycle-buffer)
     (define-key map (kbd "<tab>")
-                '(menu-item "" ellm-outline-cycle
-                            :filter (lambda (command)
-                                      (and (ellm--heading-at-point-p)
-                                           command))))
+      '(menu-item "" ellm-outline-cycle
+                  :filter (lambda (command)
+                            (cond
+                             ((ellm--heading-at-point-p) command)
+                             ((ellm--opening-tag-at-point-p) #'ellm-toggle-tag)))))
     (define-key map (kbd "<backtab>") #'ellm-outline-cycle-buffer)
     (define-key map (kbd "C-c C-c")   #'ellm-send)
     (define-key map (kbd "C-c C-k")   #'ellm-cancel)
