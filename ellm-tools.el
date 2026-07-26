@@ -183,6 +183,49 @@ Each entry is a plist with serializable values such as `:id',
 (put 'ellm-subagent-id 'permanent-local t)
 (put 'ellm-subagent-parent-buffer 'permanent-local t)
 
+(defun ellm-tools--subagent-buffers (&optional descendants)
+  "Return live subagent buffers belonging to the current buffer.
+When DESCENDANTS is non-nil, include subagents at every depth."
+  (let ((pending (list (current-buffer)))
+        (seen (list (current-buffer)))
+        buffers)
+    (while pending
+      (let ((parent-name (buffer-name (pop pending))))
+        (dolist (buffer (buffer-list))
+          (when (and (not (memq buffer seen))
+                     (with-current-buffer buffer
+                       (equal ellm-subagent-parent-buffer parent-name)))
+            (push buffer seen)
+            (push buffer buffers)
+            (when descendants
+              (push buffer pending))))))
+    (nreverse buffers)))
+
+;;;###autoload
+(defun ellm-switch-to-subagent-buffer (&optional all-children)
+  "Switch to a subagent buffer belonging to the current buffer.
+With prefix argument ALL-CHILDREN, offer all descendants, including
+children of children.  Without it, offer only direct children."
+  (interactive "P")
+  (let* ((buffers (ellm-tools--subagent-buffers all-children))
+         (names (mapcar #'buffer-name buffers)))
+    (unless names
+      (user-error "No subagent buffers found"))
+    (switch-to-buffer
+     (read-buffer
+      "Switch to subagent buffer: " nil t
+      (lambda (candidate)
+        (member (if (consp candidate) (car candidate) candidate)
+                names))))))
+
+(cl-defstruct (ellm-tools--elisp-session
+               (:constructor ellm-tools--make-elisp-session))
+  "One persistent child Emacs owned by an ellm buffer."
+  name process pending next-id)
+
+(defvar-local ellm-tools--elisp-sessions nil
+  "Map persistent Elisp session names to child session objects.")
+
 ;;;; `ellm-deftool' macro
 
 (eval-and-compile
