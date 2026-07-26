@@ -4661,25 +4661,41 @@ Headings inside fenced code blocks do not count."
         (forward-line 1)))))
 
 (defun ellm-outline-cycle (&optional event)
-  "Like `outline-cycle', but reveal implementation-detail assistant turns.
-When point is itself on such a turn, preserve plain `outline-cycle'
-behaviour so the turn can still be cycled directly."
+  "Like `outline-cycle', with ellm-specific structural boundaries.
+Markdown headings stop at an enclosing prompt tag's close.  Cycling a
+turn reveals implementation-detail assistant children, except when point
+is on such a child itself so that it can still be cycled directly."
   (interactive (list last-nonmenu-event))
   (let* ((mouse-event (and (mouse-event-p event) event))
-         (heading (save-excursion
-                    (when mouse-event
-                      (mouse-set-point mouse-event))
-                    (forward-line 0)
-                    (and (ellm--outline-search-function nil nil nil t)
-                         (if (looking-at ellm-turn-regexp)
-                             (if (ellm--blank-separator-p
-                                  (match-string-no-properties 2)
-                                  (ellm--continuation-header-p
-                                   (match-string-no-properties 1)))
-                                 'blank-turn
-                               'turn)
-                           'markdown)))))
-    (outline-cycle mouse-event)
+         heading tag-end)
+    (save-excursion
+      (when mouse-event
+        (mouse-set-point mouse-event))
+      (forward-line 0)
+      (when (ellm--outline-search-function nil nil nil t)
+        (setq heading
+              (if (looking-at ellm-turn-regexp)
+                  (if (ellm--blank-separator-p
+                       (match-string-no-properties 2)
+                       (ellm--continuation-header-p
+                        (match-string-no-properties 1)))
+                      'blank-turn
+                    'turn)
+                'markdown))
+        (when (eq heading 'markdown)
+          (setq tag-end (ellm--enclosing-tag-end (point))))))
+    ;; `outline-cycle' has no custom subtree-boundary hook.  Restricting its
+    ;; view keeps an enclosing closing tag out of the folded region without
+    ;; adding tags as fake outline headings (which would hurt navigation).
+    (if tag-end
+        (save-restriction
+          ;; Keep the separator newline visible so the closing tag remains
+          ;; on its own display line rather than following the fold ellipsis.
+          (narrow-to-region
+           (point-min)
+           (if (eq (char-before tag-end) ?\n) (1- tag-end) tag-end))
+          (outline-cycle mouse-event))
+      (outline-cycle mouse-event))
     (when (eq heading 'turn)
       (ellm--show-visible-blank-separator-subtrees))))
 
@@ -4842,18 +4858,40 @@ that pending parent."
     (setq ellm--pending-fold-turn
           (list (copy-marker pos nil) role level))))
 
+(defun ellm--enclosing-tag-end (pos)
+  "Return the closing-tag position of the innermost tag enclosing POS.
+Only complete-line prompt tags in the current turn are considered."
+  (when-let* ((bounds (ellm--turn-body-bounds-at pos)))
+    (save-excursion
+      (goto-char (car bounds))
+      (let (stack)
+        (while (re-search-forward ellm-tag-line-regexp pos t)
+          (let ((name (match-string-no-properties 2)))
+            (if (string-empty-p (match-string 1))
+                (push (cons name (match-beginning 0)) stack)
+              (when (equal name (caar stack))
+                (pop stack)))))
+        (when stack
+          (goto-char (cdar stack))
+          (cdr (ellm--tag-fold-bounds-at-point)))))))
+
 (defun ellm--subtree-end-at-point ()
-  "Return the end of the outline subtree whose heading is at point."
-  (let ((level (ellm--outline-level-at-point)))
+  "Return the structural end of the heading subtree at point.
+A Markdown heading inside a complete prompt tag ends no later than its
+innermost enclosing tag.  Otherwise normal outline boundaries apply."
+  (let* ((markdown-p (looking-at ellm-heading-any-regexp))
+         (tag-end (and markdown-p (ellm--enclosing-tag-end (point))))
+         (limit (or tag-end (point-max)))
+         (level (ellm--outline-level-at-point)))
     (save-excursion
       (forward-line 1)
       (catch 'end
-        (while (ellm--outline-search-function nil nil nil)
+        (while (ellm--outline-search-function limit nil nil)
           (forward-line 0)
           (when (<= (ellm--outline-level-at-point) level)
             (throw 'end (point)))
           (forward-line 1))
-        (point-max)))))
+        limit))))
 
 (defun ellm--fold-region-at (pos subtree-end)
   "Collapse the heading at POS through SUBTREE-END.
@@ -4976,9 +5014,9 @@ one, then narrows to its outline subtree."
         (unless found
           (user-error "No Markdown heading found at/near point"))))
     (outline-back-to-heading t)
-    (let ((start (point)))
-      (outline-end-of-subtree)
-      (narrow-to-region start (point)))))
+    (let ((start (point))
+          (end (ellm--subtree-end-at-point)))
+      (narrow-to-region start end))))
 
 (defun ellm-narrow-dwim ()
   "Narrow to Markdown heading at point, or to turn subtree if not on a heading."
