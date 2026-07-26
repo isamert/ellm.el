@@ -5,7 +5,7 @@
 ;; Author: Isa Mert Gurbuz <isamertgurbuz@gmail.com>
 ;; URL: https://github.com/isamert/ellm.el
 ;; Version: 0.0.1
-;; Package-Requires: ((emacs "29.1") (yaml "0.5.5") (s "1.13.1") (llm "0.31.1") (plz "0.9"))
+;; Package-Requires: ((emacs "29.1") (yaml "0.5.5") (s "1.13.1") (llm "0.31.1") (plz "0.9") (async "1.9.9"))
 ;; Keywords: TODO
 
 ;; This file is not part of GNU Emacs.
@@ -263,6 +263,12 @@ Each function is called with TOOL, ARGS, ERROR and RESULT, and must return
 the next RESULT value.  Custom tools use this for returned results; ACP
 and backend renderers also use it for tool params/results before writing
 them into conversation buffers."
+  :type 'hook
+  :group 'ellm)
+
+(defcustom ellm-session-close-hook nil
+  "Hook run after the current buffer's backend session closes successfully.
+Functions run in the session's buffer and receive no arguments."
   :type 'hook
   :group 'ellm)
 
@@ -5207,6 +5213,7 @@ keeping frontmatter and an empty user prompt."
   (let* ((fm (ellm--command-frontmatter))
          (provider (ellm--command-provider fm)))
     (ellm-provider-close-session provider fm (current-buffer))
+    (run-hooks 'ellm-session-close-hook)
     (when (and prompt-to-clear
                (derived-mode-p 'ellm-mode)
                (y-or-n-p

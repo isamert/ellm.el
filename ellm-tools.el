@@ -5,7 +5,7 @@
 ;; Author: Isa Mert Gurbuz <isamertgurbuz@gmail.com>
 ;; URL: https://github.com/isamert/ellm.el
 ;; Version: 0.0.1
-;; Package-Requires: ((emacs "25.2"))
+;; Package-Requires: ((emacs "25.2") (async "1.9.9"))
 ;; Keywords: tools
 
 ;; This file is not part of GNU Emacs.
@@ -31,6 +31,7 @@
 ;;; Code:
 
 (require 'ellm)
+(require 'async)
 (require 'cl-lib)
 (require 'seq)
 (require 's)
@@ -116,6 +117,11 @@ path, respectively, and no implicit pattern/path arguments are appended."
 (defcustom ellm-tools-elisp-search-result-limit 50
   "Default maximum number of results returned by the `elisp_search' tool."
   :type 'integer
+  :group 'ellm-tools)
+
+(defcustom ellm-tools-elisp-eval-result-character-limit 20000
+  "Maximum characters returned for each Elisp evaluation value or output."
+  :type 'natnum
   :group 'ellm-tools)
 
 ;;;; Variables
@@ -630,6 +636,17 @@ documentation contains the query words."
                 max-results ellm-tools-elisp-search-result-limit)))
     (ellm-tools--elisp-search query search-documentation limit)))
 
+(ellm-deftool emacs/elisp-eval (:async t)
+  ((code :string "Emacs Lisp forms to evaluate as an implicit `progn'.")
+   (session :string "Execution session: `temp' (default) uses a fresh child Emacs, `current' uses the live Emacs, and any other name uses a persistent child scoped to this ellm buffer." &optional)
+   (features :array "Feature names to require before evaluating CODE. Isolated sessions inherit the current `load-path' but do not load `init.el'." &optional))
+  "Evaluate Emacs Lisp CODE and return its final value and printed output.
+TEMP starts a fresh Emacs which exits afterward.  CURRENT can inspect and
+modify the live Emacs and may block it.  Other SESSION names preserve state
+until the owning ellm buffer or backend session closes."
+  (ellm-tools--start-elisp-eval
+   code session features callback))
+
 ;;;;; Tasks
 
 (ellm-deftool tasks/todowrite ()
@@ -886,6 +903,369 @@ whose documentation contains all QUERY words are included as well."
           shown
           "\n")
          "\n</elisp_search>")))))
+
+;;;;;; Elisp evaluation
+
+(defconst ellm-tools--elisp-evaluator
+  '(lambda (code features)
+     (let ((output-buffer (generate-new-buffer " *ellm-elisp-output*")))
+       (unwind-protect
+           (let ((standard-output output-buffer))
+             (condition-case err
+                 (progn
+                   (dolist (feature features)
+                     (require (intern feature)))
+                   (let* ((source (concat "(progn\n" code "\n)"))
+                          (parsed (read-from-string source))
+                          (_
+                           (unless (= (cdr parsed) (length source))
+                             (error "Unexpected input after Elisp forms")))
+                          (form (car parsed))
+                          (value (eval form t))
+                          (print-circle t)
+                          print-level
+                          print-length)
+                     (list :ok t
+                           :value (prin1-to-string value)
+                           :output
+                           (with-current-buffer output-buffer
+                             (buffer-string)))))
+               ((error quit)
+                (list :ok nil
+                      :error-symbol (car err)
+                      :error-message (error-message-string err)
+                      :output
+                      (with-current-buffer output-buffer
+                        (buffer-string))))))
+         (when (buffer-live-p output-buffer)
+           (kill-buffer output-buffer)))))
+  "Serializable evaluator used by current and child Emacs sessions.")
+
+(defun ellm-tools--normalize-elisp-session (session)
+  "Return a validated Elisp SESSION name."
+  (let ((name (or session "temp")))
+    (unless (and (stringp name) (not (s-blank? name)))
+      (ellm-tools--error "session must be a non-empty string"))
+    name))
+
+(defun ellm-tools--normalize-elisp-features (features)
+  "Return validated feature names from FEATURES."
+  (let ((names (cond
+                ((null features) nil)
+                ((vectorp features) (append features nil))
+                ((listp features) (copy-sequence features))
+                (t :invalid))))
+    (unless (and (not (eq names :invalid))
+                 (cl-every (lambda (name)
+                             (and (stringp name) (not (s-blank? name))))
+                           names))
+      (ellm-tools--error
+       "features must be an array of non-empty strings"))
+    (delete-dups names)))
+
+(defun ellm-tools--truncate-elisp-result (text)
+  "Return TEXT capped by `ellm-tools-elisp-eval-result-character-limit'."
+  (let ((limit ellm-tools-elisp-eval-result-character-limit))
+    (if (or (not (integerp limit))
+            (< limit 0)
+            (<= (length text) limit))
+        (cons text nil)
+      (cons (substring text 0 limit) t))))
+
+(defun ellm-tools--format-elisp-eval-result (session result)
+  "Format Elisp evaluation RESULT from SESSION for the model."
+  (let* ((output
+          (ellm-tools--truncate-elisp-result
+           (or (plist-get result :output) "")))
+         (value
+          (and (plist-get result :ok)
+               (ellm-tools--truncate-elisp-result
+                (or (plist-get result :value) "nil")))))
+    (concat
+     (format "<elisp_eval session=%S status=%S>\n"
+             session (if (plist-get result :ok) "ok" "error"))
+     (if (plist-get result :ok)
+         (format "<value%s>\n%s\n</value>"
+                 (if (cdr value) " truncated=true" "")
+                 (car value))
+       (format "<error type=%S>\n%s\n</error>"
+               (plist-get result :error-symbol)
+               (or (plist-get result :error-message)
+                   "Unknown evaluation error")))
+     (unless (string-empty-p (car output))
+       (format "\n<output%s>\n%s\n</output>"
+               (if (cdr output) " truncated=true" "")
+               (car output)))
+     "\n</elisp_eval>")))
+
+(defun ellm-tools--elisp-child-form
+    (body load-path-value exec-path-value directory prefer-newer)
+  "Return a child Emacs form evaluating BODY with captured environment."
+  `(lambda ()
+     (setq load-path ',load-path-value
+           exec-path ',exec-path-value
+           default-directory ,directory
+           load-prefer-newer ,prefer-newer)
+     ,body))
+
+(defun ellm-tools--cancel-elisp-process (process)
+  "Kill Elisp child PROCESS and its output buffer."
+  (let ((buffer (and (processp process) (process-buffer process))))
+    (when (process-live-p process)
+      (delete-process process))
+    (when (buffer-live-p buffer)
+      (kill-buffer buffer))))
+
+(defun ellm-tools--start-temp-elisp-eval
+    (code features directory callback)
+  "Evaluate CODE with FEATURES in a temporary child rooted at DIRECTORY."
+  (let* ((async-process-noquery-on-exit t)
+         (completed nil)
+         (cancelled nil)
+         (process
+          (async-start
+           (ellm-tools--elisp-child-form
+            `(funcall ',ellm-tools--elisp-evaluator ,code ',features)
+            load-path exec-path directory load-prefer-newer)
+           (lambda (result)
+             (unless (async-message-p result)
+               (setq completed t)
+               (funcall callback
+                        (ellm-tools--format-elisp-eval-result
+                         "temp"
+                         (if (and (listp result)
+                                  (plist-member result :ok))
+                             result
+                           (list :ok nil
+                                 :error-symbol 'child-exit
+                                 :error-message
+                                 "Temporary Emacs exited without a result")))))))))
+    (let ((async-sentinel (process-sentinel process)))
+      (set-process-sentinel
+       process
+       (lambda (proc event)
+         (condition-case err
+             (when async-sentinel
+               (funcall async-sentinel proc event))
+           (error
+            (unless (or completed cancelled)
+              (setq completed t)
+              (funcall callback
+                       (format "Temporary Emacs failed: %s"
+                               (error-message-string err))))))
+         (when (and (not completed)
+                    (not cancelled)
+                    (memq (process-status proc) '(exit signal)))
+           (setq completed t)
+           (funcall callback
+                    (format "Temporary Emacs exited unexpectedly (%s)"
+                            (string-trim event)))))))
+    (lambda ()
+      (setq cancelled t)
+      (ellm-tools--cancel-elisp-process process))))
+
+(defun ellm-tools--start-current-elisp-eval
+    (owner code features callback)
+  "Evaluate CODE with FEATURES in live OWNER buffer."
+  (run-at-time
+   0 nil
+   (lambda ()
+     (if (buffer-live-p owner)
+         (with-current-buffer owner
+           (let ((result
+                  (save-current-buffer
+                    (funcall ellm-tools--elisp-evaluator code features))))
+             (funcall
+              callback
+              (ellm-tools--format-elisp-eval-result
+               "current" result))))
+       (funcall callback
+                "Error while calling the tool: owning ellm buffer was killed")))))
+
+(defun ellm-tools--elisp-session-live-p (session)
+  "Return non-nil when persistent Elisp SESSION has a live process."
+  (and (ellm-tools--elisp-session-p session)
+       (process-live-p (ellm-tools--elisp-session-process session))))
+
+(defun ellm-tools--elisp-session-callbacks (session)
+  "Return callbacks currently pending in Elisp SESSION."
+  (let (callbacks)
+    (maphash (lambda (_id callback)
+               (push callback callbacks))
+             (ellm-tools--elisp-session-pending session))
+    callbacks))
+
+(defun ellm-tools--kill-elisp-session (session &optional reason)
+  "Kill persistent Elisp SESSION and fail pending calls with REASON."
+  (when (ellm-tools--elisp-session-p session)
+    (let ((process (ellm-tools--elisp-session-process session))
+          (callbacks (ellm-tools--elisp-session-callbacks session)))
+      (when (hash-table-p ellm-tools--elisp-sessions)
+        (remhash (ellm-tools--elisp-session-name session)
+                 ellm-tools--elisp-sessions))
+      (clrhash (ellm-tools--elisp-session-pending session))
+      (ellm-tools--cancel-elisp-process process)
+      (when reason
+        (dolist (callback callbacks)
+          (funcall callback reason))))))
+
+(defun ellm-tools--kill-elisp-sessions ()
+  "Kill all persistent Elisp sessions owned by the current buffer."
+  (when (hash-table-p ellm-tools--elisp-sessions)
+    (let (sessions)
+      (maphash (lambda (_name session)
+                 (push session sessions))
+               ellm-tools--elisp-sessions)
+      (dolist (session sessions)
+        (ellm-tools--kill-elisp-session session)))
+    (setq ellm-tools--elisp-sessions nil)))
+
+(defun ellm-tools--elisp-session-exited (owner name process)
+  "Handle unexpected PROCESS exit for named session NAME owned by OWNER."
+  (when (buffer-live-p owner)
+    (with-current-buffer owner
+      (when-let* ((session
+                   (and (hash-table-p ellm-tools--elisp-sessions)
+                        (gethash name ellm-tools--elisp-sessions)))
+                  ((eq process
+                       (ellm-tools--elisp-session-process session))))
+        (ellm-tools--kill-elisp-session
+         session
+         (format "Persistent Elisp session %S exited unexpectedly" name))))))
+
+(defun ellm-tools--handle-elisp-session-result
+    (owner name process result)
+  "Dispatch RESULT from named session NAME and PROCESS owned by OWNER."
+  (if (not (async-message-p result))
+      (ellm-tools--elisp-session-exited owner name process)
+    (when (buffer-live-p owner)
+      (with-current-buffer owner
+        (when-let* ((session
+                     (and (hash-table-p ellm-tools--elisp-sessions)
+                          (gethash name ellm-tools--elisp-sessions)))
+                    ((eq process
+                         (ellm-tools--elisp-session-process session)))
+                    (id (plist-get result :id))
+                    (callback
+                     (gethash id
+                              (ellm-tools--elisp-session-pending session))))
+          (remhash id (ellm-tools--elisp-session-pending session))
+          (funcall
+           callback
+           (ellm-tools--format-elisp-eval-result
+            name (plist-get result :result))))))))
+
+(defun ellm-tools--install-elisp-session-sentinel
+    (owner name process)
+  "Install exit cleanup for named PROCESS NAME owned by OWNER."
+  (let ((async-sentinel (process-sentinel process)))
+    (set-process-sentinel
+     process
+     (lambda (proc event)
+       (when async-sentinel
+         (funcall async-sentinel proc event))
+       (when (memq (process-status proc) '(exit signal))
+         (ellm-tools--elisp-session-exited owner name proc))))))
+
+(defun ellm-tools--create-elisp-session (owner name directory)
+  "Create persistent child session NAME for OWNER rooted at DIRECTORY."
+  (let ((async-process-noquery-on-exit t)
+        process
+        session)
+    (setq
+     process
+     (async-start
+      (ellm-tools--elisp-child-form
+       `(let ((evaluator ',ellm-tools--elisp-evaluator))
+          (catch 'shutdown
+            (while t
+              (let ((request (async-receive)))
+                (if (plist-get request :shutdown)
+                    (throw 'shutdown nil)
+                  (async-send
+                   :id (plist-get request :id)
+                   :result
+                   (funcall evaluator
+                            (plist-get request :code)
+                            (plist-get request :features))))))))
+       load-path exec-path directory load-prefer-newer)
+      (lambda (result)
+        (ellm-tools--handle-elisp-session-result
+         owner name process result))))
+    (setq session
+          (ellm-tools--make-elisp-session
+           :name name
+           :process process
+           :pending (make-hash-table :test #'eql)
+           :next-id 0))
+    (ellm-tools--install-elisp-session-sentinel owner name process)
+    session))
+
+(defun ellm-tools--get-elisp-session (owner name directory)
+  "Return live named session NAME for OWNER, creating it in DIRECTORY."
+  (with-current-buffer owner
+    (unless (hash-table-p ellm-tools--elisp-sessions)
+      (setq ellm-tools--elisp-sessions
+            (make-hash-table :test #'equal)))
+    (let ((session (gethash name ellm-tools--elisp-sessions)))
+      (unless (ellm-tools--elisp-session-live-p session)
+        (when session
+          (ellm-tools--kill-elisp-session session))
+        (setq session
+              (ellm-tools--create-elisp-session owner name directory))
+        (puthash name session ellm-tools--elisp-sessions))
+      session)))
+
+(defun ellm-tools--start-named-elisp-eval
+    (owner name code features directory callback)
+  "Evaluate CODE in persistent session NAME owned by OWNER."
+  (let* ((session
+          (ellm-tools--get-elisp-session owner name directory))
+         (id (1+ (ellm-tools--elisp-session-next-id session)))
+         (pending (ellm-tools--elisp-session-pending session))
+         (process (ellm-tools--elisp-session-process session)))
+    (setf (ellm-tools--elisp-session-next-id session) id)
+    (puthash id callback pending)
+    (async-send process
+                :id id
+                :code code
+                :features features)
+    (lambda ()
+      (when (buffer-live-p owner)
+        (with-current-buffer owner
+          (when-let* ((current
+                       (and (hash-table-p ellm-tools--elisp-sessions)
+                            (gethash name ellm-tools--elisp-sessions)))
+                      ((eq current session)))
+            (remhash id pending)
+            (ellm-tools--kill-elisp-session
+             session
+             (format "Persistent Elisp session %S was cancelled" name))))))))
+
+(defun ellm-tools--start-elisp-eval (code session features callback)
+  "Dispatch CODE evaluation according to SESSION and call CALLBACK."
+  (ellm-tools--validate-pattern code "code")
+  (let* ((owner (current-buffer))
+         (name (ellm-tools--normalize-elisp-session session))
+         (feature-names (ellm-tools--normalize-elisp-features features))
+         (directory (ellm-tools--default-directory)))
+    (pcase name
+      ("current"
+       (ellm-tools--start-current-elisp-eval
+        owner code feature-names callback))
+      ("temp"
+       (ellm-tools--start-temp-elisp-eval
+        code feature-names directory callback))
+      (_
+       (ellm-tools--start-named-elisp-eval
+        owner name code feature-names directory callback)))))
+
+(defun ellm-tools--initialize-elisp-sessions ()
+  "Install buffer-local persistent Elisp session cleanup."
+  (add-hook 'ellm-session-close-hook
+            #'ellm-tools--kill-elisp-sessions nil t)
+  (add-hook 'kill-buffer-hook
+            #'ellm-tools--kill-elisp-sessions nil t))
 
 ;;;;;; Find & grep
 
@@ -2140,6 +2520,7 @@ exactly one occurrence.  NAME is used for error and status messages."
 ;;;; Footer
 
 (add-hook 'ellm-mode-hook #'ellm-tools--restore-persisted-subagents)
+(add-hook 'ellm-mode-hook #'ellm-tools--initialize-elisp-sessions)
 
 (provide 'ellm-tools)
 ;;; ellm-tools.el ends here
