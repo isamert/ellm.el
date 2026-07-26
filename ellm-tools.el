@@ -54,6 +54,11 @@ override this with `:timeout' in `ellm-deftool' SPECS."
                  (number :tag "Seconds"))
   :group 'ellm-tools)
 
+(defcustom ellm-tools-bash-program "bash"
+  "Bash executable used by the `bash' tool."
+  :type 'string
+  :group 'ellm-tools)
+
 (defconst ellm-tools--default-glob-options
   '("--hidden" "--follow" "--exclude" ".git" "--exclude" "node_modules" "--glob")
   "Default value for `ellm-tools-glob-options'.")
@@ -406,17 +411,18 @@ children of children.  Without it, offer only direct children."
 
 ;;;;; Shell
 
-(ellm-deftool shell/run-shell-command (:async t)
-  ((command :string "The shell command to run."))
-  "Run a shell command and return its output (stdout and stderr combined).
-The command is run via the system shell and the default directory is the
-root of the current project. The command has no stdin (EOF immediately)
-and is killed after 60 seconds if still running."
+(ellm-deftool shell/bash (:async t)
+  ((command :string "The Bash command to run."))
+  "Run COMMAND with Bash and return its exit code and output.
+Standard output and standard error are combined.  The command runs with no
+standard input in the frontmatter `cwd', project root, or `default-directory',
+in that order.  `ellm-tools-bash-program' selects the Bash executable, and
+`ellm-tools-default-timeout' controls how long it may run."
   (let* ((default-directory (ellm-tools--default-directory))
          (process-connection-type nil)
-         (buf (generate-new-buffer " *ellm-tools-shell*"))
-         (proc (start-process-shell-command
-                "ellm-tools-shell" buf command)))
+         (buf (generate-new-buffer " *ellm-tools-bash*"))
+         (proc (start-process "ellm-tools-bash" buf
+                              ellm-tools-bash-program "-c" command)))
     (process-send-eof proc)
     (set-process-sentinel
      proc
@@ -746,7 +752,7 @@ conversation buffer."
 (ellm-deftool web/websearch (:async t)
   ((query :string "Search query.")
    (max-results :integer "Maximum number of web results to return. Defaults to `ellm-tools-websearch-result-limit'." &optional))
-  "Search the web using DuckDuckGo's HTML endpoint and return parsed results."
+  "Search the web using DuckDuckGo."
   (ellm-tools--validate-pattern query "query")
   (let ((limit (ellm-tools--normalized-limit
                 max-results ellm-tools-websearch-result-limit)))
