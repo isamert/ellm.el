@@ -2570,52 +2570,80 @@ The return value is a cons of body and whether it was truncated."
 
 ;;;;;; Websearch
 
-(defun ellm-tools--start-websearch (query limit callback)
-  "Search DuckDuckGo HTML for QUERY and pass formatted LIMIT results to CALLBACK."
+(defun ellm-tools--websearch (query limit endpoint)
+  "Synchronously search ENDPOINT for QUERY and format LIMIT results."
   (require 'url)
   (require 'url-util)
   (let* ((url-request-method "GET")
-         (url (concat ellm-tools-websearch-url
-                      (if (string-match-p "[?&]\\'" ellm-tools-websearch-url)
+         (url (concat endpoint
+                      (if (string-match-p "[?&]\\'" endpoint)
                           ""
-                        (if (string-match-p "\\?" ellm-tools-websearch-url)
-                            "&"
-                          "?"))
+                        (if (string-match-p "\\?" endpoint) "&" "?"))
                       "q=" (url-hexify-string query)))
-         (buffer
-          (url-retrieve
-           url
-           (lambda (status)
-             (let ((buf (current-buffer)))
-               (unwind-protect
-                   (condition-case err
-                       (if-let* ((url-error (plist-get status :error)))
-                           (funcall callback
-                                    (format "DuckDuckGo search failed: %s"
-                                            url-error))
-                         (goto-char (point-min))
-                         (if (not (re-search-forward "\r?\n\r?\n" nil t))
-                             (funcall callback
-                                      "DuckDuckGo search failed: malformed HTTP response")
-                           (let ((html (buffer-substring-no-properties
-                                        (point) (point-max))))
-                             (funcall
-                              callback
-                              (ellm-tools--format-websearch-results
-                               query
-                               (ellm-tools--parse-duckduckgo-html
-                                html limit))))))
-                     (error
-                      (funcall callback
-                               (format "Error while parsing DuckDuckGo results: %s"
-                                       err))))
-                 (when (buffer-live-p buf)
-                   (kill-buffer buf))))))))
+         (buffer (url-retrieve-synchronously url)))
     (unless buffer
-      (ellm-tools--error "failed to start DuckDuckGo request"))
-    (lambda ()
+      (error "DuckDuckGo returned no response"))
+    (unwind-protect
+        (with-current-buffer buffer
+          (goto-char (point-min))
+          (unless (re-search-forward "\r?\n\r?\n" nil t)
+            (error "malformed HTTP response"))
+          (ellm-tools--format-websearch-results
+           query
+           (ellm-tools--parse-duckduckgo-html
+            (buffer-substring-no-properties (point) (point-max)) limit)))
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
+
+(defun ellm-tools--start-websearch (query limit callback)
+  "Search DuckDuckGo in a child Emacs and pass LIMIT results to CALLBACK."
+  (let* ((async-process-noquery-on-exit t)
+         ;; Search result text may match `tramp-password-prompt-regexp'.
+         (async-prompt-for-password nil)
+         (completed nil)
+         (cancelled nil)
+         (process
+          (async-start
+           (ellm-tools--elisp-child-form
+            `(progn
+               (require 'ellm-tools)
+               (condition-case err
+                   (ellm-tools--websearch
+                    ,query ,limit ,ellm-tools-websearch-url)
+                 (error
+                  (format "DuckDuckGo search failed: %s"
+                          (error-message-string err)))))
+            load-path exec-path default-directory load-prefer-newer)
+           (lambda (result)
+             (unless (async-message-p result)
+               (setq completed t)
+               (funcall callback
+                        (if (stringp result)
+                            result
+                          "DuckDuckGo search child returned an invalid result")))))))
+    (let ((async-sentinel (process-sentinel process)))
+      (set-process-sentinel
+       process
+       (lambda (proc event)
+         (condition-case err
+             (when async-sentinel
+               (funcall async-sentinel proc event))
+           (error
+            (unless (or completed cancelled)
+              (setq completed t)
+              (funcall callback
+                       (format "DuckDuckGo search child failed: %s"
+                               (error-message-string err))))))
+         (when (and (not completed)
+                    (not cancelled)
+                    (memq (process-status proc) '(exit signal)))
+           (setq completed t)
+           (funcall callback
+                    (format "DuckDuckGo search child exited unexpectedly (%s)"
+                            (string-trim event)))))))
+    (lambda ()
+      (setq cancelled t)
+      (ellm-tools--cancel-elisp-process process))))
 
 (defun ellm-tools--dom-node-p (node)
   "Return non-nil when NODE is an XML/HTML DOM node."
