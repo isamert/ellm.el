@@ -113,6 +113,11 @@ path, respectively, and no implicit pattern/path arguments are appended."
   :type 'integer
   :group 'ellm-tools)
 
+(defcustom ellm-tools-elisp-search-result-limit 50
+  "Default maximum number of results returned by the `elisp_search' tool."
+  :type 'integer
+  :group 'ellm-tools)
+
 ;;;; Variables
 
 (defvar ellm-tools-refs '()
@@ -605,6 +610,26 @@ Each issue is returned as line-range:type:message."
            "\n")
         "No flymake issues found."))))
 
+;;;;; Emacs
+
+(ellm-deftool emacs/elisp-info ()
+  ((symbols :array "Names of Emacs Lisp functions or variables to describe."))
+  "Return Emacs help for each requested function or variable in SYMBOLS."
+  (ellm-tools--elisp-info
+   (ellm-tools--normalize-symbol-names symbols)))
+
+(ellm-deftool emacs/elisp-search ()
+  ((query :string "Text to fuzzy-match against Emacs Lisp function and variable names.")
+   (search-documentation :boolean "If non-nil, also search function and variable documentation." &optional)
+   (max-results :integer "Maximum number of results to return. Defaults to `ellm-tools-elisp-search-result-limit'." &optional))
+  "Fuzzy-search Emacs Lisp functions and variables for QUERY.
+When SEARCH-DOCUMENTATION is non-nil, also find symbols whose
+documentation contains the query words."
+  (ellm-tools--validate-pattern query "query")
+  (let ((limit (ellm-tools--normalized-limit
+                max-results ellm-tools-elisp-search-result-limit)))
+    (ellm-tools--elisp-search query search-documentation limit)))
+
 ;;;;; Tasks
 
 (ellm-deftool tasks/todowrite ()
@@ -701,6 +726,166 @@ conversation buffer."
     (unless (and (integerp value) (> value 0))
       (ellm-tools--error "limit must be a positive integer"))
     value))
+
+(defun ellm-tools--normalize-symbol-names (symbols)
+  "Return validated function or variable names from SYMBOLS."
+  (let ((names (if (vectorp symbols) (append symbols nil) symbols)))
+    (unless (and (consp names)
+                 (cl-every (lambda (name)
+                             (and (stringp name) (not (s-blank? name))))
+                           names))
+      (ellm-tools--error
+       "symbols must be a non-empty array of non-empty strings"))
+    names))
+
+(defun ellm-tools--elisp-symbol-p (symbol)
+  "Return non-nil when SYMBOL is a function or variable."
+  (or (fboundp symbol) (boundp symbol)))
+
+(defun ellm-tools--elisp-info (names)
+  "Return `describe-symbol' help for function or variable NAMES."
+  (require 'help-fns)
+  (mapconcat
+   (lambda (name)
+     (let ((symbol (intern-soft name)))
+       (if (and symbol (ellm-tools--elisp-symbol-p symbol))
+           (progn
+             (save-window-excursion
+               (describe-symbol symbol))
+             (format "<elisp_info symbol=%S>\n%s\n</elisp_info>"
+                     name
+                     (with-current-buffer (help-buffer)
+                       (string-trim-right
+                        (buffer-substring-no-properties
+                         (point-min) (point-max))))))
+         (format "No function or variable named %S is defined." name))))
+   names
+   "\n\n"))
+
+(defun ellm-tools--elisp-documentation (symbol)
+  "Return the combined function and variable documentation for SYMBOL."
+  (string-join
+   (delq nil
+         (list
+          (when (fboundp symbol)
+            (condition-case nil
+                (documentation symbol t)
+              (error nil)))
+          (when (boundp symbol)
+            (condition-case nil
+                (documentation-property
+                 symbol 'variable-documentation t)
+              (error nil)))))
+   "\n"))
+
+(defun ellm-tools--elisp-matching-documentation (symbol regexps)
+  "Return SYMBOL documentation when it matches every regexp in REGEXPS."
+  (let ((case-fold-search t)
+        (documentation (ellm-tools--elisp-documentation symbol)))
+    (and (not (string-empty-p documentation))
+         (cl-every
+          (lambda (regexp)
+            (string-match-p regexp documentation))
+          regexps)
+         documentation)))
+
+(defun ellm-tools--elisp-symbol-kind (symbol)
+  "Return a display string describing the kind of SYMBOL."
+  (string-join
+   (delq nil (list (and (fboundp symbol) "function")
+                   (and (boundp symbol) "variable")))
+   ", "))
+
+(defun ellm-tools--elisp-symbol-summary (symbol &optional documentation)
+  "Return the first documentation line for SYMBOL.
+Use DOCUMENTATION when supplied instead of retrieving it again."
+  (when-let* ((documentation (or documentation
+                                 (ellm-tools--elisp-documentation symbol)))
+              ((not (string-empty-p documentation))))
+    (car (split-string documentation "\n" t "[[:space:]]+"))))
+
+(defun ellm-tools--elisp-search (query search-documentation limit)
+  "Return up to LIMIT function and variable matches for QUERY.
+Names are flex-matched.  When SEARCH-DOCUMENTATION is non-nil, symbols
+whose documentation contains all QUERY words are included as well."
+  (let* ((completion-ignore-case t)
+         (completion-styles '(flex))
+         (name-query (replace-regexp-in-string
+                      "[-_[:space:]]+" "" query))
+         (completion-result
+          (completion-all-completions
+           name-query obarray #'ellm-tools--elisp-symbol-p
+           (length name-query)))
+         (name-matches nil)
+         (seen (make-hash-table :test #'eq))
+         (documentation-by-symbol (make-hash-table :test #'eq))
+         documentation-matches
+         documentation-truncated
+         name-match-count)
+    (while (consp completion-result)
+      (let ((symbol (intern-soft
+                     (substring-no-properties (pop completion-result)))))
+        (when (and symbol (not (gethash symbol seen)))
+          (puthash symbol t seen)
+          (push symbol name-matches))))
+    (setq name-matches (nreverse name-matches))
+    (setq name-match-count (length name-matches))
+    (when search-documentation
+      (let ((needed (1+ (- limit name-match-count)))
+            (regexps
+             (mapcar #'regexp-quote
+                     (split-string query "[[:space:]]+" t))))
+        (if (>= name-match-count limit)
+            (setq documentation-truncated t)
+          (catch 'enough-matches
+            (mapatoms
+             (lambda (symbol)
+               (when (and (ellm-tools--elisp-symbol-p symbol)
+                          (not (gethash symbol seen)))
+                 (when-let*
+                     ((documentation
+                       (ellm-tools--elisp-matching-documentation
+                        symbol regexps)))
+                   (puthash symbol t seen)
+                   (puthash symbol documentation documentation-by-symbol)
+                   (push symbol documentation-matches)
+                   (when (= (length documentation-matches) needed)
+                     (setq documentation-truncated t)
+                     (throw 'enough-matches nil)))))))))
+      (setq documentation-matches
+            (sort documentation-matches
+                  (lambda (left right)
+                    (string-lessp (symbol-name left)
+                                  (symbol-name right))))))
+    (let* ((shown-names (seq-take name-matches limit))
+           (shown
+            (append shown-names
+                    (seq-take documentation-matches
+                              (- limit (length shown-names)))))
+           (truncated
+            (or (> name-match-count limit)
+                documentation-truncated)))
+      (if (null shown)
+          (format "No Emacs Lisp functions or variables matched %S." query)
+        (concat
+         (format "<elisp_search query=%S search_documentation=%s results=%d%s>\n"
+                 query
+                 (if search-documentation "true" "false")
+                 (length shown)
+                 (if truncated " truncated=true" ""))
+         (mapconcat
+          (lambda (symbol)
+            (concat
+             (format "%s [%s]"
+                     symbol (ellm-tools--elisp-symbol-kind symbol))
+             (when-let*
+                 ((summary
+                   (ellm-tools--elisp-symbol-summary
+                    symbol (gethash symbol documentation-by-symbol))))
+               (concat " — " summary))))
+          shown
+          "\n")
+         "\n</elisp_search>")))))
 
 ;;;;;; Find & grep
 
