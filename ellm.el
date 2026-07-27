@@ -2278,7 +2278,8 @@ BUFFER defaults to the current buffer.  Invalid or empty titles are ignored."
         (let ((inhibit-read-only t))
           (ellm--preserve-user-position
             (ellm--set-frontmatter-value '(title) title)))
-        (ellm-update-session-title title buffer)))))
+        (ellm-update-session-title title buffer)
+        (force-mode-line-update)))))
 
 (defun ellm-update-session-title (title &optional buffer)
   "Update BUFFER's name from backend-provided session TITLE.
@@ -5855,21 +5856,31 @@ the resulting normalized list."
                  `(space :align-to (- right ,(+ 1 (string-width text))))))
    text))
 
+(defun ellm--format-header-title (title)
+  "Return TITLE normalized for literal header-line display."
+  (when (and (stringp title) (not (string-empty-p title)))
+    (replace-regexp-in-string
+     "%" "%%"
+     (replace-regexp-in-string "[\n\r\t]+" " " title)
+     t t)))
+
 (defun ellm--header-line-status ()
   "Return `ellm-mode' header-line status text."
-  (let* ((todos (ellm--format-todo-progress
+  (let* ((title (ellm--format-header-title ellm--session-title))
+         (todos (ellm--format-todo-progress
                  (ellm-buffer-state-todos ellm-buffer-state)))
+         (lhs (string-join (delq nil (list title todos)) " — "))
          (usage (ellm--format-context-usage
-                  (ellm-buffer-state-context-usage ellm-buffer-state)
-                  (ellm-buffer-state-context-size ellm-buffer-state)))
+                 (ellm-buffer-state-context-usage ellm-buffer-state)
+                 (ellm-buffer-state-context-size ellm-buffer-state)))
          (cost (ellm--format-cost
                 (ellm-buffer-state-cost-amount ellm-buffer-state)
                 (ellm-buffer-state-cost-currency ellm-buffer-state)))
          (rhs (string-join (delq nil (list usage cost)) " ")))
     (cond
-     ((and todos (not (string-empty-p rhs)))
-      (concat todos (ellm--header-line-right-status rhs)))
-     (todos todos)
+     ((and (not (string-empty-p lhs)) (not (string-empty-p rhs)))
+      (concat lhs (ellm--header-line-right-status rhs)))
+     ((not (string-empty-p lhs)) lhs)
      ((not (string-empty-p rhs))
       (ellm--header-line-right-status rhs)))))
 
