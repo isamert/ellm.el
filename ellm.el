@@ -894,7 +894,8 @@ Used in {load,enable,disable}-theme hooks."
     (set-face-attribute 'ellm-block nil :background alt-bg)
     (set-face-attribute 'ellm-inline-code nil :background alt-bg)
     (set-face-attribute 'ellm-frontmatter nil :background alt-bg)
-    (set-face-attribute 'ellm-code-block-delimiter nil :background alt-bg)))
+    (set-face-attribute 'ellm-code-block-delimiter nil :background alt-bg))
+  (ellm--apply-heading-rescale ellm-heading-rescale))
 
 (dolist (hook '(load-theme enable-theme disable-theme))
   (advice-add hook :after #'ellm--update-faces))
@@ -5896,6 +5897,7 @@ the resulting normalized list."
 ;;;###autoload
 (define-derived-mode ellm-mode text-mode "eLLM"
   "Major mode for LLM interaction buffers."
+  (ellm--apply-heading-rescale ellm-heading-rescale)
   (ellm--clear-system-prompt-cache)
   (setq-local ellm-buffer-state (ellm--make-buffer-state))
   (unless ellm--base-default-directory
