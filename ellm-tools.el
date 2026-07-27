@@ -57,6 +57,13 @@ override this with `:timeout' in `ellm-deftool' SPECS."
   :type 'string
   :group 'ellm-tools)
 
+(defcustom ellm-tools-bash-output-character-limit 30000
+  "Maximum characters of command output returned by the `bash' tool.
+When output exceeds this limit, its beginning and end are retained and the
+omitted middle is replaced with a truncation marker."
+  :type 'natnum
+  :group 'ellm-tools)
+
 (defconst ellm-tools--default-glob-options
   '("--hidden" "--follow" "--exclude" ".git" "--exclude" "node_modules" "--glob")
   "Default value for `ellm-tools-glob-options'.")
@@ -434,30 +441,53 @@ standard input in the frontmatter `cwd', project root, or `default-directory',
 in that order.  `ellm-tools-bash-program' selects the Bash executable, and
 `ellm-tools-default-timeout' controls how long it may run."
   (let* ((default-directory (ellm-tools--default-directory))
-         (process-connection-type nil)
-         (buf (generate-new-buffer " *ellm-tools-bash*"))
-         (proc (start-process "ellm-tools-bash" buf
-                              ellm-tools-bash-program "-c" command)))
+         (limit ellm-tools-bash-output-character-limit)
+         (head-limit (/ (+ limit 1) 2))
+         (tail-limit (/ limit 2))
+         (proc
+          (make-process
+           :name "ellm-tools-bash"
+           :command (list ellm-tools-bash-program "-c" command)
+           :connection-type 'pipe
+           :noquery t
+           :filter
+           (lambda (process chunk)
+             (let* ((total (+ (or (process-get process 'ellm-total) 0)
+                              (length chunk)))
+                    (output (concat (or (process-get process 'ellm-output) "")
+                                    chunk)))
+               (process-put process 'ellm-total total)
+               (if (process-get process 'ellm-truncated)
+                   (process-put process 'ellm-output
+                                (substring output (max 0 (- (length output)
+                                                            tail-limit))))
+                 (if (<= total limit)
+                     (process-put process 'ellm-output output)
+                   (process-put process 'ellm-truncated t)
+                   (process-put process 'ellm-head
+                                (substring output 0 head-limit))
+                   (process-put process 'ellm-output
+                                (substring output (- tail-limit)))))))
+           :sentinel
+           (lambda (process _event)
+             (when (memq (process-status process) '(exit signal))
+               (let* ((tail (or (process-get process 'ellm-output) ""))
+                      (total (or (process-get process 'ellm-total) 0))
+                      (output
+                       (if (process-get process 'ellm-truncated)
+                           (concat
+                            (process-get process 'ellm-head)
+                            (format "\n[... %d characters omitted; showing beginning and end ...]\n"
+                                    (- total head-limit tail-limit))
+                            tail)
+                         tail)))
+                 (funcall callback
+                          (format "Exit code: %d\n%s"
+                                  (process-exit-status process) output))))))))
     (process-send-eof proc)
-    (set-process-sentinel
-     proc
-     (lambda (process _event)
-       (when (memq (process-status process) '(exit signal))
-         (let* ((process-buffer (process-buffer process))
-                (output (if (buffer-live-p process-buffer)
-                            (with-current-buffer process-buffer
-                              (buffer-string))
-                          ""))
-                (exit-code (process-exit-status process)))
-           (when (buffer-live-p process-buffer)
-             (kill-buffer process-buffer))
-           (funcall callback
-                    (format "Exit code: %d\n%s" exit-code output))))))
     (lambda ()
       (when (process-live-p proc)
-        (kill-process proc))
-      (when (buffer-live-p buf)
-        (kill-buffer buf)))))
+        (kill-process proc)))))
 
 ;;;;; Files
 
