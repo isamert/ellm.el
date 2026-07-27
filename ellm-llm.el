@@ -791,14 +791,22 @@ Return (TOOL-USES TOOL-RESULTS IDS), or nil when no call was recoverable."
                (assistant . ,(plist-get result :text)))
     :reasoning-state ,reasoning-state-id))
 
-(defun ellm-llm--usage-event (usage)
-  "Return a normalized usage event from llm.el USAGE."
-  (append
-   (list :type 'usage)
-   (cl-loop for key in '(:input-tokens :output-tokens :cached-tokens
-                         :cache-write-tokens)
-            when (plist-member usage key)
-            append (list key (plist-get usage key)))))
+(defun ellm-llm--usage-event (provider usage)
+  "Return a normalized usage event for PROVIDER from llm.el USAGE.
+The latest leg's input tokens represent its context usage; the provider's
+chat token limit supplies the corresponding context size when available."
+  (let ((input-tokens (plist-get usage :input-tokens))
+        (context-size (ignore-errors (llm-chat-token-limit provider))))
+    (append
+     (list :type 'usage)
+     (cl-loop for key in '(:input-tokens :output-tokens :cached-tokens
+                           :cache-write-tokens)
+              when (plist-member usage key)
+              append (list key (plist-get usage key)))
+     (and (numberp input-tokens)
+          (list :context-usage input-tokens))
+     (and (numberp context-size) (> context-size 0)
+          (list :context-size context-size)))))
 
 (cl-defmethod ellm-backend-start ((driver ellm-llm-driver) emit)
   "Start or resume one llm.el leg and emit normalized events."
@@ -848,7 +856,7 @@ Return (TOOL-USES TOOL-RESULTS IDS), or nil when no call was recoverable."
                   (partial result)
                   (when leg-usage
                     (ellm-llm--emit driver
-                                    (ellm-llm--usage-event leg-usage)))
+                                    (ellm-llm--usage-event provider leg-usage)))
                   (if-let* ((tool-uses (plist-get result :tool-uses))
                             (tool-results (plist-get result :tool-results)))
                       (continue-with-tools
