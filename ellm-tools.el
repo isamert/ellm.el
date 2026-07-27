@@ -90,12 +90,33 @@ possible, for example:
   :type 'string
   :group 'ellm-tools)
 
+(defcustom ellm-tools-grep-glob-options '("--glob" "%s")
+  "Arguments used to restrict `grep' to an optional path glob.
+Each `%s' in an argument is replaced with the requested glob.  The default is
+for ripgrep; GNU grep can use `(\"--include=%s\")'.  Set this to nil when the
+configured grep implementation does not support path globs, in which case a
+tool call requesting one reports an error."
+  :type '(choice (const :tag "Unsupported" nil) (repeat string))
+  :group 'ellm-tools)
+
 (defcustom ellm-tools-grep-options
-  '("--vimgrep" "--hidden" "--glob" "!.git" "--color=never")
+  '("--vimgrep" "--hidden"
+    "--glob" "!.git" "--glob" "!node_modules"
+    "--glob" "!.cache" "--glob" "!.venv" "--glob" "!venv"
+    "--glob" "!.direnv" "--glob" "!.next" "--glob" "!.terraform"
+    "--glob" "!__pycache__"
+    "--color=never" "--max-columns=2000" "--max-columns-preview")
   "Command line options used by the `grep' tool.
-By default these are options for ripgrep and include `--vimgrep'.  If an
-option contains `%p' or `%d', they are replaced with the regex pattern and
-path, respectively, and no implicit pattern/path arguments are appended."
+The defaults are for ripgrep.  They search hidden files but exclude common
+repository metadata, dependency, cache, and generated-environment directories
+so searches remain useful even without ignore files.  `--vimgrep' produces
+file:line:column:text output, while `--max-columns=2000' and
+`--max-columns-preview' prevent a single very long matching line from
+flooding the model context.  If you replace ripgrep or these options, retain
+an equivalent per-line output cap in the replacement command.
+
+If an option contains `%p' or `%d', they are replaced with the regex pattern
+and path, respectively, and no implicit pattern/path arguments are appended."
   :type '(repeat string)
   :group 'ellm-tools)
 
@@ -515,17 +536,23 @@ Uses `ellm-tools-glob-program' (fd by default) with
 (ellm-deftool files/grep (:async t)
   ((pattern :string "Regular expression pattern to search for.")
    (path :string "File or directory to search. Relative paths are resolved from the current project root or frontmatter `cwd'. Defaults to `.'." &optional)
-   (max-results :integer "Maximum number of matching lines to return. Defaults to `ellm-tools-search-result-limit'." &optional))
+   (max-results :integer "Maximum number of matching lines to return. Defaults to `ellm-tools-search-result-limit'." &optional)
+   (glob :string "Optional path glob restricting searched files, for example `*.el' or `src/**'." &optional))
   "Search file contents for PATTERN under PATH.
 Uses `ellm-tools-grep-program' (ripgrep by default) with
 `ellm-tools-grep-options'.  The default ripgrep options include
-`--vimgrep', so matches are returned as file:line:column:text lines."
+`--vimgrep', so matches are returned as file:line:column:text lines.
+GLOB is translated using `ellm-tools-grep-glob-options'."
   (ellm-tools--validate-pattern pattern "pattern")
+  (when glob
+    (ellm-tools--validate-pattern glob "glob")
+    (unless ellm-tools-grep-glob-options
+      (ellm-tools--error "the configured grep program does not support path globs")))
   (let* ((default-directory (ellm-tools--default-directory))
          (search-path (ellm-tools--search-path path))
          (limit (ellm-tools--normalized-limit
                  max-results ellm-tools-search-result-limit))
-         (command (ellm-tools--grep-command pattern search-path)))
+         (command (ellm-tools--grep-command pattern search-path glob)))
     (ellm-tools--start-command
      "ellm-tools-grep" (car command) (cdr command)
      (lambda (exit-code stdout stderr)
@@ -1409,14 +1436,19 @@ whose documentation contains all QUERY words are included as well."
            (t
             (append options (list "--" pattern path)))))))
 
-(defun ellm-tools--grep-command (pattern path)
-  "Return command list for running the grep tool with PATTERN under PATH."
-  (let ((program ellm-tools-grep-program)
-        (options ellm-tools-grep-options))
+(defun ellm-tools--grep-command (pattern path &optional glob)
+  "Return command list for running grep for PATTERN under PATH and optional GLOB."
+  (let* ((program ellm-tools-grep-program)
+         (options ellm-tools-grep-options)
+         (glob-options
+          (when glob
+            (mapcar (lambda (arg) (string-replace "%s" glob arg))
+                    ellm-tools-grep-glob-options))))
     (cons program
           (if (ellm-tools--command-template-p options)
-              (ellm-tools--expand-command-template options pattern path)
-            (append options (list "--" pattern path))))))
+              (append glob-options
+                      (ellm-tools--expand-command-template options pattern path))
+            (append options glob-options (list "--" pattern path))))))
 
 ;;;;;; External command handling
 
