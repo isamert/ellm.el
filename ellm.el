@@ -46,6 +46,7 @@
 (require 'color)
 (require 'json)
 (require 'outline)
+(require 'subr-x)
 (require 'xdg)
 (require 'yaml)
 
@@ -2295,18 +2296,6 @@ TITLE is missing, or `ellm-buffer-name-function' is nil or returns nil."
 (defvar-local ellm--frontmatter-cwd-directory nil
   "Resolved directory from frontmatter `cwd:', or nil when unset.")
 
-(defvar-local ellm--persistence-ephemeral-p nil
-  "Non-nil when this ellm buffer must not be automatically persisted.")
-
-(defvar-local ellm--session-directory nil
-  "Directory containing this conversation and its subagent files.")
-
-(put 'ellm--persistence-ephemeral-p 'permanent-local t)
-(put 'ellm--session-directory 'permanent-local t)
-
-(defvar-local ellm--persistence-saving-p nil
-  "Non-nil while ellm is assigning or saving this buffer's persistence file.")
-
 (defun ellm--warn-frontmatter-parse-error (err)
   "Warn about frontmatter parse ERR."
   (lwarn 'ellm :warning "Failed to parse frontmatter: %S" err))
@@ -2444,6 +2433,74 @@ KEY may be a symbol/string or a list naming a nested path."
                  (ellm--yaml-encode updated)
                ""))))))))
 
+;;;;; Directory tracking
+
+(defvar-local ellm--effective-working-directory nil
+  "Working directory applied for the current backend request, or nil.")
+
+(defun ellm--base-directory ()
+  "Return the buffer's base directory before request-time cwd changes."
+  (file-name-as-directory
+   (expand-file-name (or ellm--base-default-directory default-directory))))
+
+(defun ellm--validate-directory (directory label)
+  "Return DIRECTORY as an absolute directory, or signal using LABEL."
+  (let ((directory (file-name-as-directory (expand-file-name directory))))
+    (unless (file-directory-p directory)
+      (user-error "ellm: %s does not exist: %s" label directory))
+    directory))
+
+(defun ellm--frontmatter-cwd (frontmatter)
+  "Return FRONTMATTER's `cwd' as an absolute directory, or nil."
+  (when-let* ((cwd (alist-get 'cwd frontmatter)))
+    (unless (stringp cwd)
+      (user-error "ellm: frontmatter `cwd' must be a string"))
+    (ellm--validate-directory
+     (expand-file-name cwd (ellm--base-directory)) "cwd")))
+
+(defun ellm--project-directory ()
+  "Return the current project directory from the buffer base, or nil."
+  (let ((default-directory (ellm--base-directory)))
+    (when-let* ((root (funcall ellm-current-project-function)))
+      (ellm--validate-directory root "project root"))))
+
+(defun ellm--working-directory (&optional frontmatter override)
+  "Return the effective working directory for FRONTMATTER.
+OVERRIDE, when non-nil, takes precedence.  Otherwise use frontmatter `cwd',
+the working directory already applied for the request, the current project
+root, then the buffer base directory."
+  (cond
+   ((and override (stringp override) (not (string-empty-p override)))
+    (ellm--validate-directory
+     (expand-file-name override (ellm--base-directory)) "cwd"))
+   (override
+    (user-error "ellm: cwd must be a non-empty string"))
+   ((ellm--frontmatter-cwd frontmatter))
+   (ellm--effective-working-directory
+    (ellm--validate-directory ellm--effective-working-directory
+                              "working directory"))
+   (ellm--frontmatter-cwd-directory
+    (ellm--validate-directory ellm--frontmatter-cwd-directory "cwd"))
+   ((ellm--project-directory))
+   (t
+    (ellm--validate-directory (ellm--base-directory) "default-directory"))))
+
+(defun ellm--apply-working-directory (frontmatter &optional override)
+  "Apply the effective working directory for FRONTMATTER to this buffer.
+This sets buffer-local `default-directory' so asynchronous backend callbacks
+and tool execution use the same workspace.  OVERRIDE, when non-nil, takes
+precedence over frontmatter `cwd'."
+  (let ((directory
+         (let ((ellm--effective-working-directory nil)
+               (ellm--frontmatter-cwd-directory nil))
+           (ellm--working-directory frontmatter override))))
+    (setq-local ellm--frontmatter-cwd-directory
+                (and (not override)
+                     (alist-get 'cwd frontmatter)
+                     directory))
+    (setq-local ellm--effective-working-directory directory)
+    (setq-local default-directory directory)))
+
 ;;;;; Prompt interpolation
 
 (defvar ellm--prompt-interpolation-context nil
@@ -2460,16 +2517,8 @@ KEY may be a symbol/string or a list naming a nested path."
 
 (defun ellm--prompt-context-directory (frontmatter)
   "Return the effective prompt directory for FRONTMATTER."
-  (let ((cwd (alist-get 'cwd frontmatter))
-        (base (or ellm--base-default-directory default-directory)))
-    (when (and cwd (not (stringp cwd)))
-      (user-error "ellm: frontmatter `cwd' must be a string"))
-    (let ((directory
-           (file-name-as-directory
-            (expand-file-name (or cwd base) base))))
-      (unless (file-directory-p directory)
-        (user-error "ellm: cwd does not exist: %s" directory))
-      directory)))
+  (or (ellm--frontmatter-cwd frontmatter)
+      (ellm--validate-directory (ellm--base-directory) "default-directory")))
 
 (defun ellm--prompt-context (provider frontmatter)
   "Return prompt interpolation context for PROVIDER and FRONTMATTER."
@@ -2835,6 +2884,18 @@ keeps its resolved prompt; clearing the cache only affects future requests."
             (princ "\n\n")))))))
 
 ;;;;; Persistence
+
+(defvar-local ellm--persistence-ephemeral-p nil
+  "Non-nil when this ellm buffer must not be automatically persisted.")
+
+(defvar-local ellm--session-directory nil
+  "Directory containing this conversation and its subagent files.")
+
+(put 'ellm--persistence-ephemeral-p 'permanent-local t)
+(put 'ellm--session-directory 'permanent-local t)
+
+(defvar-local ellm--persistence-saving-p nil
+  "Non-nil while ellm is assigning or saving this buffer's persistence file.")
 
 (defconst ellm--reasoning-state-id-regexp
   "\\`rs-[[:xdigit:]]\\{64\\}\\'"

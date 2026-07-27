@@ -107,9 +107,10 @@ from running."
   "Provider configuration for an ACP agent process.
 COMMAND is the executable used to start the ACP agent.  ARGS is a list of
 command-line arguments.  ENV is an alist of environment overrides.  CWD,
-when non-nil, is the session working directory; otherwise `default-directory'
-is used.  MODEL is the default model written to new buffers and, when the
-ACP agent exposes a model config option, selected for the session.  MODELS is
+when non-nil, overrides the session working directory; otherwise frontmatter
+`cwd', the project root, or the buffer's base directory is used.  MODEL is the
+default model written to new buffers and, when the ACP agent exposes a model
+config option, selected for the session.  MODELS is
 an optional list of model candidates used for frontmatter completion."
   command args env cwd model models)
 
@@ -312,6 +313,7 @@ When NAMESPACE is non-nil, clear only that namespace."
   ((provider ellm-acp-provider) frontmatter buffer on-ready on-error)
   "Asynchronously start PROVIDER's session for BUFFER."
   (with-current-buffer buffer
+    (ellm-acp--apply-working-directory provider frontmatter)
     (let ((connection (ellm-acp--ensure-connection provider buffer)))
       (ellm-acp--ensure-session connection provider frontmatter on-ready on-error))))
 
@@ -483,6 +485,7 @@ Call ON-READY with its effect on success, or ON-ERROR on failure."
                                    frontmatter buffer)
   "Create an ACP protocol driver for BUFFER."
   (with-current-buffer buffer
+    (ellm-acp--apply-working-directory provider frontmatter)
     (let* ((connection (ellm-acp--ensure-connection provider buffer))
            (prompt-text (ellm-acp--last-user-content))
            (request
@@ -847,11 +850,11 @@ Callbacks for a cancelled conversation request are discarded."
 
 (defun ellm-acp--provider-cwd (provider frontmatter)
   "Return absolute ACP cwd for PROVIDER and FRONTMATTER."
-  (expand-file-name
-   (file-name-as-directory
-    (or (ellm-acp-provider-cwd provider)
-        (alist-get 'cwd frontmatter)
-        default-directory))))
+  (ellm--working-directory frontmatter (ellm-acp-provider-cwd provider)))
+
+(defun ellm-acp--apply-working-directory (provider frontmatter)
+  "Apply PROVIDER's effective working directory for FRONTMATTER."
+  (ellm--apply-working-directory frontmatter (ellm-acp-provider-cwd provider)))
 
 (defun ellm-acp--resolve-value (value)
   "Resolve VALUE when it follows mcp.el's dynamic value convention."
@@ -1687,6 +1690,7 @@ do not show a success message.  Return the ready ACP connection."
   (unless (buffer-live-p buffer)
     (user-error "ellm ACP: buffer is not live"))
   (with-current-buffer buffer
+    (ellm-acp--apply-working-directory provider frontmatter)
     (let ((connection (ellm-acp--ensure-connection provider buffer)))
       (ellm-acp--ensure-session-sync connection provider frontmatter)
       (ellm-acp--maybe-set-model-sync
@@ -1737,11 +1741,13 @@ do not show a success message.  Return the ready ACP connection."
 
 (defun ellm-acp-load-session (provider frontmatter)
   "Interactively load an ACP session for PROVIDER using FRONTMATTER context."
-  (let* ((list-buffer (generate-new-buffer " *ellm-acp-list*"))
+  (let* ((default-directory (ellm--base-directory))
+         (list-buffer (generate-new-buffer " *ellm-acp-list*"))
          (list-connection nil))
     (unwind-protect
         (progn
           (with-current-buffer list-buffer
+            (ellm-acp--apply-working-directory provider frontmatter)
             (setq list-connection (ellm-acp--ensure-connection provider list-buffer)))
           (let* ((sessions (ellm-acp--list-sessions list-connection provider frontmatter))
                  (session (ellm-acp--session-choice sessions)))
@@ -1763,6 +1769,7 @@ do not show a success message.  Return the ready ACP connection."
   (unless (buffer-live-p buffer)
     (user-error "ellm ACP: buffer is not live"))
   (with-current-buffer buffer
+    (ellm-acp--apply-working-directory provider frontmatter)
     (let* ((connection (ellm-acp--ensure-connection provider buffer))
            (session-id (ellm-acp--current-session-id connection frontmatter)))
       (unless session-id
@@ -1785,6 +1792,7 @@ When SELECT is non-nil, choose a session from `session/list'."
   (unless (buffer-live-p buffer)
     (user-error "ellm ACP: buffer is not live"))
   (with-current-buffer buffer
+    (ellm-acp--apply-working-directory provider frontmatter)
     (let* ((connection (ellm-acp--ensure-connection provider buffer))
            (session-id (unless select
                          (ellm-acp--current-session-id connection frontmatter))))
@@ -1823,14 +1831,16 @@ When SELECT is non-nil, choose a session from `session/list'."
                       (or (ellm-acp-provider-model provider) "null")
                       cwd session-id))
       (ellm-mode)
-      (ellm-update-session-title title buf)
-      (setq connection (ellm-acp--ensure-connection provider buf))
-      (ellm-acp--initialize-sync connection)
-      (unless (ellm-acp--capability connection '(loadSession))
-        (user-error "ellm ACP: agent does not support session/load"))
-      (ellm-acp--load-existing-session-sync
-       connection provider frontmatter session-id
-       (or (plist-get session :additionalDirectories) []))
+      (let ((frontmatter (ellm--parse-frontmatter)))
+        (ellm-acp--apply-working-directory provider frontmatter)
+        (ellm-update-session-title title buf)
+        (setq connection (ellm-acp--ensure-connection provider buf))
+        (ellm-acp--initialize-sync connection)
+        (unless (ellm-acp--capability connection '(loadSession))
+          (user-error "ellm ACP: agent does not support session/load"))
+        (ellm-acp--load-existing-session-sync
+         connection provider frontmatter session-id
+         (or (plist-get session :additionalDirectories) [])))
       (goto-char (point-max))
       (unless (equal (ellm-acp--last-turn-role) "user")
         (ellm--insert-turn "user"))

@@ -922,32 +922,10 @@ could not be executed: %s. Retry it using an advertised tool and valid arguments
          (funcall #'fail (car err) (error-message-string err)))))
     (ellm-llm-driver-raw driver)))
 
-(defun ellm-llm--frontmatter-cwd (frontmatter)
-  "Return FRONTMATTER's `cwd' as an absolute directory, or nil."
-  (when-let* ((cwd (alist-get 'cwd frontmatter)))
-    (file-name-as-directory
-     (expand-file-name cwd (or ellm--base-default-directory
-                               default-directory)))))
-
-(defun ellm-llm--apply-cwd (frontmatter)
-  "Apply FRONTMATTER `cwd:' to the current ellm buffer.
-  This sets buffer-local `default-directory' instead of dynamically binding
-it so async callbacks and llm.el tool execution keep using the same cwd
-when they later re-enter the buffer."
-  (let ((base (or ellm--base-default-directory default-directory)))
-    (setq-local ellm--frontmatter-cwd-directory nil)
-    (if-let* ((cwd (ellm-llm--frontmatter-cwd frontmatter)))
-        (progn
-          (unless (file-directory-p cwd)
-            (user-error "ellm: cwd does not exist: %s" cwd))
-          (setq-local ellm--frontmatter-cwd-directory cwd)
-          (setq-local default-directory cwd))
-      (setq-local default-directory base))))
-
 (defun ellm-llm--backend-create (provider frontmatter buffer)
   "Create a normal `llm.el' backend driver for BUFFER."
   (with-current-buffer buffer
-    (ellm-llm--apply-cwd frontmatter)
+    (ellm--apply-working-directory frontmatter)
     (let* ((prompt (ellm-llm--parse-buffer-as-chat provider frontmatter))
            (interactions (llm-chat-prompt-interactions prompt))
            (users (seq-filter

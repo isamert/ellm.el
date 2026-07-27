@@ -792,13 +792,7 @@ responses are returned directly; unsupported binary responses are rejected."
 
 (defun ellm-tools--default-directory ()
   "Return the directory custom tools should use for relative paths."
-  (file-name-as-directory
-   (expand-file-name
-    (or (and ellm--frontmatter-cwd-directory
-             (file-directory-p ellm--frontmatter-cwd-directory)
-             ellm--frontmatter-cwd-directory)
-        (funcall ellm-current-project-function)
-        default-directory))))
+  (ellm--working-directory))
 
 ;;;;; Internal
 

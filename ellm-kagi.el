@@ -206,6 +206,7 @@ provide request defaults that may be overridden by `kagi:' frontmatter."
     (unless (and (stringp model) (not (string-empty-p model)))
       (user-error "Ellm Kagi: provider model is required")))
   (with-current-buffer buffer
+    (ellm--apply-working-directory frontmatter)
     (let* ((request
             (ellm-kagi--make-request
              :provider provider
