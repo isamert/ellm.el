@@ -185,6 +185,13 @@ disable the extra request.  Generated titles are stored in the top-level
 `title:` frontmatter key, which is shared by all backends and restored when a
 conversation is reopened.
 
+Set `ellm-llm-log-messages` to non-nil to create a diagnostic log buffer for
+each conversation, named from `ellm-llm-log-buffer-name`.  It records the
+provider request data passed to the plz transport, parsed streaming and final
+results, and errors.  Authentication headers and URL query strings are
+redacted, but prompts, responses, tool arguments, and opaque reasoning state
+are not; enable it only while debugging.  Log buffers grow without bound.
+
 Conversation example:
 
 ```markdown

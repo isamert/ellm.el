@@ -33,6 +33,7 @@
 (require 'llm)
 (require 'llm-provider-utils)
 (require 'llm-models)
+(require 'pp)
 (require 'ellm)
 
 ;; `llm.el' signals `(not-implemented)' from generic fall-through methods
@@ -46,6 +47,20 @@ Generation is a best-effort asynchronous request using only the first user
 prompt.  It uses the provider entry's `:small-model' when configured, and
 otherwise uses the current chat model."
   :type 'boolean
+  :group 'ellm)
+
+(defcustom ellm-llm-log-messages nil
+  "If non-nil, log `llm.el' requests and responses per conversation.
+Logs include final request bodies passed to the plz transport and parsed
+results delivered to ellm.  Authentication headers are redacted, but prompts,
+responses, tool arguments, and opaque reasoning state are not; enable this
+only while debugging.  Log buffers grow without bound."
+  :type 'boolean
+  :group 'ellm)
+
+(defcustom ellm-llm-log-buffer-name "*ellm-llm-log*"
+  "Base name for per-conversation `llm.el' log buffers."
+  :type 'string
   :group 'ellm)
 
 (defconst ellm-llm--title-instruction
@@ -85,7 +100,10 @@ otherwise uses the current chat model."
                  :documentation "Cancellable background title request, or nil.")
   (title-started nil
                  :type boolean
-                 :documentation "Non-nil once title generation has been attempted."))
+                 :documentation "Non-nil once title generation has been attempted.")
+  (log-buffer nil
+              :type (or null buffer)
+              :documentation "Per-conversation diagnostic log buffer."))
 
 (defconst ellm-llm--turn-usage-attrs
   '((:input-tokens . "input-tokens")
@@ -93,6 +111,80 @@ otherwise uses the current chat model."
     (:cached-tokens . "cached-tokens")
     (:cache-write-tokens . "cache-write-tokens"))
   "Mapping from `llm.el' usage keys to assistant turn attributes.")
+
+;;;; Logging
+
+(defvar ellm-llm--transport-log-buffer nil
+  "Log buffer for a dynamically scoped `llm.el' transport request.")
+
+(defun ellm-llm--driver-log-buffer (driver)
+  "Return DRIVER's diagnostic log buffer, creating it if needed."
+  (or (and (buffer-live-p (ellm-llm-driver-log-buffer driver))
+           (ellm-llm-driver-log-buffer driver))
+      (let* ((source (ellm-llm-driver-buffer driver))
+             (source-name (if (buffer-live-p source)
+                              (buffer-name source)
+                            "dead-buffer"))
+             (buffer (generate-new-buffer
+                      (format "%s<%s>" ellm-llm-log-buffer-name source-name))))
+        (setf (ellm-llm-driver-log-buffer driver) buffer)
+        buffer)))
+
+(defun ellm-llm--log (buffer direction label value)
+  "Append VALUE to BUFFER as a DIRECTION and LABEL log entry."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (goto-char (point-max))
+      (insert (format "[%s] %s %s\n%s\n\n"
+                      (format-time-string "%Y-%m-%d %H:%M:%S")
+                      direction label
+                      (pp-to-string value))))))
+
+(defun ellm-llm--redact-headers (headers)
+  "Return a copy of HEADERS with credentials redacted."
+  (mapcar
+   (lambda (header)
+     (if (string-match-p
+          "\\`\\(?:authorization\\|cookie\\|proxy-authorization\\|x-api-key\\)\\'"
+          (downcase (format "%s" (car header))))
+         (cons (car header) "<redacted>")
+       (copy-tree header)))
+   headers))
+
+(defun ellm-llm--log-url (url)
+  "Return URL with a query string redacted."
+  (replace-regexp-in-string "[?].*\\'" "?<redacted>" url))
+
+(defun ellm-llm--request-plz-advice (original url &rest args)
+  "Log an `llm-request-plz-async' call before invoking ORIGINAL.
+URL and ARGS are the transport request.  Response callbacks retain the log
+buffer selected by the originating ellm request."
+  (if (not (and ellm-llm-log-messages
+                (buffer-live-p ellm-llm--transport-log-buffer)))
+      (apply original url args)
+    (let* ((log-buffer ellm-llm--transport-log-buffer)
+           (safe-url (ellm-llm--log-url url))
+           (on-success (plist-get args :on-success))
+           (on-error (plist-get args :on-error)))
+      (ellm-llm--log
+       log-buffer "-->" safe-url
+       (list :headers (ellm-llm--redact-headers (plist-get args :headers))
+             :body (plist-get args :data)))
+      (setq args
+            (plist-put
+             args :on-success
+             (lambda (response)
+               (ellm-llm--log log-buffer "<--" safe-url response)
+               (when on-success
+                 (funcall on-success response)))))
+      (setq args
+            (plist-put
+             args :on-error
+             (lambda (&rest error)
+               (ellm-llm--log log-buffer "<!!" safe-url error)
+               (when on-error
+                 (apply on-error error)))))
+      (apply original url args))))
 
 ;;;; Interface implementation
 
@@ -636,30 +728,33 @@ CALL-IDS is an optional cons of provider tool-use and tool-result ID lists."
       (condition-case err
           (setf
            (ellm-llm-driver-title-request driver)
-           (llm-chat-streaming
-            title-provider prompt #'ignore
-            (lambda (result)
-              (setf (ellm-llm-driver-title-request driver) nil)
-              (if-let* ((title (ellm-llm--title-text result)))
-                  (when (buffer-live-p buffer)
-                    (with-current-buffer buffer
-                      ;; A title set while this request was running wins.
-                      (unless ellm--session-title
-                        (condition-case err
-                            (ellm-set-session-title title buffer)
-                          (error
-                           (ellm-llm--title-warning
-                            "could not persist title: %s"
-                            (error-message-string err)))))))
+           (let ((ellm-llm--transport-log-buffer
+                  (and ellm-llm-log-messages
+                       (ellm-llm--driver-log-buffer driver))))
+             (llm-chat-streaming
+              title-provider prompt #'ignore
+              (lambda (result)
+                (setf (ellm-llm-driver-title-request driver) nil)
+                (if-let* ((title (ellm-llm--title-text result)))
+                    (when (buffer-live-p buffer)
+                      (with-current-buffer buffer
+                        ;; A title set while this request was running wins.
+                        (unless ellm--session-title
+                          (condition-case err
+                              (ellm-set-session-title title buffer)
+                            (error
+                             (ellm-llm--title-warning
+                              "could not persist title: %s"
+                              (error-message-string err)))))))
+                  (ellm-llm--title-warning
+                   "provider returned no usable title: %S" result)))
+              (lambda (&rest error-data)
+                (setf (ellm-llm-driver-title-request driver) nil)
                 (ellm-llm--title-warning
-                 "provider returned no usable title: %S" result)))
-            (lambda (&rest error-data)
-              (setf (ellm-llm-driver-title-request driver) nil)
-              (ellm-llm--title-warning
-               "request failed: %s"
-               (mapconcat (lambda (value) (format "%S" value))
-                          error-data " ")))
-            'multi-output))
+                 "request failed: %s"
+                 (mapconcat (lambda (value) (format "%S" value))
+                            error-data " ")))
+              'multi-output)))
         (error
          (ellm-llm--title-warning
           "could not start request: %s" (error-message-string err)))))))
@@ -818,13 +913,24 @@ chat token limit supplies the corresponding context size when available."
          (prompt (ellm-llm-driver-prompt driver))
          (previous-interaction
           (car (last (llm-chat-prompt-interactions prompt))))
+         (log-buffer (and ellm-llm-log-messages
+                          (ellm-llm--driver-log-buffer driver)))
          reasoning-state-id
          leg-usage)
+    (when log-buffer
+      (ellm-llm--log
+       log-buffer "ellm --> llm.el" "prompt"
+       (list :provider (type-of provider)
+             :model (ellm-llm--provider-current-model provider)
+             :prompt prompt)))
     (cl-labels
         ((live-p ()
                  (ellm-llm--driver-live-p driver serial))
          (partial (result)
                   (when (live-p)
+                    (when log-buffer
+                      (ellm-llm--log
+                       log-buffer "llm.el --> ellm" "partial" result))
                     ;; The request timeout guards an unresponsive provider, not the
                     ;; total duration of an active stream.
                     (ellm-llm--cancel-driver-timer driver)
@@ -851,6 +957,9 @@ chat token limit supplies the corresponding context size when available."
                               (ellm-llm--emit driver '(:type continue)))
          (final (result)
                 (when (live-p)
+                  (when log-buffer
+                    (ellm-llm--log
+                     log-buffer "llm.el --> ellm" "final" result))
                   (ellm-llm--cancel-driver-timer driver)
                   (setf (ellm-llm-driver-raw driver) nil)
                   (partial result)
@@ -868,6 +977,10 @@ chat token limit supplies the corresponding context size when available."
                       (ellm-llm--emit driver '(:type complete))))))
          (fail (type message)
                (when (live-p)
+                 (when log-buffer
+                   (ellm-llm--log
+                    log-buffer "llm.el --> ellm" "error"
+                    (list :type type :message message)))
                  (ellm-llm--cancel-driver-timer driver)
                  (setf (ellm-llm-driver-raw driver) nil)
                  (cl-incf (ellm-llm-driver-serial driver))
@@ -914,8 +1027,9 @@ could not be executed: %s. Retry it using an advertised tool and valid arguments
           (let ((raw
                  ;; Do not pass `ellm-request-timeout' to plz: its timeout is
                  ;; a total transfer deadline and would abort an active stream.
-                 (llm-chat-streaming
-                  provider prompt #'partial #'final #'fail 'multi-output)))
+                 (let ((ellm-llm--transport-log-buffer log-buffer))
+                   (llm-chat-streaming
+                    provider prompt #'partial #'final #'fail 'multi-output))))
             (when (live-p)
               (setf (ellm-llm-driver-raw driver) raw)))
         (error
@@ -947,6 +1061,11 @@ could not be executed: %s. Retry it using an advertised tool and valid arguments
                           first-user)))))
 
 ;;;; Footer
+
+(unless (advice-member-p #'ellm-llm--request-plz-advice
+                         'llm-request-plz-async)
+  (advice-add 'llm-request-plz-async :around
+              #'ellm-llm--request-plz-advice))
 
 (provide 'ellm-llm)
 ;;; ellm-llm.el ends here
