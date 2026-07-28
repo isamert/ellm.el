@@ -6003,6 +6003,9 @@ the resulting normalized list."
   ;; horizontal rule above them) as page boundaries so `forward-page' /
   ;; `backward-page' navigate turn-by-turn.
   (setq-local page-delimiter ellm-page-delimiter-regexp)
+  ;; Well people are going to evaluate code in these buffers, let's
+  ;; make it easy.
+  (setq-local lexical-binding t)
   (outline-minor-mode 1)
   ;; Cache
   (ellm--rebuild-turn-body-cache)
