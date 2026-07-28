@@ -1100,11 +1100,16 @@ ERROR is non-nil when RAW represents an error result."
     result))
 
 (defun ellm-tools--coerce-tool-result-to-string (_tool _args _error? raw)
-  "Return RAW as a string suitable for serialized tool text."
-  (cond
-   ((null raw) "")
-   ((stringp raw) raw)
-   (t (format "%s" raw))))
+  "Return RAW as a string suitable for serialized tool text.
+Replace raw bytes, which are not JSON values, with the Unicode replacement
+character.  They can occur when a tool emits bytes invalid in its process
+coding system."
+  (let ((text (cond
+               ((null raw) "")
+               ((stringp raw) raw)
+               (t (format "%s" raw)))))
+    (replace-regexp-in-string
+     (format "[%c-%c]" #x3fff80 #x3fffff) "�" text t t)))
 
 (defun ellm-tools--escaped-tool-body-prefix-regexp ()
   "Return regexp matching reversible tool-body escape sequences."
