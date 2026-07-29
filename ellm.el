@@ -168,6 +168,24 @@ closest parent containing a `.git' directory."
   :type 'function
   :group 'ellm)
 
+(defcustom ellm-side-window-side 'right
+  "Side used by `ellm-toggle-side-window' for the side conversation window."
+  :type '(choice (const :tag "Left" left)
+                 (const :tag "Right" right)
+                 (const :tag "Top" top)
+                 (const :tag "Bottom" bottom))
+  :group 'ellm)
+
+(defcustom ellm-side-window-width 84
+  "Width used by `ellm-toggle-side-window' for left/right side windows."
+  :type 'integer
+  :group 'ellm)
+
+(defcustom ellm-side-window-height 20
+  "Height used by `ellm-toggle-side-window' for top/bottom side windows."
+  :type 'integer
+  :group 'ellm)
+
 (defvar-local ellm--base-default-directory nil
   "Buffer default directory before applying frontmatter `cwd:'.")
 
@@ -207,47 +225,6 @@ Opaque reasoning state is stored here when conversation persistence is
 disabled or the current buffer is ephemeral."
   :type 'directory
   :group 'ellm)
-
-(defun ellm-current-project-root ()
-  "Return the current project root, or nil outside a Git repository."
-  (when-let* ((path (locate-dominating-file default-directory ".git")))
-    (expand-file-name path)))
-
-(defun ellm--project-root-in-buffer (buffer)
-  "Return the project root associated with ellm BUFFER, or nil."
-  (with-current-buffer buffer
-    (let ((default-directory
-            (or ellm--base-default-directory default-directory)))
-      (when-let* ((root (funcall ellm-current-project-function)))
-        (file-name-as-directory (expand-file-name root))))))
-
-;;;###autoload
-(defun ellm-switch-to-project-buffer (&optional include-subagents)
-  "Switch to an ellm buffer belonging to the current project.
-With prefix argument INCLUDE-SUBAGENTS, also offer subagent buffers from
-this project.  Without it, offer only main conversation buffers."
-  (interactive "P")
-  (let ((root (ellm--project-root-in-buffer (current-buffer)))
-        buffers)
-    (unless root
-      (user-error "No current project"))
-    (dolist (buffer (buffer-list))
-      (when (and (with-current-buffer buffer
-                   (and (derived-mode-p 'ellm-mode)
-                        (or include-subagents
-                            (not (bound-and-true-p ellm-subagent-id)))))
-                 (equal root (ellm--project-root-in-buffer buffer)))
-        (push buffer buffers)))
-    (setq buffers (nreverse buffers))
-    (unless buffers
-      (user-error "No ellm buffers found for current project"))
-    (let ((names (mapcar #'buffer-name buffers)))
-      (switch-to-buffer
-       (read-buffer
-        "Switch to project ellm buffer: " nil t
-        (lambda (candidate)
-          (member (if (consp candidate) (car candidate) candidate)
-                  names)))))))
 
 (defun ellm--provider-entry-provider (entry)
   "Return the provider object from an `ellm-provider-alist' ENTRY value.
@@ -5085,6 +5062,200 @@ according to `ellm-fold-tool-calls' / `ellm-fold-reasoning-blocks'."
   (ellm--fold-turns-with-roles
    (append (and ellm-fold-tool-calls '("tool-call" "tool-result"))
            (and ellm-fold-reasoning-blocks '("reasoning")))))
+
+;;;; Side buffer, buffer switching functins
+
+(declare-function org-element-context "org-element")
+(declare-function org-element-property "org-element" (property element))
+(declare-function org-element-type "org-element" (element))
+
+(defun ellm-current-project-root ()
+  "Return the current project root, or nil outside a Git repository."
+  (when-let* ((path (locate-dominating-file default-directory ".git")))
+    (expand-file-name path)))
+
+(defun ellm--project-root-in-buffer (buffer)
+  "Return the project root associated with ellm BUFFER, or nil."
+  (with-current-buffer buffer
+    (let ((default-directory
+            (or ellm--base-default-directory default-directory)))
+      (when-let* ((root (funcall ellm-current-project-function)))
+        (file-name-as-directory (expand-file-name root))))))
+
+(defun ellm--current-project-root-or-directory ()
+  "Return the current project root, or `default-directory' outside a project."
+  (file-name-as-directory
+   (expand-file-name
+    (or (funcall ellm-current-project-function) default-directory))))
+
+(defun ellm--buffer-root-or-directory (buffer)
+  "Return BUFFER's project root, or base directory outside a project."
+  (with-current-buffer buffer
+    (or (ellm--project-root-in-buffer buffer)
+        (file-name-as-directory
+         (expand-file-name (or ellm--base-default-directory default-directory))))))
+
+(defun ellm--project-buffers (root &optional include-subagents)
+  "Return ellm buffers rooted at ROOT.
+Without INCLUDE-SUBAGENTS, omit subagent buffers."
+  (let (buffers)
+    (dolist (buffer (buffer-list) (nreverse buffers))
+      (when (and (with-current-buffer buffer
+                   (and (derived-mode-p 'ellm-mode)
+                        (or include-subagents
+                            (not (bound-and-true-p ellm-subagent-id)))))
+                 (equal root (ellm--buffer-root-or-directory buffer)))
+        (push buffer buffers)))))
+
+(defun ellm--read-project-buffer (prompt buffers)
+  "Read an ellm buffer from BUFFERS using PROMPT."
+  (let ((names (mapcar #'buffer-name buffers)))
+    (get-buffer
+     (read-buffer
+      prompt nil t
+      (lambda (candidate)
+        (member (if (consp candidate) (car candidate) candidate)
+                names))))))
+
+;;;###autoload
+(defun ellm-switch-to-project-buffer (&optional include-subagents)
+  "Switch to an ellm buffer belonging to the current project.
+With prefix argument INCLUDE-SUBAGENTS, also offer subagent buffers from
+this project.  Without it, offer only main conversation buffers."
+  (interactive "P")
+  (let* ((root (ellm--project-root-in-buffer (current-buffer)))
+         (buffers (and root (ellm--project-buffers root include-subagents))))
+    (unless root
+      (user-error "No current project"))
+    (unless buffers
+      (user-error "No ellm buffers found for current project"))
+    (switch-to-buffer
+     (ellm--read-project-buffer "Switch to project ellm buffer: " buffers))))
+
+(defun ellm--language-at-point ()
+  "Return a short language name for the current buffer at point."
+  (let ((mode major-mode))
+    (when (and (derived-mode-p 'org-mode) (fboundp 'org-element-context))
+      (when-let* ((context (org-element-context))
+                  ((eq (org-element-type context) 'src-block))
+                  (language (org-element-property :language context)))
+        (setq mode (intern (concat language "-mode")))))
+    (thread-last (symbol-name mode)
+       (string-remove-suffix "-mode")
+       (string-remove-suffix "-ts")
+       (replace-regexp-in-string "interaction\\'" ""))))
+
+(defun ellm--region-context-info (root)
+  "Return Markdown fence info for the active region relative to ROOT."
+  (let* ((language (ellm--language-at-point))
+         (file (buffer-file-name))
+         (location
+          (when file
+            (let ((path (abbreviate-file-name
+                         (if (file-in-directory-p file root)
+                             (file-relative-name file root)
+                           file))))
+              (format "%s:%s:%s"
+                      path
+                      (line-number-at-pos (region-beginning) 'absolute)
+                      (line-number-at-pos (region-end) 'absolute))))))
+    (string-join (delq nil (list language location)) " ")))
+
+(defun ellm--region-snippet (root)
+  "Return the active region as a Markdown fenced code block.
+ROOT is used to make file names relative in the fence info string."
+  (when (use-region-p)
+    (let ((text (string-trim (buffer-substring-no-properties
+                              (region-beginning) (region-end))
+                             "\n" "\n"))
+          (info (ellm--region-context-info root)))
+      (format "```%s\n%s\n```\n"
+              (if (string-empty-p info) "" (concat " " info))
+              text))))
+
+(defun ellm--append-snippet (buffer snippet)
+  "Append SNIPPET to BUFFER at the end of the conversation."
+  (with-current-buffer buffer
+    (goto-char (point-max))
+    (unless (or (bobp) (bolp))
+      (insert "\n"))
+    (unless (or (bobp) (save-excursion (forward-line -1) (looking-at-p "[[:space:]]*$")))
+      (insert "\n"))
+    (insert snippet)))
+
+(defun ellm--select-or-create-project-buffer (root &optional new)
+  "Return an ellm buffer for ROOT, creating one when needed.
+When NEW is non-nil, always create a new buffer."
+  (let ((buffers (and (not new) (ellm--project-buffers root))))
+    (cond
+     ((and (not new) (= (length buffers) 1))
+      (car buffers))
+     ((and (not new) (> (length buffers) 1))
+      (ellm--read-project-buffer "Switch to ellm buffer: " buffers))
+     (t
+      (let ((default-directory root))
+        (save-window-excursion
+          (ellm-new-buffer)))))))
+
+;;;###autoload
+(defun ellm-dwim (&optional new)
+  "Switch to an ellm buffer for the current project or directory.
+With prefix argument NEW, create a new buffer instead of reusing an existing
+one.  When the region is active, append it to the target conversation as a
+Markdown fenced code block with language and file location context."
+  (interactive "P")
+  (let* ((root (ellm--current-project-root-or-directory))
+         (snippet (ellm--region-snippet root))
+         (buffer (ellm--select-or-create-project-buffer root new)))
+    (when snippet
+      (ellm--append-snippet buffer snippet))
+    (if-let* ((window (get-buffer-window buffer t)))
+        (select-window window)
+      (switch-to-buffer buffer))
+    (goto-char (point-max))
+    (recenter)
+    buffer))
+
+(defun ellm--delete-buffer-windows (buffer)
+  "Delete windows displaying BUFFER on the selected frame."
+  (dolist (window (get-buffer-window-list buffer nil (selected-frame)))
+    (delete-window window)))
+
+(defun ellm--display-buffer-in-side-window (buffer)
+  "Display BUFFER in an `ellm-side-window-side' side window and select it."
+  (let* ((size-parameter
+          (if (memq ellm-side-window-side '(left right))
+              `(window-width . ,ellm-side-window-width)
+            `(window-height . ,ellm-side-window-height)))
+         (window
+          (display-buffer-in-side-window
+           buffer
+           `((side . ,ellm-side-window-side)
+             (slot . 0)
+             ,size-parameter
+             (window-parameters
+              (no-delete-other-windows . t)
+              (no-other-window . nil))))))
+    (set-window-dedicated-p window nil)
+    (select-window window)))
+
+;;;###autoload
+(defun ellm-toggle-side-window (&optional new)
+  "Toggle an ellm buffer for the current project in a side window.
+With prefix argument NEW, create a new ellm buffer.  If the region is active,
+append it to the target conversation and show the side window instead of hiding
+an already visible target buffer."
+  (interactive "P")
+  (let* ((had-region (use-region-p))
+         (buffer (save-window-excursion
+                   (ellm-dwim new)
+                   (current-buffer))))
+    (if (and (not had-region) (get-buffer-window buffer (selected-frame)))
+        (ellm--delete-buffer-windows buffer)
+      (ellm--display-buffer-in-side-window buffer)
+      (goto-char (point-max))
+      (recenter))
+    buffer))
 
 ;;;; Narrowing
 
