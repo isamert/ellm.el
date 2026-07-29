@@ -472,9 +472,9 @@ Call ON-READY with its effect on success, or ON-ERROR on failure."
   "Select and load an ACP session for PROVIDER."
   (ellm-acp-load-session provider frontmatter))
 
-(cl-defmethod ellm-provider-close-session ((provider ellm-acp-provider) frontmatter buffer)
-  "Close BUFFER's active ACP session for PROVIDER."
-  (ellm-acp-close-session provider frontmatter buffer))
+(cl-defmethod ellm-provider-close-session ((_provider ellm-acp-provider) frontmatter buffer)
+  "Close BUFFER's active ACP session."
+  (ellm-acp-close-session frontmatter buffer))
 
 (cl-defmethod ellm-provider-delete-session ((provider ellm-acp-provider) frontmatter buffer
                                             &optional select)
@@ -1767,26 +1767,22 @@ do not show a success message.  Return the ready ACP connection."
   (or (and connection (ellm-acp--connection-session-id connection))
       (ellm--alist-get-nested frontmatter '(acp session-id))))
 
-(defun ellm-acp-close-session (provider frontmatter buffer)
-  "Close BUFFER's active ACP session for PROVIDER."
+(defun ellm-acp-close-session (frontmatter buffer)
+  "Close BUFFER's active ACP session using FRONTMATTER context."
   (unless (buffer-live-p buffer)
     (user-error "ellm ACP: buffer is not live"))
   (with-current-buffer buffer
-    (ellm-acp--apply-working-directory provider frontmatter)
-    (let* ((connection (ellm-acp--ensure-connection provider buffer))
+    (let* ((connection ellm-acp--connection)
            (session-id (ellm-acp--current-session-id connection frontmatter)))
       (unless session-id
         (user-error "ellm ACP: no session id to close"))
-      (ellm-acp--initialize-sync connection)
-      (unless (ellm-acp--capability connection '(sessionCapabilities close))
-        (user-error "ellm ACP: agent does not support session/close"))
-      (ellm-acp--request-sync connection :session/close `(:sessionId ,session-id))
-      (setf (ellm-acp--connection-session-id connection) nil)
-      (ellm-acp-extension-state-clear connection)
+      (when connection
+        (and-let* ((proc (ellm-acp--connection-process connection))
+                   ((process-live-p proc)))
+          (delete-process proc))
+        (setf (ellm-acp--connection-session-id connection) nil)
+        (ellm-acp-extension-state-clear connection))
       (ellm--set-frontmatter-value '(acp session-id) nil)
-      (and-let* ((proc (ellm-acp--connection-process connection))
-                  ((process-live-p proc)))
-        (kill-process proc))
       (message "ellm ACP: closed session %s" session-id))))
 
 (defun ellm-acp-delete-session (provider frontmatter buffer &optional select)
