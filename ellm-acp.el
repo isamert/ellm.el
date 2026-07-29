@@ -1028,6 +1028,8 @@ SESSION-ID, when non-nil, is included for load/resume requests."
   "Ensure CONNECTION is initialized and has a session, then call ON-READY."
   (cond
    ((ellm-acp--connection-session-id connection)
+    (ellm-acp--persist-session-id
+     connection (ellm-acp--connection-session-id connection))
     (funcall on-ready))
    ((ellm-acp--connection-initialized connection)
     (if-let* ((session-id (ellm--alist-get-nested frontmatter '(acp session-id))))
@@ -1037,16 +1039,17 @@ SESSION-ID, when non-nil, is included for load/resume requests."
    (t
     (ellm-acp--initialize
      connection
-      (lambda (_result)
-        (setf (ellm-acp--connection-initialized connection) t)
-        (ellm-acp--ensure-session
-         connection provider frontmatter on-ready on-error))
-      on-error))))
+     (lambda (_result)
+       (setf (ellm-acp--connection-initialized connection) t)
+       (ellm-acp--ensure-session
+        connection provider frontmatter on-ready on-error))
+     on-error))))
 
 (defun ellm-acp--ensure-session-sync (connection provider frontmatter)
   "Synchronously ensure CONNECTION is initialized and has an ACP session."
   (ellm-acp--initialize-sync connection)
-  (unless (ellm-acp--connection-session-id connection)
+  (if-let* ((session-id (ellm-acp--connection-session-id connection)))
+      (ellm-acp--persist-session-id connection session-id)
     (if-let* ((session-id (ellm--alist-get-nested frontmatter '(acp session-id))))
         (ellm-acp--restore-session-sync connection provider frontmatter session-id)
       (ellm-acp--new-session-sync connection provider frontmatter)))
@@ -1967,9 +1970,9 @@ When SELECT is non-nil, choose a session from `session/list'."
       (with-current-buffer buffer
         (unless ellm-acp--inhibit-frontmatter-persist
           (when-let* ((updated-at (plist-get update :updatedAt)))
-            (ellm--set-frontmatter-value '(acp updated-at) updated-at)))
-        (when-let* ((title (plist-get update :title)))
-          (ellm-set-session-title title buffer))))))
+            (ellm--set-frontmatter-value '(acp updated-at) updated-at))
+          (when-let* ((title (plist-get update :title)))
+            (ellm-set-session-title title buffer)))))))
 
 (defun ellm-acp--slash-command-candidate (command)
   "Return completion candidate for ACP slash COMMAND."
