@@ -5221,6 +5221,17 @@ Markdown fenced code block with language and file location context."
   (dolist (window (get-buffer-window-list buffer nil (selected-frame)))
     (delete-window window)))
 
+(defun ellm--visible-project-side-window (root)
+  "Return a visible side window showing an ellm buffer rooted at ROOT."
+  (cl-find-if
+   (lambda (window)
+     (and (eq (window-parameter window 'window-side) ellm-side-window-side)
+          (with-current-buffer (window-buffer window)
+            (and (derived-mode-p 'ellm-mode)
+                 (not (bound-and-true-p ellm-subagent-id))
+                 (equal root (ellm--buffer-root-or-directory (current-buffer)))))))
+   (window-list (selected-frame))))
+
 (defun ellm--display-buffer-in-side-window (buffer)
   "Display BUFFER in an `ellm-side-window-side' side window and select it."
   (let* ((size-parameter
@@ -5247,15 +5258,23 @@ append it to the target conversation and show the side window instead of hiding
 an already visible target buffer."
   (interactive "P")
   (let* ((had-region (use-region-p))
-         (buffer (save-window-excursion
-                   (ellm-dwim new)
-                   (current-buffer))))
-    (if (and (not had-region) (get-buffer-window buffer (selected-frame)))
-        (ellm--delete-buffer-windows buffer)
-      (ellm--display-buffer-in-side-window buffer)
-      (goto-char (point-max))
-      (recenter))
-    buffer))
+         (root (ellm--current-project-root-or-directory))
+         (visible-side-window
+          (and (not had-region) (not new)
+               (ellm--visible-project-side-window root))))
+    (if visible-side-window
+        (let ((buffer (window-buffer visible-side-window)))
+          (delete-window visible-side-window)
+          buffer)
+      (let ((buffer (save-window-excursion
+                      (ellm-dwim new)
+                      (current-buffer))))
+        (if (and (not had-region) (get-buffer-window buffer (selected-frame)))
+            (ellm--delete-buffer-windows buffer)
+          (ellm--display-buffer-in-side-window buffer)
+          (goto-char (point-max))
+          (recenter))
+        buffer))))
 
 ;;;; Narrowing
 
