@@ -89,9 +89,10 @@ buffer's frontmatter, and by `ellm--frontmatter-capf' for completion."
   :group 'ellm)
 
 (defcustom ellm-request-timeout 120
-  "Maximum seconds an asynchronous request attempt may run.
-Backends use this as a common deadline for provider and protocol requests.
-Set to nil to use the underlying transport's timeout policy."
+  "Maximum seconds an asynchronous request may remain idle.
+The deadline is restarted whenever the backend emits an event, so an active
+stream may run indefinitely.  Set to nil to disable ellm's idle timeout and
+use the underlying transport's timeout policy."
   :type '(choice (const :tag "Transport default" nil)
                  (number :tag "Seconds"))
   :group 'ellm)
@@ -3395,6 +3396,9 @@ keep protocol-specific mutable state there, but lifecycle state lives here."
   (retry-timer nil
                :type (or null timer)
                :documentation "Timer waiting to start a retry, or nil.")
+  (idle-timer nil
+              :type (or null timer)
+              :documentation "Timer waiting for backend activity, or nil.")
   (state 'starting
          :type symbol
          :documentation "Current core lifecycle state.")
@@ -3549,6 +3553,31 @@ Return non-nil when a live top-level assistant header was updated."
   (when-let* ((timer (ellm-request-retry-timer request)))
     (cancel-timer timer)
     (setf (ellm-request-retry-timer request) nil)))
+
+(defun ellm--request-cancel-idle-timer (request)
+  "Cancel REQUEST's backend inactivity timer."
+  (when-let* ((timer (ellm-request-idle-timer request)))
+    (cancel-timer timer)
+    (setf (ellm-request-idle-timer request) nil)))
+
+(defun ellm--request-reset-idle-timer (request attempt)
+  "Restart REQUEST's inactivity deadline for ATTEMPT."
+  (ellm--request-cancel-idle-timer request)
+  (when ellm-request-timeout
+    (let ((timeout ellm-request-timeout))
+      (setf (ellm-request-idle-timer request)
+            (run-at-time
+             timeout nil
+             (lambda ()
+               (setf (ellm-request-idle-timer request) nil)
+               (when (ellm--request-event-current-p request attempt)
+                 (ignore-errors
+                   (ellm-backend-cancel (ellm-request-backend request)))
+                 (ellm--request-handle-event
+                  request attempt
+                  `(:type failure :condition ellm-request-timeout
+                    :message ,(format "request idle for %s seconds"
+                                      timeout))))))))))
 
 (defun ellm--request-release-streams (request)
   "Detach all rendered stream markers owned by REQUEST."
@@ -3725,6 +3754,7 @@ MESSAGE-TEXT is reported after cleanup when non-nil."
   (unless (ellm--request-terminal-p request)
     (setf (ellm-request-state request) state)
     (ellm--request-cancel-retry-timer request)
+    (ellm--request-cancel-idle-timer request)
     (ignore-errors
       (ellm-backend-finish (ellm-request-backend request) state))
     (when-let* ((buffer (ellm-request-buffer request))
@@ -3749,6 +3779,7 @@ MESSAGE-TEXT is reported after cleanup when non-nil."
   ;; transport callbacks while the retry timer is waiting.
   (cl-incf (ellm-request-attempt request))
   (setf (ellm-request-state request) 'retry-wait)
+  (ellm--request-cancel-idle-timer request)
   (ellm--request-cancel-retry-timer request)
   (setf
    (ellm-request-retry-timer request)
@@ -3767,49 +3798,51 @@ MESSAGE-TEXT is reported after cleanup when non-nil."
 (defun ellm--request-handle-event (request attempt event)
   "Reduce backend EVENT for REQUEST ATTEMPT."
   (when (ellm--request-event-current-p request attempt)
+    (ellm--request-reset-idle-timer request attempt)
     (with-current-buffer (ellm-request-buffer request)
       (condition-case err
           (ellm--preserve-user-position
             (pcase (plist-get event :type)
-          ('stream
-           (setf (ellm-request-state request) 'streaming)
-           (pcase (plist-get event :mode)
-             ('snapshot (ellm--request-render-snapshot request event))
-             ('append (ellm--request-render-chunk request event))
-             (_ (error "ellm: invalid stream event mode: %S"
-                       (plist-get event :mode)))))
-          ('usage
-           (ellm--request-merge-usage request event))
-          ((or 'tool-call 'tool-update 'tool-result)
-           (setf (ellm-request-state request) 'tool-loop
-                 (ellm-request-last-stream-key request) nil)
-           (ellm-backend-render-event
-            (ellm-request-backend request) event request))
-          ('extension
-           (if (eq (plist-get event :kind) 'title)
-               (ellm-set-session-title (plist-get event :title))
-             (ellm-backend-render-event
-              (ellm-request-backend request) event request))
-           (when (plist-get event :checkpoint)
-             (ellm--persistence-checkpoint)))
-          ('operation
-           (setf (ellm-request-retries request) 0
-                 (ellm-request-state request) 'starting))
-          ('continue
-           (setf (ellm-request-retries request) 0
-                 (ellm-request-state request) 'starting
-                 (ellm-request-last-stream-key request) nil)
-           (ellm--persistence-checkpoint)
-           (ellm--request-start-backend request))
-          ('complete
-           (ellm--request-terminal-transition request 'completed))
-          ('failure
-           (let ((text (or (plist-get event :message) "request failed")))
-             (if (and (plist-get event :retryable)
-                      (< (ellm-request-retries request)
-                         ellm-request-retries))
-                 (ellm--request-schedule-retry request text)
-               (ellm--request-terminal-transition request 'failed text))))
+              ('activity nil)
+              ('stream
+               (setf (ellm-request-state request) 'streaming)
+               (pcase (plist-get event :mode)
+                 ('snapshot (ellm--request-render-snapshot request event))
+                 ('append (ellm--request-render-chunk request event))
+                 (_ (error "ellm: invalid stream event mode: %S"
+                           (plist-get event :mode)))))
+              ('usage
+               (ellm--request-merge-usage request event))
+              ((or 'tool-call 'tool-update 'tool-result)
+               (setf (ellm-request-state request) 'tool-loop
+                     (ellm-request-last-stream-key request) nil)
+               (ellm-backend-render-event
+                (ellm-request-backend request) event request))
+              ('extension
+               (if (eq (plist-get event :kind) 'title)
+                   (ellm-set-session-title (plist-get event :title))
+                 (ellm-backend-render-event
+                  (ellm-request-backend request) event request))
+               (when (plist-get event :checkpoint)
+                 (ellm--persistence-checkpoint)))
+              ('operation
+               (setf (ellm-request-retries request) 0
+                     (ellm-request-state request) 'starting))
+              ('continue
+               (setf (ellm-request-retries request) 0
+                     (ellm-request-state request) 'starting
+                     (ellm-request-last-stream-key request) nil)
+               (ellm--persistence-checkpoint)
+               (ellm--request-start-backend request))
+              ('complete
+               (ellm--request-terminal-transition request 'completed))
+              ('failure
+               (let ((text (or (plist-get event :message) "request failed")))
+                 (if (and (plist-get event :retryable)
+                          (< (ellm-request-retries request)
+                             ellm-request-retries))
+                     (ellm--request-schedule-retry request text)
+                   (ellm--request-terminal-transition request 'failed text))))
               (_
                (error "ellm: unknown backend event: %S" event))))
         (error
@@ -3825,6 +3858,7 @@ MESSAGE-TEXT is reported after cleanup when non-nil."
                    (ellm--request-handle-event request attempt event))))
       (setf (ellm-request-state request) 'starting
             (ellm-request-transport request) nil)
+      (ellm--request-reset-idle-timer request attempt)
       (condition-case err
           (let ((transport
                  (ellm-backend-start (ellm-request-backend request) emit)))

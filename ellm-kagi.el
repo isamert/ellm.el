@@ -577,7 +577,8 @@ to `ellm-provider' or the first Kagi entry in `ellm-provider-alist'."
                     (ellm-kagi--finish-plz-error request "streaming" error))
             :filter (lambda (process output)
                       (ellm-kagi--stream-filter request process output))
-            :timeout ellm-request-timeout
+            ;; Core restarts its idle deadline for each parsed SSE event.
+            :timeout nil
             :noquery t))))
 
 ;;;; SSE parsing

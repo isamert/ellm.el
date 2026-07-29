@@ -83,9 +83,6 @@ only while debugging.  Log buffers grow without bound."
   (emit nil
         :type (or null function)
         :documentation "Core event sink installed for the current attempt.")
-  (timer nil
-         :type (or null timer)
-         :documentation "Timer waiting for the current transport's first response.")
   (serial 0
           :type integer
           :documentation "Generation counter used to invalidate stale callbacks.")
@@ -200,7 +197,6 @@ buffer selected by the originating ellm request."
 (cl-defmethod ellm-backend-cancel ((driver ellm-llm-driver))
   "Cancel DRIVER's active `llm.el' transport."
   (cl-incf (ellm-llm-driver-serial driver))
-  (ellm-llm--cancel-driver-timer driver)
   (when-let* ((raw (ellm-llm-driver-raw driver)))
     (llm-cancel-request raw)
     (setf (ellm-llm-driver-raw driver) nil)))
@@ -221,7 +217,6 @@ buffer selected by the originating ellm request."
 (cl-defmethod ellm-backend-finish ((driver ellm-llm-driver) _outcome)
   "Release DRIVER's timers and transport reference."
   (cl-incf (ellm-llm-driver-serial driver))
-  (ellm-llm--cancel-driver-timer driver)
   (setf (ellm-llm-driver-raw driver) nil
         (ellm-llm-driver-emit driver) nil))
 
@@ -808,12 +803,6 @@ FRONTMATTER, when supplied, is the already parsed YAML frontmatter alist."
      provider (if has-system (cdr turns) turns) prompt)
     prompt))
 
-(defun ellm-llm--cancel-driver-timer (driver)
-  "Cancel DRIVER's timer waiting for the first response."
-  (when-let* ((timer (ellm-llm-driver-timer driver)))
-    (cancel-timer timer)
-    (setf (ellm-llm-driver-timer driver) nil)))
-
 (defun ellm-llm--retryable-error-p (type)
   "Return non-nil when an llm.el error TYPE is transient."
   (memq type '(llm-request-error llm-request-timeout)))
@@ -905,7 +894,6 @@ chat token limit supplies the corresponding context size when available."
 
 (cl-defmethod ellm-backend-start ((driver ellm-llm-driver) emit)
   "Start or resume one llm.el leg and emit normalized events."
-  (ellm-llm--cancel-driver-timer driver)
   (setf (ellm-llm-driver-emit driver) emit)
   (ellm-llm--start-title-generation driver)
   (let* ((serial (cl-incf (ellm-llm-driver-serial driver)))
@@ -933,7 +921,6 @@ chat token limit supplies the corresponding context size when available."
                        log-buffer "llm.el --> ellm" "partial" result))
                     ;; The request timeout guards an unresponsive provider, not the
                     ;; total duration of an active stream.
-                    (ellm-llm--cancel-driver-timer driver)
                     (setq leg-usage
                           (ellm-llm--merge-leg-usage leg-usage result))
                     (when-let* ((state
@@ -960,7 +947,6 @@ chat token limit supplies the corresponding context size when available."
                   (when log-buffer
                     (ellm-llm--log
                      log-buffer "llm.el --> ellm" "final" result))
-                  (ellm-llm--cancel-driver-timer driver)
                   (setf (ellm-llm-driver-raw driver) nil)
                   (partial result)
                   (when leg-usage
@@ -981,7 +967,6 @@ chat token limit supplies the corresponding context size when available."
                    (ellm-llm--log
                     log-buffer "llm.el --> ellm" "error"
                     (list :type type :message message)))
-                 (ellm-llm--cancel-driver-timer driver)
                  (setf (ellm-llm-driver-raw driver) nil)
                  (cl-incf (ellm-llm-driver-serial driver))
                  (if (ellm-llm--tool-call-error-p type)
@@ -1009,20 +994,6 @@ could not be executed: %s. Retry it using an advertised tool and valid arguments
                     driver
                     `(:type failure :condition ,type :message ,message
                       :retryable ,(and (ellm-llm--retryable-error-p type) t)))))))
-      (when ellm-request-timeout
-        (setf
-         (ellm-llm-driver-timer driver)
-         (run-at-time
-          ellm-request-timeout nil
-          (lambda ()
-            (when (live-p)
-              (when-let* ((raw (ellm-llm-driver-raw driver)))
-                (llm-cancel-request raw)
-                (setf (ellm-llm-driver-raw driver) nil))
-              (funcall
-               #'fail 'llm-request-timeout
-               (format "request timed out after %s seconds"
-                       ellm-request-timeout)))))))
       (condition-case err
           (let ((raw
                  ;; Do not pass `ellm-request-timeout' to plz: its timeout is

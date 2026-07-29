@@ -755,35 +755,41 @@ Return non-nil when an event sink accepted it."
            request)))
 
 (cl-defun ellm-acp--request
-    (connection method params &key success-fn error-fn)
-  "Send one asynchronous ACP request with a centralized timeout.
-Callbacks for a cancelled conversation request are discarded."
+    (connection method params &key success-fn error-fn
+                (timeout ellm-request-timeout))
+  "Send one asynchronous ACP request.
+Callbacks for a cancelled conversation request are discarded.  TIMEOUT
+bounds ordinary protocol calls; the streaming prompt passes nil because its
+inactivity is timed centrally by ellm."
   (let ((conversation-request
          (ellm-acp--connection-current-request connection))
         (done nil))
     (cl-labels
         ((live-p ()
-           (and (not done)
-                (or (not conversation-request)
-                    (ellm-acp--request-live-p conversation-request))))
+                 (and (not done)
+                      (or (not conversation-request)
+                          (ellm-acp--request-live-p conversation-request))))
          (fail (error-object)
-           (when (live-p)
-             (setq done t)
-             (when error-fn
-               (funcall error-fn error-object))))
+               (when (live-p)
+                 (setq done t)
+                 (when error-fn
+                   (funcall error-fn error-object))))
          (timed-out ()
-           (fail
-            `(:code -32001
-              :message
-              ,(format "%s timed out after %s seconds"
-                       (ellm-acp--method-name method)
-                       ellm-request-timeout)))))
+                    (fail
+                     `(:code -32001
+                       :message
+                       ,(format "%s timed out after %s seconds"
+                                (ellm-acp--method-name method)
+                                timeout)))))
       (jsonrpc-async-request
        connection method params
-       :timeout ellm-request-timeout
+       :timeout timeout
        :success-fn
        (lambda (result)
          (when (live-p)
+           (when (and conversation-request
+                      (ellm-acp--request-live-p conversation-request))
+             (ellm-acp--emit-event conversation-request '(:type activity)))
            (setq done t)
            (when success-fn
              (funcall success-fn result))))
@@ -1636,15 +1642,18 @@ called with the raw response before ON-READY."
                   :prompt [(:type "text" :text ,(or text ""))])))
     (ellm-acp--request
      connection :session/prompt params
+     ;; Prompt progress arrives as notifications, so a JSON-RPC deadline would
+     ;; incorrectly limit the total turn duration.
+     :timeout nil
      :success-fn (lambda (_result)
                    (when-let* ((request
-                                (ellm-acp--connection-current-request
-                                 connection)))
+                                 (ellm-acp--connection-current-request
+                                  connection)))
                      (ellm-acp--emit-event request '(:type complete))))
      :error-fn (lambda (error-object)
                  (when-let* ((request
-                              (ellm-acp--connection-current-request
-                               connection)))
+                               (ellm-acp--connection-current-request
+                                connection)))
                    (ellm-acp--emit-failure request error-object))))))
 
 (defun ellm-acp--last-turn-role ()
