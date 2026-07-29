@@ -226,22 +226,6 @@ disabled or the current buffer is ephemeral."
   :type 'directory
   :group 'ellm)
 
-(defun ellm--provider-entry-provider (entry)
-  "Return the provider object from an `ellm-provider-alist' ENTRY value.
-ENTRY is either a provider object directly or a plist with a
-`:provider' key."
-  (if (and (listp entry) (plist-member entry :provider))
-      (plist-get entry :provider)
-    entry))
-
-(defun ellm--provider-entry-models (entry)
-  "Return the explicit `:models' list from ENTRY, or nil.
-Returns nil for bare provider objects or plist entries without a
-`:models' key."
-  (and (listp entry)
-       (plist-member entry :models)
-       (plist-get entry :models)))
-
 (cl-defstruct (ellm-tool (:constructor ellm-make-tool))
   "Backend-neutral tool definition used by ellm buffers."
   name description args function async category)
@@ -640,6 +624,23 @@ key whose value is nil."
               keys (cdr keys))))
     (and (null keys) cell)))
 
+(defun ellm--plistish-get (object key)
+  "Return KEY from OBJECT, which may be a plist or YAML-style alist.
+KEY may be a keyword, symbol, or string.  This keeps Elisp configuration
+plists and parsed YAML maps on the same path."
+  (let* ((name (cond ((keywordp key) (substring (symbol-name key) 1))
+                     ((symbolp key) (symbol-name key))
+                     (t key)))
+         (sym (intern name))
+         (kw (intern (concat ":" name))))
+    (cond
+     ((and (listp object) (keywordp (car object)))
+      (plist-get object kw))
+     ((listp object)
+      (or (alist-get sym object nil nil #'eq)
+          (alist-get name object nil nil #'equal)
+          (alist-get kw object nil nil #'eq))))))
+
 (defmacro ellm--preserve-user-position (&rest body)
   "Run BODY while preserving or following user point/window positions.
 This is intended for asynchronous backend insertions into the current
@@ -668,44 +669,44 @@ can update request-locked buffers."
                              (copy-marker (window-start window) nil)
                              (window-hscroll window)
                              (funcall ellm--preserve-follow-p window-point))))
-                    (get-buffer-window-list (current-buffer) nil t))))
+                   (get-buffer-window-list (current-buffer) nil t))))
      (unwind-protect
          (let ((inhibit-read-only t))
            (save-current-buffer
              (save-excursion
                ,@body)))
        (unwind-protect
-            (when (buffer-live-p ellm--preserve-buffer)
-              (with-current-buffer ellm--preserve-buffer
-                (let ((new-end (point-max)))
-                  (if ellm--preserve-point-follows
-                      (goto-char new-end)
-                    (when-let* ((pos (marker-position ellm--preserve-point)))
-                      (goto-char pos)))
-                  (dolist (state ellm--preserve-window-states)
-                    (let ((window (nth 0 state))
-                          (point-marker (nth 1 state))
-                          (start-marker (nth 2 state))
-                          (hscroll (nth 3 state))
-                          (follows (nth 4 state)))
-                      (when (and (window-live-p window)
-                                 (eq (window-buffer window)
-                                     ellm--preserve-buffer))
-                        (if follows
-                            (progn
-                              (set-window-point window new-end)
-                              (unless (pos-visible-in-window-p new-end window)
-                                (save-excursion
-                                  (goto-char new-end)
-                                  (vertical-motion
-                                   (- 1 (max 1 (window-body-height window)))
-                                   window)
-                                  (set-window-start window (point) t))))
-                          (when-let* ((start (marker-position start-marker)))
-                            (set-window-start window start t))
-                          (when-let* ((point (marker-position point-marker)))
-                            (set-window-point window point)))
-                        (set-window-hscroll window hscroll)))))))
+           (when (buffer-live-p ellm--preserve-buffer)
+             (with-current-buffer ellm--preserve-buffer
+               (let ((new-end (point-max)))
+                 (if ellm--preserve-point-follows
+                     (goto-char new-end)
+                   (when-let* ((pos (marker-position ellm--preserve-point)))
+                     (goto-char pos)))
+                 (dolist (state ellm--preserve-window-states)
+                   (let ((window (nth 0 state))
+                         (point-marker (nth 1 state))
+                         (start-marker (nth 2 state))
+                         (hscroll (nth 3 state))
+                         (follows (nth 4 state)))
+                     (when (and (window-live-p window)
+                                (eq (window-buffer window)
+                                    ellm--preserve-buffer))
+                       (if follows
+                           (progn
+                             (set-window-point window new-end)
+                             (unless (pos-visible-in-window-p new-end window)
+                               (save-excursion
+                                 (goto-char new-end)
+                                 (vertical-motion
+                                  (- 1 (max 1 (window-body-height window)))
+                                  window)
+                                 (set-window-start window (point) t))))
+                         (when-let* ((start (marker-position start-marker)))
+                           (set-window-start window start t))
+                         (when-let* ((point (marker-position point-marker)))
+                           (set-window-point window point)))
+                       (set-window-hscroll window hscroll)))))))
          (set-marker ellm--preserve-point nil)
          (dolist (state ellm--preserve-window-states)
            (set-marker (nth 1 state) nil)
@@ -1900,7 +1901,7 @@ re-shaded, leaving unshaded gaps at line beginnings/ends."
     `(jit-lock-bounds ,beg . ,end)))
 
 ;;;; Overlays
-;;;;;; Turn rules (---)
+;;;;; Turn rules (---)
 
 (defun ellm--rule-string ()
   "Return a full-width horizontal rule display string.
@@ -2000,7 +2001,7 @@ When DEFER-REBUILD is non-nil, fontification will create the initial rules."
       (when (derived-mode-p 'ellm-mode)
         (ellm--configure-turn-rules)))))
 
-;;;;;; Pretty separators
+;;;;; Pretty separators
 
 (defvar-local ellm--revealed-separator-overlay nil
   "Currently revealed pretty-separator overlay, if any.")
@@ -3128,6 +3129,22 @@ The current session store is preferred over the global cache."
   (make-hash-table :test #'eq :weakness 'key)
   "Auxiliary model names associated with resolved provider objects.")
 
+(defun ellm--provider-entry-provider (entry)
+  "Return the provider object from an `ellm-provider-alist' ENTRY value.
+ENTRY is either a provider object directly or a plist with a
+`:provider' key."
+  (if (and (listp entry) (plist-member entry :provider))
+      (plist-get entry :provider)
+    entry))
+
+(defun ellm--provider-entry-models (entry)
+  "Return the explicit `:models' list from ENTRY, or nil.
+Returns nil for bare provider objects or plist entries without a
+`:models' key."
+  (and (listp entry)
+       (plist-member entry :models)
+       (plist-get entry :models)))
+
 (defun ellm-provider-small-model (provider)
   "Return PROVIDER's configured model for small auxiliary tasks.
 Provider entries in `ellm-provider-alist' configure this with
@@ -3224,23 +3241,6 @@ can be a tool name like \"a_tool_name\"."
 
 ;;;;; MCP server resolution
 
-(defun ellm--plistish-get (object key)
-  "Return KEY from OBJECT, which may be a plist or YAML-style alist.
-KEY may be a keyword, symbol, or string.  This keeps Elisp configuration
-plists and parsed YAML maps on the same path."
-  (let* ((name (cond ((keywordp key) (substring (symbol-name key) 1))
-                     ((symbolp key) (symbol-name key))
-                     (t key)))
-         (sym (intern name))
-         (kw (intern (concat ":" name))))
-    (cond
-     ((and (listp object) (keywordp (car object)))
-      (plist-get object kw))
-     ((listp object)
-      (or (alist-get sym object nil nil #'eq)
-          (alist-get name object nil nil #'equal)
-          (alist-get kw object nil nil #'eq))))))
-
 (defun ellm--mcp-server-name (name)
   "Return NAME as a stable MCP server name string."
   (cond ((stringp name) name)
@@ -3319,7 +3319,277 @@ accepted."
                                 (ellm--plistish-get (cdr server) 'category))
                               ellm-mcp-servers))))))
 
-;;;;; Request and display state
+;;;;; Insertion
+
+(defun ellm--defer-call (function &rest args)
+  "Call FUNCTION with ARGS from a timer when no minibuffer is active."
+  (run-at-time 0 nil #'ellm--call-when-minibuffer-free function args))
+
+(defun ellm--call-when-minibuffer-free (function args)
+  "Call FUNCTION with ARGS, waiting while another minibuffer is active."
+  (if (active-minibuffer-window)
+      (run-at-time 0.1 nil #'ellm--call-when-minibuffer-free function args)
+    (apply function args)))
+
+(defun ellm--new-buffer (ephemeral &optional select-provider-model)
+  "Create a new ellm conversation buffer.
+When EPHEMERAL is non-nil, do not automatically persist it.
+When SELECT-PROVIDER-MODEL is non-nil, prompt for the provider and model."
+  (let* ((buf (generate-new-buffer (if (functionp ellm-initial-buffer-name)
+                                       (funcall ellm-initial-buffer-name)
+                                     ellm-initial-buffer-name)))
+         (provider-name
+          (if select-provider-model
+              (let ((name (completing-read
+                           "Provider: " (ellm--capf-provider-candidates) nil t)))
+                (and (not (string-empty-p name)) (intern name)))
+            (caar ellm-provider-alist)))
+         (provider-entry (and provider-name
+                              (alist-get provider-name ellm-provider-alist)))
+         (provider (ellm--provider-entry-provider provider-entry)))
+    (with-current-buffer buf
+      (setq-local ellm--persistence-ephemeral-p ephemeral)
+      (insert (format "---\nprovider: %s\nmodel: %s\ncreated: %s\n---\n\n"
+                      (or provider-name "null")
+                      (or (ellm-provider-current-model provider)
+                          "null")
+                      (ellm--timestamp)))
+      (ellm--insert-turn "user")
+      (ellm-mode))
+    (switch-to-buffer buf)
+    (when select-provider-model
+      (cl-labels
+          ((on-error
+            (error-object)
+            (message "ellm: new buffer configuration failed: %s"
+                     (or (plist-get error-object :message)
+                         (condition-case nil
+                             (error-message-string error-object)
+                           (error (format "%s" error-object))))))
+           (select-model
+            ()
+            (when (buffer-live-p buf)
+              (with-current-buffer buf
+                (when-let* ((models
+                             (or (ellm--provider-entry-models provider-entry)
+                                 (and provider
+                                      (ellm-provider-buffer-model-candidates
+                                       provider buf))))
+                            (model (completing-read "Model: " models nil t)))
+                  (ellm--set-frontmatter-value 'model model)
+                  (ellm-provider-configure-new-buffer
+                   provider (ellm--parse-frontmatter) buf
+                   (lambda ()
+                     (message "ellm: new buffer configuration complete"))
+                   #'on-error))))))
+        (if (and provider
+                 (not (ellm--provider-entry-models provider-entry))
+                 (not (ellm-provider-buffer-model-candidates provider buf))
+                 (ellm-provider-model-completion-session-start-p provider buf))
+            (progn
+              (message "ellm: starting provider session...")
+              (ellm-provider-prepare-new-buffer
+               provider (with-current-buffer buf (ellm--parse-frontmatter)) buf
+               (lambda ()
+                 (message "ellm: provider session ready; select a model")
+                 (ellm--defer-call #'select-model))
+               #'on-error))
+          (select-model))))
+    buf))
+
+(defun ellm-new-buffer (&optional select-provider-model)
+  "Create a new ellm conversation buffer.
+With prefix argument SELECT-PROVIDER-MODEL, prompt for provider and model.
+Session-backed providers may start a session to discover model candidates."
+  (interactive "P")
+  (ellm--new-buffer nil select-provider-model))
+
+(defun ellm-new-temp-buffer ()
+  "Create an ephemeral ellm conversation buffer.
+This is equivalent to `ellm-new-buffer' when automatic persistence is
+disabled.  When persistence is enabled, neither this buffer nor subagents
+launched from it receive automatic files."
+  (interactive)
+  (ellm--new-buffer 'ephemeral))
+
+(defun ellm--now ()
+  "Return the current time.
+This small wrapper keeps request lifecycle timing deterministic in tests."
+  (current-time))
+
+(defun ellm--timestamp (&optional time)
+  "Return TIME as an ISO 8601 timestamp, defaulting to the current time."
+  (format-time-string "%Y-%m-%dT%H:%M:%S" time))
+
+(defun ellm--format-elapsed-time (seconds)
+  "Return elapsed SECONDS in a compact, single-token form."
+  (let* ((total (max 0 (round seconds)))
+         (hours (/ total 3600))
+         (minutes (/ (% total 3600) 60))
+         (secs (% total 60)))
+    (concat (and (> hours 0) (format "%dh" hours))
+            (and (> minutes 0) (format "%dm" minutes))
+            (if (or (> secs 0) (zerop total))
+                (format "%ds" secs)
+              ""))))
+
+(defun ellm--ensure-newline (s)
+  (if (string-suffix-p "\n" s)
+      s
+    (concat s "\n")))
+
+(defun ellm--turn-header-for-role (role attrs)
+  "Return the delimiter header for ROLE with ATTRS plist."
+  (cond
+   ((equal role "tool-param") ellm-turn-header-3)
+   ((or (ellm--tool-role-p role)
+        (plist-get attrs :continuation))
+    ellm-turn-header-2)
+   (t ellm-turn-header-1)))
+
+(defun ellm--get-turn (role &rest attrs)
+  (let* ((header (ellm--turn-header-for-role role attrs))
+         (positional nil)
+         (pipe-arg nil)
+         (kv-tail nil))
+    (cl-loop for (key val) on attrs by #'cddr do
+             (cond
+              ((eq key :continuation) nil)
+              ((eq key :arg)
+               (dolist (a (if (listp val) val (list val)))
+                 (push a positional)))
+              ((eq key :pipe-arg)
+               (setq pipe-arg val))
+              (t
+               (push (format ":%s %s"
+                             (substring (symbol-name key) 1)
+                             val)
+                     kv-tail))))
+    (string-join
+     (delq nil (append (list header role)
+                       (nreverse positional)
+                       (and pipe-arg (list "|" pipe-arg))
+                       (nreverse kv-tail)))
+     " ")))
+
+(defun ellm--insert-turn (role &rest attrs)
+  "Insert a new turn delimiter for ROLE with ATTRS plist.
+
+ATTRS recognises three reserved keywords:
+
+  `:continuation' (non-nil): use `ellm-turn-header-2' so the turn is
+    rendered as a continuation of the preceding top-level turn.  Tool
+    roles always use the continuation header regardless of this flag.
+    The `tool-param' role specifically uses `ellm-turn-header-3'
+    (deeper nesting under its parent `tool-call').
+
+  `:arg' STRING (or list of strings): bare positional argument(s)
+    inserted between ROLE and the keyword block, e.g. the function name
+    on a `tool-call' line.
+
+  `:pipe-arg' STRING: like `:arg' but rendered after a literal `| '
+    separator, matching the `>>-| tool-call | TOOL_NAME' style.
+
+All other keywords are serialised in `org-block' style as `:KEY VALUE'
+pairs, e.g. `:ts 2025-01-01T00:00:00 :id call_1'."
+  (let ((depth (ellm--insert-turn-depth role attrs)))
+    (goto-char (point-max))
+    (unless (bolp) (insert "\n"))
+    (let ((beg (point)))
+      (insert (apply #'ellm--get-turn role attrs) "\n")
+      (ellm--flush-pending-fold depth)
+      (ellm--mark-pending-fold beg role depth))))
+
+(defun ellm--set-turn-header-attrs (position attrs)
+  "Set keyword ATTRS on the turn delimiter at POSITION.
+ATTRS is an alist of string keys and single-token string values.  Existing
+occurrences are replaced, while positional and pipe-delimited title text is
+preserved."
+  (save-excursion
+    (goto-char position)
+    (beginning-of-line)
+    (when (looking-at ellm-turn-regexp)
+      (let* ((beg (point))
+             (end (line-end-position))
+             (line (buffer-substring-no-properties beg end)))
+        (dolist (attr attrs)
+          (let ((key (car attr))
+                (value (cdr attr)))
+            (setq line
+                  (replace-regexp-in-string
+                   (format "[ \t]+:%s\\(?:[ \t]+[^ \t\n]+\\)?"
+                           (regexp-quote key))
+                   "" line t t))
+            (setq line (concat line " :" key " " value))))
+        (let ((inhibit-read-only t))
+          (delete-region beg end)
+          (insert line))
+        (when (fboundp 'font-lock-flush)
+          (font-lock-flush beg (line-end-position)))
+        t))))
+
+(defun ellm--clear-buffer-keeping-frontmatter ()
+  "Clear the conversation, preserving frontmatter and adding an empty user turn."
+  (let* ((bounds (ellm--frontmatter-bounds))
+         (frontmatter (and bounds
+                           (buffer-substring-no-properties
+                            (point-min) (nth 1 bounds)))))
+    (delete-region (point-min) (point-max))
+    (when frontmatter
+      (insert frontmatter "\n\n"))
+    (ellm-update-todos nil)
+    (ellm--insert-turn "user")))
+
+(defun ellm--format-tool-param-value (value)
+  "Return a stable buffer representation for tool parameter VALUE."
+  (cond
+   ((null value) "null")
+   ((stringp value) value)
+   ((memq value '(:false :json-false)) "false")
+   (t (json-serialize value))))
+
+(defun ellm--tool-header-title (name params)
+  "Return a concise tool title from NAME and PARAMS.
+PARAMS is an alist.  Single-line values are rendered as `KEY=VALUE'; multiline
+values are omitted because their nested turns remain available when unfolded."
+  (let ((parts (list (ellm--tool-header-fragment name))))
+    (dolist (param params)
+      (let ((value (ellm--format-tool-param-value (cdr param))))
+        (unless (string-match-p "[\n\r]" value)
+          (setq parts
+                (append parts
+                        (list (format "%s=%s"
+                                      (car param)
+                                      (ellm--tool-header-fragment value))))))))
+    (truncate-string-to-width
+     (string-join parts " ") ellm-tool-header-summary-width nil nil "...")))
+
+(defun ellm--tool-header-fragment (value)
+  "Return VALUE as safe single-line turn-header text.
+Whitespace is collapsed and colons at token boundaries are escaped so a
+display summary cannot be parsed as real turn metadata."
+  (let ((text (replace-regexp-in-string
+               "[ \t]+" " " (format "%s" value))))
+    (setq text (string-replace " :" " \\:" text))
+    (if (string-prefix-p ":" text)
+        (concat "\\" text)
+      text)))
+
+(defun ellm--insert-tool-call-with-params (name id params)
+  "Insert a `tool-call' turn for NAME and ID with PARAMS.
+PARAMS is an alist of (PARAM-NAME . VALUE).  Each parameter is inserted
+as a nested `tool-param' turn so values remain visible and parseable."
+  (ellm--insert-turn "tool-call"
+                     :pipe-arg (ellm--tool-header-title name params)
+                     :id id)
+  (dolist (param params)
+    (ellm--insert-turn "tool-param" :pipe-arg (format "%s" (car param)))
+    (insert (ellm--ensure-newline
+             (ellm-tools--transform-tool-result
+              name (list param) nil
+              (ellm--format-tool-param-value (cdr param)))))))
+
+;;;; Request and display state
 
 (cl-defstruct (ellm-buffer-state (:constructor ellm--make-buffer-state))
   "Buffer state used by `ellm-mode' displays."
@@ -3848,7 +4118,7 @@ MESSAGE-TEXT is reported after cleanup when non-nil."
                     :condition ,err))))))
   request)
 
-;;;;; Frontmatter completion
+;;;; Frontmatter completion
 
 (defconst ellm--default-reasoning-candidates
   '(("light" :desc "Prefer a small reasoning budget.")
@@ -4347,277 +4617,7 @@ Completes:
                   (ellm--frontmatter-capf--make-result
                    beg end commands "command"))))))))))
 
-;;;;; Insertion
-
-(defun ellm--defer-call (function &rest args)
-  "Call FUNCTION with ARGS from a timer when no minibuffer is active."
-  (run-at-time 0 nil #'ellm--call-when-minibuffer-free function args))
-
-(defun ellm--call-when-minibuffer-free (function args)
-  "Call FUNCTION with ARGS, waiting while another minibuffer is active."
-  (if (active-minibuffer-window)
-      (run-at-time 0.1 nil #'ellm--call-when-minibuffer-free function args)
-    (apply function args)))
-
-(defun ellm--new-buffer (ephemeral &optional select-provider-model)
-  "Create a new ellm conversation buffer.
-When EPHEMERAL is non-nil, do not automatically persist it.
-When SELECT-PROVIDER-MODEL is non-nil, prompt for the provider and model."
-  (let* ((buf (generate-new-buffer (if (functionp ellm-initial-buffer-name)
-                                       (funcall ellm-initial-buffer-name)
-                                     ellm-initial-buffer-name)))
-         (provider-name
-          (if select-provider-model
-              (let ((name (completing-read
-                           "Provider: " (ellm--capf-provider-candidates) nil t)))
-                (and (not (string-empty-p name)) (intern name)))
-            (caar ellm-provider-alist)))
-         (provider-entry (and provider-name
-                              (alist-get provider-name ellm-provider-alist)))
-         (provider (ellm--provider-entry-provider provider-entry)))
-    (with-current-buffer buf
-      (setq-local ellm--persistence-ephemeral-p ephemeral)
-      (insert (format "---\nprovider: %s\nmodel: %s\ncreated: %s\n---\n\n"
-                      (or provider-name "null")
-                      (or (ellm-provider-current-model provider)
-                          "null")
-                      (ellm--timestamp)))
-      (ellm--insert-turn "user")
-      (ellm-mode))
-    (switch-to-buffer buf)
-    (when select-provider-model
-      (cl-labels
-          ((on-error
-            (error-object)
-            (message "ellm: new buffer configuration failed: %s"
-                     (or (plist-get error-object :message)
-                         (condition-case nil
-                             (error-message-string error-object)
-                           (error (format "%s" error-object))))))
-           (select-model
-            ()
-            (when (buffer-live-p buf)
-              (with-current-buffer buf
-                (when-let* ((models
-                             (or (ellm--provider-entry-models provider-entry)
-                                 (and provider
-                                      (ellm-provider-buffer-model-candidates
-                                       provider buf))))
-                            (model (completing-read "Model: " models nil t)))
-                  (ellm--set-frontmatter-value 'model model)
-                  (ellm-provider-configure-new-buffer
-                   provider (ellm--parse-frontmatter) buf
-                   (lambda ()
-                     (message "ellm: new buffer configuration complete"))
-                   #'on-error))))))
-        (if (and provider
-                 (not (ellm--provider-entry-models provider-entry))
-                 (not (ellm-provider-buffer-model-candidates provider buf))
-                 (ellm-provider-model-completion-session-start-p provider buf))
-            (progn
-              (message "ellm: starting provider session...")
-              (ellm-provider-prepare-new-buffer
-               provider (with-current-buffer buf (ellm--parse-frontmatter)) buf
-               (lambda ()
-                 (message "ellm: provider session ready; select a model")
-                 (ellm--defer-call #'select-model))
-               #'on-error))
-          (select-model))))
-    buf))
-
-(defun ellm-new-buffer (&optional select-provider-model)
-  "Create a new ellm conversation buffer.
-With prefix argument SELECT-PROVIDER-MODEL, prompt for provider and model.
-Session-backed providers may start a session to discover model candidates."
-  (interactive "P")
-  (ellm--new-buffer nil select-provider-model))
-
-(defun ellm-new-temp-buffer ()
-  "Create an ephemeral ellm conversation buffer.
-This is equivalent to `ellm-new-buffer' when automatic persistence is
-disabled.  When persistence is enabled, neither this buffer nor subagents
-launched from it receive automatic files."
-  (interactive)
-  (ellm--new-buffer 'ephemeral))
-
-(defun ellm--now ()
-  "Return the current time.
-This small wrapper keeps request lifecycle timing deterministic in tests."
-  (current-time))
-
-(defun ellm--timestamp (&optional time)
-  "Return TIME as an ISO 8601 timestamp, defaulting to the current time."
-  (format-time-string "%Y-%m-%dT%H:%M:%S" time))
-
-(defun ellm--format-elapsed-time (seconds)
-  "Return elapsed SECONDS in a compact, single-token form."
-  (let* ((total (max 0 (round seconds)))
-         (hours (/ total 3600))
-         (minutes (/ (% total 3600) 60))
-         (secs (% total 60)))
-    (concat (and (> hours 0) (format "%dh" hours))
-            (and (> minutes 0) (format "%dm" minutes))
-            (if (or (> secs 0) (zerop total))
-                (format "%ds" secs)
-              ""))))
-
-(defun ellm--ensure-newline (s)
-  (if (string-suffix-p "\n" s)
-      s
-    (concat s "\n")))
-
-(defun ellm--turn-header-for-role (role attrs)
-  "Return the delimiter header for ROLE with ATTRS plist."
-  (cond
-   ((equal role "tool-param") ellm-turn-header-3)
-   ((or (ellm--tool-role-p role)
-        (plist-get attrs :continuation))
-    ellm-turn-header-2)
-   (t ellm-turn-header-1)))
-
-(defun ellm--get-turn (role &rest attrs)
-  (let* ((header (ellm--turn-header-for-role role attrs))
-         (positional nil)
-         (pipe-arg nil)
-         (kv-tail nil))
-    (cl-loop for (key val) on attrs by #'cddr do
-             (cond
-              ((eq key :continuation) nil)
-              ((eq key :arg)
-               (dolist (a (if (listp val) val (list val)))
-                 (push a positional)))
-              ((eq key :pipe-arg)
-               (setq pipe-arg val))
-              (t
-               (push (format ":%s %s"
-                             (substring (symbol-name key) 1)
-                             val)
-                     kv-tail))))
-    (string-join
-     (delq nil (append (list header role)
-                       (nreverse positional)
-                       (and pipe-arg (list "|" pipe-arg))
-                       (nreverse kv-tail)))
-     " ")))
-
-(defun ellm--insert-turn (role &rest attrs)
-  "Insert a new turn delimiter for ROLE with ATTRS plist.
-
-ATTRS recognises three reserved keywords:
-
-  `:continuation' (non-nil): use `ellm-turn-header-2' so the turn is
-    rendered as a continuation of the preceding top-level turn.  Tool
-    roles always use the continuation header regardless of this flag.
-    The `tool-param' role specifically uses `ellm-turn-header-3'
-    (deeper nesting under its parent `tool-call').
-
-  `:arg' STRING (or list of strings): bare positional argument(s)
-    inserted between ROLE and the keyword block, e.g. the function name
-    on a `tool-call' line.
-
-  `:pipe-arg' STRING: like `:arg' but rendered after a literal `| '
-    separator, matching the `>>-| tool-call | TOOL_NAME' style.
-
-All other keywords are serialised in `org-block' style as `:KEY VALUE'
-pairs, e.g. `:ts 2025-01-01T00:00:00 :id call_1'."
-  (let ((depth (ellm--insert-turn-depth role attrs)))
-    (goto-char (point-max))
-    (unless (bolp) (insert "\n"))
-    (let ((beg (point)))
-      (insert (apply #'ellm--get-turn role attrs) "\n")
-      (ellm--flush-pending-fold depth)
-      (ellm--mark-pending-fold beg role depth))))
-
-(defun ellm--set-turn-header-attrs (position attrs)
-  "Set keyword ATTRS on the turn delimiter at POSITION.
-ATTRS is an alist of string keys and single-token string values.  Existing
-occurrences are replaced, while positional and pipe-delimited title text is
-preserved."
-  (save-excursion
-    (goto-char position)
-    (beginning-of-line)
-    (when (looking-at ellm-turn-regexp)
-      (let* ((beg (point))
-             (end (line-end-position))
-             (line (buffer-substring-no-properties beg end)))
-        (dolist (attr attrs)
-          (let ((key (car attr))
-                (value (cdr attr)))
-            (setq line
-                  (replace-regexp-in-string
-                   (format "[ \t]+:%s\\(?:[ \t]+[^ \t\n]+\\)?"
-                           (regexp-quote key))
-                   "" line t t))
-            (setq line (concat line " :" key " " value))))
-        (let ((inhibit-read-only t))
-          (delete-region beg end)
-          (insert line))
-        (when (fboundp 'font-lock-flush)
-          (font-lock-flush beg (line-end-position)))
-        t))))
-
-(defun ellm--clear-buffer-keeping-frontmatter ()
-  "Clear the conversation, preserving frontmatter and adding an empty user turn."
-  (let* ((bounds (ellm--frontmatter-bounds))
-         (frontmatter (and bounds
-                           (buffer-substring-no-properties
-                            (point-min) (nth 1 bounds)))))
-    (delete-region (point-min) (point-max))
-    (when frontmatter
-      (insert frontmatter "\n\n"))
-    (ellm-update-todos nil)
-    (ellm--insert-turn "user")))
-
-(defun ellm--format-tool-param-value (value)
-  "Return a stable buffer representation for tool parameter VALUE."
-  (cond
-   ((null value) "null")
-   ((stringp value) value)
-   ((memq value '(:false :json-false)) "false")
-   (t (json-serialize value))))
-
-(defun ellm--tool-header-title (name params)
-  "Return a concise tool title from NAME and PARAMS.
-PARAMS is an alist.  Single-line values are rendered as `KEY=VALUE'; multiline
-values are omitted because their nested turns remain available when unfolded."
-  (let ((parts (list (ellm--tool-header-fragment name))))
-    (dolist (param params)
-      (let ((value (ellm--format-tool-param-value (cdr param))))
-        (unless (string-match-p "[\n\r]" value)
-          (setq parts
-                (append parts
-                        (list (format "%s=%s"
-                                      (car param)
-                                      (ellm--tool-header-fragment value))))))))
-    (truncate-string-to-width
-     (string-join parts " ") ellm-tool-header-summary-width nil nil "...")))
-
-(defun ellm--tool-header-fragment (value)
-  "Return VALUE as safe single-line turn-header text.
-Whitespace is collapsed and colons at token boundaries are escaped so a
-display summary cannot be parsed as real turn metadata."
-  (let ((text (replace-regexp-in-string
-               "[ \t]+" " " (format "%s" value))))
-    (setq text (string-replace " :" " \\:" text))
-    (if (string-prefix-p ":" text)
-        (concat "\\" text)
-      text)))
-
-(defun ellm--insert-tool-call-with-params (name id params)
-  "Insert a `tool-call' turn for NAME and ID with PARAMS.
-PARAMS is an alist of (PARAM-NAME . VALUE).  Each parameter is inserted
-as a nested `tool-param' turn so values remain visible and parseable."
-  (ellm--insert-turn "tool-call"
-                     :pipe-arg (ellm--tool-header-title name params)
-                     :id id)
-  (dolist (param params)
-    (ellm--insert-turn "tool-param" :pipe-arg (format "%s" (car param)))
-    (insert (ellm--ensure-newline
-             (ellm-tools--transform-tool-result
-              name (list param) nil
-              (ellm--format-tool-param-value (cdr param)))))))
-
-;;;;; Outline / folding
+;;;; Outline / folding
 
 ;; `outline-regexp' is not used when `outline-search-function' is set, but
 ;; `outline-level' still reads the current match via `match-string', so we
@@ -4691,7 +4691,7 @@ contract exactly:
             (setq found t)))
         found))))
 
-;;;;; Defun navigation (turns & headings as defuns)
+;;;; Defun navigation (turns & headings as defuns)
 
 ;; Treat every heading line -- a turn delimiter (`ellm-turn-header-1/2/3')
 ;; or a Markdown heading -- as the start of a "defun".  Wiring this into
@@ -4814,7 +4814,7 @@ end of buffer.  Serves as `end-of-defun-function'."
         (forward-line 0)
       (goto-char (point-max)))))
 
-;;;;; Tag navigation and folding
+;;;; Tag navigation and folding
 
 (defun ellm--opening-tag-at-point-p ()
   "Return non-nil when point is on a prompt opening-tag line."
@@ -4893,7 +4893,7 @@ The result is (BODY-BEG . BODY-END), and never crosses the current turn."
     (outline-flag-region beg end nil)))
 
 
-;;;;; Automatic turn folding
+;;;; Automatic turn folding
 
 ;; Folding is expressed entirely in terms of the outline machinery wired
 ;; up above (`outline-search-function' / `outline-level'), so folded
