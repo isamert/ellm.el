@@ -459,8 +459,7 @@ children of children.  Without it, offer only direct children."
   "Run COMMAND with Bash and return its exit code and output.
 Standard output and standard error are combined.  The command runs with no
 standard input in the frontmatter `cwd', project root, or `default-directory',
-in that order.  `ellm-tools-bash-program' selects the Bash executable, and
-`ellm-tools-default-timeout' controls how long it may run."
+in that order."
   (let* ((default-directory (ellm-tools--default-directory))
          (limit ellm-tools-bash-output-character-limit)
          (head-limit (/ (+ limit 1) 2))
