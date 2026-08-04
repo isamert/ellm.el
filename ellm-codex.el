@@ -110,7 +110,7 @@ This mirrors the list-visible entries in Codex's bundled models catalog.")
   access-token refresh-token id-token account-id expires-at)
 
 (cl-defun ellm-make-codex-provider
-    (&key (chat-model "gpt-5.6-sol")
+    (&key (chat-model)
           (auth-file ellm-codex-auth-file)
           default-chat-non-standard-params)
   "Return a ChatGPT Codex provider.

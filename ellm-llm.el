@@ -183,6 +183,24 @@ buffer selected by the originating ellm request."
                  (apply on-error error)))))
       (apply original url args))))
 
+;;;; Provider model cache
+
+(defvar ellm-llm--provider-model-candidates
+  (make-hash-table :test #'eq :weakness 'key)
+  "Successfully discovered model lists keyed by llm.el provider objects.")
+
+(defun ellm-llm--provider-model-candidates (provider)
+  "Return cached or newly discovered model names for PROVIDER.
+Only providers advertising `model-list' are queried.  Failed and empty
+lookups are not cached so a later completion attempt can retry."
+  (or (gethash provider ellm-llm--provider-model-candidates)
+      (when (member 'model-list (llm-capabilities provider))
+        (condition-case nil
+            (when-let* ((models (llm-models provider)))
+              (puthash provider models ellm-llm--provider-model-candidates)
+              models)
+          (error nil)))))
+
 ;;;; Interface implementation
 
 (cl-defmethod ellm-backend-create ((provider llm-standard-chat-provider)
@@ -226,10 +244,9 @@ buffer selected by the originating ellm request."
 
 (cl-defmethod ellm-provider-model-candidates ((provider llm-standard-chat-provider))
   "Return model completion candidates for `llm.el' PROVIDER."
-  (or (and-let* ((model (ellm-llm--provider-current-model provider)))
-        (list model))
-      (mapcar (lambda (m) (symbol-name (llm-model-symbol m)))
-              llm-models)))
+  (or (ellm-llm--provider-model-candidates provider)
+      (and-let* ((model (ellm-llm--provider-current-model provider)))
+        (list model))))
 
 (cl-defmethod ellm-provider-with-model ((provider llm-standard-chat-provider) model)
   "Return a copy of PROVIDER with its `chat-model' slot set to MODEL."

@@ -1841,11 +1841,6 @@ map; when no profile/default map is selected, both parts are nil."
    ((stringp model) (ellm-tools--present-string model))
    (t nil)))
 
-(defun ellm-tools--model-candidates (entry provider)
-  "Return configured model candidates from ENTRY or PROVIDER."
-  (or (and entry (ellm--provider-entry-models entry))
-      (and provider (ellm-provider-model-candidates provider))))
-
 (defun ellm-tools--validate-subagent-frontmatter (frontmatter fallback-provider)
   "Validate provider/model selections in FRONTMATTER.
 FALLBACK-PROVIDER is used when FRONTMATTER has no `provider:' key."
@@ -1860,11 +1855,12 @@ FALLBACK-PROVIDER is used when FRONTMATTER has no `provider:' key."
                        fallback-provider))
            (model (ellm-tools--model-name
                    (ellm--plistish-get frontmatter 'model)))
-           (candidates (ellm-tools--model-candidates entry provider)))
+           (candidates (car (ellm--provider-model-candidates entry provider))))
       (unless provider
         (ellm-tools--error "subagent has no provider configured"))
       (when (and model candidates
-                 (not (member model candidates)))
+                 (not (member model
+                              (mapcar #'ellm--model-candidate-name candidates))))
         (ellm-tools--error
          "subagent model `%s' is not configured for provider `%s'"
          model (or provider-name "<fallback>"))))))

@@ -74,9 +74,12 @@ cdr is either:
   - a provider object directly, or
   - a plist `(:provider PROV :models (\"m1\" \"m2\" …)
     :small-model \"MODEL\")'.  The optional `:models' list constrains
-    frontmatter `model:' completion.  `:small-model' selects a faster,
-    cheaper model for auxiliary work such as conversation titles; the
-    normal chat model is used when it is absent.
+    frontmatter `model:' completion and supplies a default when PROV has
+    no current model.  Without `:models', `:small-model' is used as that
+    default and as the model candidate.  `:small-model' also selects a
+    faster, cheaper model for auxiliary work such as conversation titles.
+    When neither is configured, models may be discovered from the backend
+    on demand.
 
 Used by `ellm--resolve-provider' to look up the provider named in the
 buffer's frontmatter, and by `ellm--frontmatter-capf' for completion."
@@ -3145,6 +3148,44 @@ Returns nil for bare provider objects or plist entries without a
        (plist-member entry :models)
        (plist-get entry :models)))
 
+(defun ellm--provider-entry-small-model (entry)
+  "Return ENTRY's configured small model, or nil."
+  (and (listp entry)
+       (plist-get entry :small-model)))
+
+(defun ellm--model-candidate-name (candidate)
+  "Return the model name represented by CANDIDATE."
+  (if (consp candidate) (car candidate) candidate))
+
+(defun ellm--provider-model-candidates (entry provider &optional buffer)
+  "Return (CANDIDATES . SOURCE) for ENTRY and PROVIDER.
+
+An entry's `:models' list takes precedence and constrains selections.
+Without it, `:small-model' is the sole configured candidate.  Otherwise,
+ask PROVIDER for candidates, using BUFFER for session-scoped metadata.
+SOURCE is `explicit', `small-model', or `provider'."
+  (let ((models (ellm--provider-entry-models entry))
+        (small-model (ellm--provider-entry-small-model entry)))
+    (cond
+     (models (cons models 'explicit))
+     (small-model (cons (list small-model) 'small-model))
+     (provider
+      (cons (if buffer
+                (ellm-provider-buffer-model-candidates provider buffer)
+              (ellm-provider-model-candidates provider))
+            'provider))
+     (t (cons nil nil)))))
+
+(defun ellm--provider-default-model (entry provider)
+  "Return the network-free default model for ENTRY and PROVIDER.
+
+Prefer PROVIDER's current model, then the first configured `:models' entry,
+and finally ENTRY's `:small-model'.  Backend model discovery is deliberately
+excluded so ordinary new-buffer creation does not make network requests."
+  (or (and provider (ellm-provider-current-model provider))
+      (car (ellm--provider-entry-models entry))
+      (ellm--provider-entry-small-model entry)))
+
 (defun ellm-provider-small-model (provider)
   "Return PROVIDER's configured model for small auxiliary tasks.
 Provider entries in `ellm-provider-alist' configure this with
@@ -3351,7 +3392,7 @@ When SELECT-PROVIDER-MODEL is non-nil, prompt for the provider and model."
       (setq-local ellm--persistence-ephemeral-p ephemeral)
       (insert (format "---\nprovider: %s\nmodel: %s\ncreated: %s\n---\n\n"
                       (or provider-name "null")
-                      (or (ellm-provider-current-model provider)
+                      (or (ellm--provider-default-model provider-entry provider)
                           "null")
                       (ellm--timestamp)))
       (ellm--insert-turn "user")
@@ -3370,11 +3411,10 @@ When SELECT-PROVIDER-MODEL is non-nil, prompt for the provider and model."
             ()
             (when (buffer-live-p buf)
               (with-current-buffer buf
-                (when-let* ((models
-                             (or (ellm--provider-entry-models provider-entry)
-                                 (and provider
-                                      (ellm-provider-buffer-model-candidates
-                                       provider buf))))
+                (when-let* ((model-candidates
+                             (ellm--provider-model-candidates
+                              provider-entry provider buf))
+                            (models (car model-candidates))
                             (model (completing-read "Model: " models nil t)))
                   (ellm--set-frontmatter-value 'model model)
                   (ellm-provider-configure-new-buffer
@@ -3383,8 +3423,8 @@ When SELECT-PROVIDER-MODEL is non-nil, prompt for the provider and model."
                      (message "ellm: new buffer configuration complete"))
                    #'on-error))))))
         (if (and provider
-                 (not (ellm--provider-entry-models provider-entry))
-                 (not (ellm-provider-buffer-model-candidates provider buf))
+                 (not (car (ellm--provider-model-candidates
+                            provider-entry provider buf)))
                  (ellm-provider-model-completion-session-start-p provider buf))
             (progn
               (message "ellm: starting provider session...")
@@ -4253,28 +4293,24 @@ surprise prompts from automatic completion UIs."
 (defun ellm--capf-model-candidates ()
   "Return (MODELS . SOURCE) for `model:' frontmatter completion.
 MODELS is a list of model name strings.  SOURCE is one of:
-  `explicit'   - taken from the alist entry's `:models' list,
-  `provider'   - supplied by the resolved provider backend."
+  `explicit'    - taken from the alist entry's `:models' list,
+  `small-model' - taken from the alist entry's `:small-model',
+  `provider'    - supplied by the resolved provider backend."
   (let* ((fm (ignore-errors (ellm--parse-frontmatter t)))
-          (named (or (alist-get 'provider fm)
-                     (ellm--capf-frontmatter-provider-name)))
-          (sym (and named (if (stringp named) (intern named) named)))
-          (entry (and sym (alist-get sym ellm-provider-alist)))
-          (explicit (and entry (ellm--provider-entry-models entry)))
-          (provider (or (and entry (ellm--provider-entry-provider entry))
-                        (and (not named) ellm-provider)))
-          (models (and provider
-                       (ellm-provider-buffer-model-candidates
-                        provider (current-buffer)))))
+         (named (or (alist-get 'provider fm)
+                    (ellm--capf-frontmatter-provider-name)))
+         (sym (and named (if (stringp named) (intern named) named)))
+         (entry (and sym (alist-get sym ellm-provider-alist)))
+         (provider (or (and entry (ellm--provider-entry-provider entry))
+                       (and (not named) ellm-provider)))
+         (candidates (ellm--provider-model-candidates
+                      entry provider (current-buffer))))
     (cond
-      (explicit (cons explicit 'explicit))
-      (models (cons models 'provider))
-      ((and provider
-            (ellm--capf-maybe-start-session-for-models provider fm))
-       (cons (ellm-provider-buffer-model-candidates
-              provider (current-buffer))
-             'provider))
-      (t (cons nil nil)))))
+     ((car candidates) candidates)
+     ((and provider
+           (ellm--capf-maybe-start-session-for-models provider fm))
+      (ellm--provider-model-candidates entry provider (current-buffer)))
+     (t candidates))))
 
 (defun ellm--capf-reasoning-candidates ()
   "Return reasoning candidates for the current provider and model."
