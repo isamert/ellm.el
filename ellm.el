@@ -288,6 +288,23 @@ their nested `tool-param' turns but omitted from the title."
   :type 'natnum
   :group 'ellm)
 
+(defcustom ellm-header-line-template "%l%>%r"
+  "Template for the `ellm-mode' header line.
+
+The following placeholders are expanded:
+  %t  session title
+  %a  current TODO task
+  %p  TODO completion progress
+  %u  context usage
+  %c  request cost
+  %l  title and TODO progress, joined with \" — \", when both exist
+  %r  context usage and cost, joined with a space, when both exist
+  %>  align all following text against the right edge
+
+Use %% for a literal percent sign.  Empty fields expand to an empty string."
+  :type 'string
+  :group 'ellm)
+
 (defcustom ellm-mcp-servers nil
   "Alist of MCP server configurations available to ellm buffers.
 
@@ -6200,32 +6217,45 @@ the resulting normalized list."
         (format "%s%.2f" symbol amount)
       (string-join (delq nil (list (format "%.2f" amount)
                                    (and currency (format "%s" currency))))
-                    " "))))
+                   " "))))
+
+(defun ellm--escape-header-line-text (text)
+  "Return TEXT escaped for literal display in a header line."
+  (replace-regexp-in-string "%" "%%" text t t))
+
+(defun ellm--format-todo-completion (todos)
+  "Return compact completion progress for TODOS."
+  (when todos
+    (format "[%d/%d]"
+            (cl-count "completed" todos
+                      :key (lambda (todo) (plist-get todo :status))
+                      :test #'equal)
+            (length todos))))
+
+(defun ellm--format-todo-current (todos)
+  "Return the current task in TODOS for literal header-line display."
+  (when todos
+    (let ((current (or (cl-find "in_progress" todos
+                                :key (lambda (todo) (plist-get todo :status))
+                                :test #'equal)
+                       (cl-find "pending" todos
+                                :key (lambda (todo) (plist-get todo :status))
+                                :test #'equal)
+                       (car (last
+                             (cl-remove-if-not
+                              (lambda (todo)
+                                (equal (plist-get todo :status) "completed"))
+                              todos)))
+                       (car todos))))
+      (ellm--escape-header-line-text
+       (replace-regexp-in-string
+        "[\n\r\t]+" " " (plist-get current :content))))))
 
 (defun ellm--format-todo-progress (todos)
   "Return compact header-line progress and current task for TODOS."
   (when todos
-    (let* ((current (or (cl-find "in_progress" todos
-                                 :key (lambda (todo) (plist-get todo :status))
-                                 :test #'equal)
-                        (cl-find "pending" todos
-                                 :key (lambda (todo) (plist-get todo :status))
-                                 :test #'equal)
-                        (car (last
-                              (cl-remove-if-not
-                               (lambda (todo)
-                                 (equal (plist-get todo :status) "completed"))
-                               todos)))
-                        (car todos)))
-           (completed (cl-count "completed" todos
-                                :key (lambda (todo) (plist-get todo :status))
-                                :test #'equal)))
-      (format "[%d/%d] %s" completed (length todos)
-              (replace-regexp-in-string
-               "%" "%%"
-               (replace-regexp-in-string
-                "[\n\r\t]+" " " (plist-get current :content))
-               t t)))))
+    (format "%s %s" (ellm--format-todo-completion todos)
+            (ellm--format-todo-current todos))))
 
 (defun ellm--header-line-right-status (text)
   "Return header-line TEXT aligned against the right edge."
@@ -6240,30 +6270,67 @@ the resulting normalized list."
 (defun ellm--format-header-title (title)
   "Return TITLE normalized for literal header-line display."
   (when (and (stringp title) (not (string-empty-p title)))
-    (replace-regexp-in-string
-     "%" "%%"
-     (replace-regexp-in-string "[\n\r\t]+" " " title)
-     t t)))
+    (ellm--escape-header-line-text
+     (replace-regexp-in-string "[\n\r\t]+" " " title))))
 
-(defun ellm--header-line-status ()
-  "Return `ellm-mode' header-line status text."
+(defun ellm--header-line-fields ()
+  "Return field values for `ellm-header-line-template'."
   (let* ((title (ellm--format-header-title ellm--session-title))
          (todos (ellm--format-todo-progress
                  (ellm-buffer-state-todos ellm-buffer-state)))
-         (lhs (string-join (delq nil (list title todos)) " — "))
+         (progress (ellm--format-todo-completion
+                    (ellm-buffer-state-todos ellm-buffer-state)))
+         (active (ellm--format-todo-current
+                  (ellm-buffer-state-todos ellm-buffer-state)))
          (usage (ellm--format-context-usage
                  (ellm-buffer-state-context-usage ellm-buffer-state)
                  (ellm-buffer-state-context-size ellm-buffer-state)))
-         (cost (ellm--format-cost
-                (ellm-buffer-state-cost-amount ellm-buffer-state)
-                (ellm-buffer-state-cost-currency ellm-buffer-state)))
-         (rhs (string-join (delq nil (list usage cost)) " ")))
+         (cost-text (ellm--format-cost
+                     (ellm-buffer-state-cost-amount ellm-buffer-state)
+                     (ellm-buffer-state-cost-currency ellm-buffer-state)))
+         (cost (and cost-text (ellm--escape-header-line-text cost-text))))
+    `((?t . ,title)
+      (?a . ,active)
+      (?p . ,progress)
+      (?u . ,usage)
+      (?c . ,cost)
+      (?l . ,(string-join (delq nil (list title todos)) " — "))
+      (?r . ,(string-join (delq nil (list usage cost)) " ")))))
+
+(defun ellm--expand-header-line-template (template fields)
+  "Expand TEMPLATE using header-line FIELDS.
+Return a cons of the left and right portions, split at `%>'."
+  (let ((left nil)
+        (right nil)
+        (right-aligned nil)
+        (start 0))
+    (while (string-match "%[%%tapulrc>]" template start)
+      (let ((literal (substring template start (match-beginning 0)))
+            (placeholder (aref template (1+ (match-beginning 0)))))
+        (push (ellm--escape-header-line-text literal)
+              (if right-aligned right left))
+        (pcase placeholder
+          (?% (push "%%" (if right-aligned right left)))
+          (?> (setq right-aligned t))
+          (_ (push (or (alist-get placeholder fields) "")
+                   (if right-aligned right left))))
+        (setq start (match-end 0))))
+    (push (ellm--escape-header-line-text (substring template start))
+          (if right-aligned right left))
+    (cons (apply #'concat (nreverse left))
+          (apply #'concat (nreverse right)))))
+
+(defun ellm--header-line-status ()
+  "Return `ellm-mode' header-line status text."
+  (pcase-let* ((`(,left . ,right)
+                (ellm--expand-header-line-template
+                 ellm-header-line-template (ellm--header-line-fields))))
     (cond
-     ((and (not (string-empty-p lhs)) (not (string-empty-p rhs)))
-      (concat lhs (ellm--header-line-right-status rhs)))
-     ((not (string-empty-p lhs)) lhs)
-     ((not (string-empty-p rhs))
-      (ellm--header-line-right-status rhs)))))
+     ((and (not (string-empty-p left)) (not (string-empty-p right)))
+      (concat left (ellm--header-line-right-status right)))
+     ((not (string-empty-p left)) left)
+     ((not (string-empty-p right))
+      (ellm--header-line-right-status right)))))
 
 ;;;;; Major mode
 
