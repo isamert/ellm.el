@@ -416,6 +416,26 @@ a continuation for visual nesting (no horizontal rule above it)."
   :type 'string
   :group 'ellm-visuals)
 
+(defcustom ellm-new-buffer-default-configuration-function
+  #'ellm--new-buffer-default-configuration
+  "Function returning default frontmatter settings for new buffers.
+
+The function is called without arguments by `ellm-new-buffer' and returns a
+plist with optional `:provider', `:model', `:system', and `:tools' values.
+Missing `:provider' and `:model' values retain the standard first-provider and
+network-free model fallback.  Missing `:system' and `:tools' values leave
+those frontmatter keys unset.  `:provider' must name an
+`ellm-provider-alist' entry; `:system' is a prompt string; and `:tools' is a
+list accepted by the `tools:' frontmatter key.  `:system' is inserted as a
+leading system turn rather than as frontmatter.
+
+With a prefix argument, interactive provider/model selection overrides the
+plist's `:provider' and `:model', while `:system' and `:tools' still apply.
+Use `ellm-provider-default-model' to retain ellm's standard model fallback
+for a chosen provider."
+  :type 'function
+  :group 'ellm)
+
 ;;;; Regexps & predicates
 
 ;;;;; Regexpes
@@ -3176,15 +3196,33 @@ SOURCE is `explicit', `small-model', or `provider'."
             'provider))
      (t (cons nil nil)))))
 
-(defun ellm--provider-default-model (entry provider)
-  "Return the network-free default model for ENTRY and PROVIDER.
+(defun ellm-provider-default-model (provider)
+  "Return PROVIDER's network-free default model.
 
-Prefer PROVIDER's current model, then the first configured `:models' entry,
-and finally ENTRY's `:small-model'.  Backend model discovery is deliberately
+PROVIDER may be a provider name from `ellm-provider-alist' or a provider
+object.  Prefer the provider's current model, then the first configured
+`:models' entry, and finally its `:small-model'.  Backend model discovery is
 excluded so ordinary new-buffer creation does not make network requests."
-  (or (and provider (ellm-provider-current-model provider))
-      (car (ellm--provider-entry-models entry))
-      (ellm--provider-entry-small-model entry)))
+  (let* ((entry (cond
+                 ((or (symbolp provider) (stringp provider))
+                  (alist-get (if (stringp provider) (intern provider) provider)
+                             ellm-provider-alist))
+                 (t (cl-find provider ellm-provider-alist
+                             :key (lambda (candidate)
+                                    (ellm--provider-entry-provider (cdr candidate)))
+                             :test #'eq))))
+         (object (if (or (symbolp provider) (stringp provider))
+                     (ellm--provider-entry-provider entry)
+                   provider)))
+    (or (and object (ellm-provider-current-model object))
+        (car (ellm--provider-entry-models entry))
+        (ellm--provider-entry-small-model entry))))
+
+(defun ellm--new-buffer-default-configuration ()
+  "Return the default frontmatter configuration for a new conversation."
+  (when-let* ((provider (caar ellm-provider-alist)))
+    (list :provider provider
+          :model (ellm-provider-default-model provider))))
 
 (defun ellm-provider-small-model (provider)
   "Return PROVIDER's configured model for small auxiliary tasks.
@@ -3379,24 +3417,41 @@ When SELECT-PROVIDER-MODEL is non-nil, prompt for the provider and model."
   (let* ((buf (generate-new-buffer (if (functionp ellm-initial-buffer-name)
                                        (funcall ellm-initial-buffer-name)
                                      ellm-initial-buffer-name)))
+         (default-configuration
+           (funcall ellm-new-buffer-default-configuration-function))
+         (default-provider
+           (or (plist-get default-configuration :provider)
+               (caar ellm-provider-alist)))
          (provider-name
           (if select-provider-model
               (let ((name (completing-read
                            "Provider: " (ellm--capf-provider-candidates) nil t)))
                 (and (not (string-empty-p name)) (intern name)))
-            (caar ellm-provider-alist)))
+            default-provider))
          (provider-entry (and provider-name
                               (alist-get provider-name ellm-provider-alist)))
-         (provider (ellm--provider-entry-provider provider-entry)))
+         (provider (ellm--provider-entry-provider provider-entry))
+         (model (if select-provider-model
+                    (ellm-provider-default-model provider-name)
+                  (if (plist-member default-configuration :model)
+                      (plist-get default-configuration :model)
+                    (ellm-provider-default-model provider-name)))))
     (with-current-buffer buf
       (setq-local ellm--persistence-ephemeral-p ephemeral)
       (insert (format "---\nprovider: %s\nmodel: %s\ncreated: %s\n---\n\n"
                       (or provider-name "null")
-                      (or (ellm--provider-default-model provider-entry provider)
-                          "null")
+                      (or model "null")
                       (ellm--timestamp)))
+      (when-let* ((system (plist-get default-configuration :system)))
+        (unless (stringp system)
+          (user-error "ellm: default `:system' must be a string"))
+        (ellm--insert-turn "system")
+        (insert (ellm--ensure-newline system)))
       (ellm--insert-turn "user")
-      (ellm-mode))
+      (ellm-mode)
+      (when (plist-member default-configuration :tools)
+        (ellm--set-frontmatter-value
+         'tools (plist-get default-configuration :tools))))
     (switch-to-buffer buf)
     (when select-provider-model
       (cl-labels
