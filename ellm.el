@@ -5364,19 +5364,32 @@ Markdown fenced code block with language and file location context."
 ;;;###autoload
 (defun ellm-toggle-side-window (&optional new)
   "Toggle an ellm buffer for the current project in a side window.
-With prefix argument NEW, create a new ellm buffer.  If the region is active,
-append it to the target conversation and show the side window instead of hiding
-an already visible target buffer."
+With prefix argument NEW, create a new ellm buffer.  If called from an ellm
+buffer without a prefix argument or active region, prompt to switch to another
+conversation for the project when one exists.  If the region is active, append
+it to the target conversation and show the side window instead of hiding an
+already visible target buffer."
   (interactive "P")
   (let* ((had-region (use-region-p))
          (root (ellm--current-project-root-or-directory))
+         (other-buffers
+          (and (derived-mode-p 'ellm-mode)
+               (not had-region)
+               (not new)
+               (delq (current-buffer) (ellm--project-buffers root))))
          (visible-side-window
-          (and (not had-region) (not new)
+          (and (not other-buffers)
+               (not had-region) (not new)
                (ellm--visible-project-side-window root))))
-    (if visible-side-window
-        (let ((buffer (window-buffer visible-side-window)))
-          (delete-window visible-side-window)
-          buffer)
+    (cond
+     (other-buffers
+      (switch-to-buffer
+       (ellm--read-project-buffer "Switch to project ellm buffer: " other-buffers)))
+     (visible-side-window
+      (let ((buffer (window-buffer visible-side-window)))
+        (delete-window visible-side-window)
+        buffer))
+     (t
       (let ((buffer (save-window-excursion
                       (ellm-dwim new)
                       (current-buffer))))
@@ -5385,7 +5398,7 @@ an already visible target buffer."
           (ellm--display-buffer-in-side-window buffer)
           (goto-char (point-max))
           (recenter))
-        buffer))))
+        buffer)))))
 
 ;;;; Narrowing
 
