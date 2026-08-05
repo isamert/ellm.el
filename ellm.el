@@ -437,18 +437,18 @@ a continuation for visual nesting (no horizontal rule above it)."
   "Function returning default frontmatter settings for new buffers.
 
 The function is called without arguments by `ellm-new-buffer' and returns a
-plist with optional `:provider', `:model', `:system', and `:tools' values.
-Missing `:provider' and `:model' values retain the standard first-provider and
-network-free model fallback.  Missing `:system' and `:tools' values leave
-those frontmatter keys unset.  `:provider' must name an
-`ellm-provider-alist' entry; `:system' is a prompt string; and `:tools' is a
-list accepted by the `tools:' frontmatter key.  `:system' is inserted as a
-leading system turn rather than as frontmatter.
+plist of frontmatter settings.  `:provider' and `:model' select the initial
+provider and model; missing values retain the standard first-provider and
+network-free model fallback.  `:system' is a prompt string inserted as a
+leading system turn rather than as frontmatter.  Other keywords are written
+to the initial frontmatter after the standard `provider', `model', and
+`created' keys; those standard keys are reserved.  For example, `:tools',
+`:cwd', and `:mcp' configure their corresponding frontmatter keys.
 
 With a prefix argument, interactive provider/model selection overrides the
-plist's `:provider' and `:model', while `:system' and `:tools' still apply.
-Use `ellm-provider-default-model' to retain ellm's standard model fallback
-for a chosen provider."
+plist's `:provider' and `:model', while all other settings still apply.  Use
+`ellm-provider-default-model' to retain ellm's standard model fallback for a
+chosen provider."
   :type 'function
   :group 'ellm)
 
@@ -3430,6 +3430,23 @@ accepted."
       (run-at-time 0.1 nil #'ellm--call-when-minibuffer-free function args)
     (apply function args)))
 
+(defun ellm--new-buffer-frontmatter (configuration provider model)
+  "Return initial frontmatter from CONFIGURATION, PROVIDER, and MODEL.
+
+`provider', `model', and `created' lead the frontmatter.  Other configuration
+keywords follow them, except the reserved `:provider', `:model', `:created',
+and `:system' keys."
+  (let ((frontmatter `((provider . ,(or provider "null"))
+                       (model . ,(or model "null"))
+                       (created . ,(ellm--timestamp)))))
+    (cl-loop for (key value) on configuration by #'cddr
+             unless (memq key '(:provider :model :created :system))
+             do (setq frontmatter
+                      (append frontmatter
+                              (list (cons (intern (substring (symbol-name key) 1))
+                                          value)))))
+    frontmatter))
+
 (defun ellm--new-buffer (ephemeral &optional select-provider-model)
   "Create a new ellm conversation buffer.
 When EPHEMERAL is non-nil, do not automatically persist it.
@@ -3455,23 +3472,22 @@ When SELECT-PROVIDER-MODEL is non-nil, prompt for the provider and model."
                     (ellm-provider-default-model provider-name)
                   (if (plist-member default-configuration :model)
                       (plist-get default-configuration :model)
-                    (ellm-provider-default-model provider-name)))))
+                    (ellm-provider-default-model provider-name))))
+         (system (plist-get default-configuration :system)))
+    (when (and system (not (stringp system)))
+      (user-error "ellm: default `:system' must be a string"))
     (with-current-buffer buf
       (setq-local ellm--persistence-ephemeral-p ephemeral)
-      (insert (format "---\nprovider: %s\nmodel: %s\ncreated: %s\n---\n\n"
-                      (or provider-name "null")
-                      (or model "null")
-                      (ellm--timestamp)))
-      (when-let* ((system (plist-get default-configuration :system)))
-        (unless (stringp system)
-          (user-error "ellm: default `:system' must be a string"))
+      (insert "---\n"
+              (ellm--yaml-encode
+               (ellm--new-buffer-frontmatter default-configuration
+                                             provider-name model))
+              "\n---\n\n")
+      (when system
         (ellm--insert-turn "system")
         (insert (ellm--ensure-newline system)))
       (ellm--insert-turn "user")
-      (ellm-mode)
-      (when (plist-member default-configuration :tools)
-        (ellm--set-frontmatter-value
-         'tools (plist-get default-configuration :tools))))
+      (ellm-mode))
     (switch-to-buffer buf)
     (when select-provider-model
       (cl-labels
