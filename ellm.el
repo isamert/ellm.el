@@ -125,8 +125,7 @@ consulted only when a template must actually be evaluated."
 
 (defcustom ellm-prompt-interpolation-max-chars 131072
   "Maximum characters allowed in a rendered prompt template.
-Nil disables the limit.  The same limit applies to project instruction text
-returned by `ellm-read-agents-md'."
+Nil disables the limit."
   :type '(choice (const :tag "Unlimited" nil)
                  (natnum :tag "Characters"))
   :group 'ellm)
@@ -2594,56 +2593,60 @@ Signal when the text exceeds MAX-CHARS.  When MAX-CHARS is nil, use
                     limit path))
       (buffer-string))))
 
-(defun ellm--project-directory-chain (root directory)
-  "Return directories from ROOT through DIRECTORY."
-  (let ((root (file-name-as-directory (expand-file-name root)))
-        (cursor (file-name-as-directory (expand-file-name directory)))
-        result)
-    (while cursor
-      (push cursor result)
-      (if (file-equal-p cursor root)
-          (setq cursor nil)
-        (let ((parent
-               (file-name-directory
-                (directory-file-name cursor))))
-          (setq cursor
-                (and parent
-                     (not (file-equal-p parent cursor))
-                     (or (file-equal-p parent root)
-                         (file-in-directory-p parent root))
-                     parent)))))
-    result))
+(cl-defun ellm-prompt-read (files &key directory heading tag required)
+  "Return the first readable regular file among FILES.
+FILES is a file name string or a non-empty list of file name strings, tried
+in order.  Relative file names are resolved against DIRECTORY, which defaults
+to `ellm-prompt-directory'.  When no candidate is found, return an empty
+string unless REQUIRED is non-nil, in which case signal a `user-error'.
 
-(defun ellm-read-agents-md (&optional directory)
-  "Return applicable project `AGENTS.md' text for DIRECTORY.
-Files are read from the project root through DIRECTORY and joined in that
-order, so closer instructions occur later.  DIRECTORY defaults to
-`ellm-prompt-directory'."
-  (let* ((directory
-          (file-name-as-directory
-           (expand-file-name (or directory (ellm-prompt-directory)))))
-         (_ (unless (file-directory-p directory)
-              (user-error "ellm: instruction directory does not exist: %s"
-                          directory)))
-         (default-directory directory)
-         (project-root (funcall ellm-current-project-function))
-         (root
-          (if (and project-root
-                   (or (file-equal-p directory project-root)
-                       (file-in-directory-p directory project-root)))
-              project-root
-            directory))
-         contents)
-    (dolist (dir (ellm--project-directory-chain root directory))
-      (let ((file (expand-file-name "AGENTS.md" dir)))
-        (when (file-readable-p file)
-          (push (ellm-prompt-read-file file) contents))))
-    (let ((text (string-join (nreverse contents) "\n\n")))
-      (when (and ellm-prompt-interpolation-max-chars
-                 (> (length text) ellm-prompt-interpolation-max-chars))
-        (user-error "ellm: AGENTS.md instructions exceed %d characters"
-                    ellm-prompt-interpolation-max-chars))
-      text)))
+When HEADING is non-nil, prepend it followed by a blank line.  When TAG is
+non-nil, wrap the file contents in matching angle-bracket tags.  HEADING and
+TAG are only applied to non-empty file contents."
+  (unless (or (stringp files)
+              (and (listp files) files (cl-every #'stringp files)))
+    (user-error "ellm: prompt files must be a string or non-empty list of strings"))
+  (unless (or (null directory) (stringp directory))
+    (user-error "ellm: prompt directory must be a string"))
+  (unless (or (null heading) (stringp heading))
+    (user-error "ellm: prompt heading must be a string"))
+  (unless (or (null tag) (stringp tag))
+    (user-error "ellm: prompt tag must be a string"))
+  (let* ((files (ensure-list files))
+         (directory (expand-file-name (or directory (ellm-prompt-directory))))
+         (path (cl-find-if (lambda (file)
+                             (let ((path (expand-file-name file directory)))
+                               (and (file-readable-p path)
+                                    (file-regular-p path)
+                                    path)))
+                           files)))
+    (cond
+     (path
+      (let ((contents (ellm-prompt-read-file path)))
+        (if (string-empty-p contents)
+            ""
+          (concat (and heading (concat heading "\n\n"))
+                  (and tag (concat "<" tag ">\n"))
+                  contents
+                  (and tag (concat "\n</" tag ">"))))))
+     (required
+      (user-error "ellm: none of the prompt files exist in %s: %s"
+                  directory (string-join files ", ")))
+     (t ""))))
+
+(defun ellm-tool-enabled-p (name &optional frontmatter)
+  "Return non-nil when tool NAME is enabled by FRONTMATTER.
+NAME is a tool name string or symbol.  FRONTMATTER defaults to the current
+request's frontmatter snapshot, so this function is suitable for prompt
+template interpolation.  Category selections and `tools: true' are resolved
+using the same rules as local tool requests."
+  (let ((name (cond ((stringp name) name)
+                    ((symbolp name) (symbol-name name))
+                    (t (user-error "ellm: tool name must be a string or symbol: %S"
+                                   name))))
+        (frontmatter (or frontmatter (ellm-prompt-frontmatter))))
+    (cl-find name (ellm--resolve-tools frontmatter)
+             :key #'ellm-tool-name :test #'equal)))
 
 (defun ellm--prompt-interpolation-escaped-p (text position)
   "Return non-nil when the interpolation opener at POSITION is escaped in TEXT."

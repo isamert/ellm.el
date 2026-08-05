@@ -89,8 +89,6 @@ both in the frontmatter `system:` value and in `system` turns:
 >-| system
 You are working in this project.
 
-#{(ellm-read-agents-md)}
-
 Today is #{(format-time-string "%F")}.
 >-| user
 Review the current implementation.
@@ -128,10 +126,12 @@ edited templates.  Set it to `allow` for trusted automated conversations or
 `deny` to disable evaluation.  Interpolation is arbitrary Emacs Lisp, so only
 enable it for prompts you trust.  Useful request-context helpers are:
 
-- `ellm-read-agents-md` — collect project instructions from the project root
-  through the request directory.
 - `ellm-prompt-read-file` — read a file relative to the request directory.
+- `ellm-prompt-read` — read the first available file from an ordered list,
+  with optional headings and tags.
 - `ellm-prompt-frontmatter` — read the request's frontmatter snapshot.
+- `ellm-tool-enabled-p` — check whether a local tool is enabled by the
+  request's `tools:` selection.
 - `ellm-prompt-directory` and `ellm-prompt-project-root` — inspect request
   paths.
 
