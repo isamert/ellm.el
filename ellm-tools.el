@@ -44,12 +44,12 @@
   :group 'ellm
   :link '(url-link "https://github.com/isamert/ellm.el"))
 
-(defcustom ellm-tools-default-timeout 60
-  "Default timeout in seconds for asynchronous ellm tools.
-Set to nil to disable the macro-level timeout.  Individual tools can
-override this with `:timeout' in `ellm-deftool' SPECS."
-  :type '(choice (const :tag "No timeout" nil)
-                 (number :tag "Seconds"))
+(defconst ellm-tools-maximum-timeout (* 15 60)
+  "Maximum duration in seconds for a tool call.")
+
+(defcustom ellm-tools-default-timeout ellm-tools-maximum-timeout
+  "Default timeout in seconds for asynchronous ellm tools."
+  :type 'number
   :group 'ellm-tools)
 
 (defcustom ellm-tools-bash-program "bash"
@@ -204,7 +204,7 @@ It receives one `%s' argument: the subagent display name or id."
   :type 'string
   :group 'ellm-tools)
 
-(defcustom ellm-subagent-wait-default-timeout 60
+(defcustom ellm-subagent-wait-default-timeout ellm-tools-default-timeout
   "Default maximum seconds `wait_subagent' waits for a subagent."
   :type 'number
   :group 'ellm-tools)
@@ -274,6 +274,18 @@ children of children.  Without it, offer only direct children."
 (defvar-local ellm-tools--elisp-sessions nil
   "Map persistent Elisp session names to child session objects.")
 
+;;;; Timeouts
+
+(defun ellm-tools--normalize-timeout (timeout &optional default)
+  "Return TIMEOUT or DEFAULT as a permitted tool duration."
+  (let ((value (or timeout default ellm-tools-default-timeout)))
+    (unless (and (numberp value) (>= value 0))
+      (ellm-tools--error "timeout must be a non-negative number"))
+    (when (> value ellm-tools-maximum-timeout)
+      (ellm-tools--error "I can't run a tool for more than %d seconds"
+                         ellm-tools-maximum-timeout))
+    value))
+
 ;;;; `ellm-deftool' macro
 
 (eval-and-compile
@@ -285,11 +297,24 @@ children of children.  Without it, offer only direct children."
   (pcase-let* ((`(,category ,tool-name-def) (string-split (symbol-name name) "/"))
                (tool-name (ellm-tools--normalize-name tool-name-def))
                (const-sym (intern (format "ellm-tools/%s-tool" tool-name-def)))
-               (lambda-args (mapcar #'car arglist))
+               (arg-names (mapcar #'car arglist))
+               (lambda-args
+                (let (args optional)
+                  (dolist (arg arglist (nreverse args))
+                    (when (and (or (eq (nth 3 arg) '&optional)
+                                   (eq (nth 3 arg) :optional))
+                               (not optional))
+                      (push '&optional args)
+                      (setq optional t))
+                    (push (car arg) args))))
                (async? (plist-get specs :async))
-               (timeout-expr (if (plist-member specs :timeout)
-                                 (plist-get specs :timeout)
-                               'ellm-tools-default-timeout))
+               (timeout-expr
+                (cond
+                 ((not (plist-member specs :timeout))
+                  '(ellm-tools--normalize-timeout ellm-tools-default-timeout))
+                 ((plist-get specs :timeout)
+                  `(ellm-tools--normalize-timeout ,(plist-get specs :timeout)))
+                 (nil)))
                (callback-sym (gensym "callback-"))
                (tool-sym (gensym "tool-"))
                (tool-args-sym (gensym "tool-args-"))
@@ -332,8 +357,8 @@ children of children.  Without it, offer only direct children."
             `(defun ,const-sym (,callback-sym ,@lambda-args)
                ,doc
                (let* ((,tool-sym ',const-sym)
-                      (,tool-args-sym (list ,@lambda-args))
-                      (,timeout-sym ,timeout-expr)
+                      (,tool-args-sym (list ,@arg-names))
+                      (,timeout-sym nil)
                       (,done-sym nil)
                       (,timer-sym nil)
                       (,cancel-sym nil)
@@ -354,6 +379,7 @@ children of children.  Without it, offer only direct children."
                      (progn
                        (ellm-tools--tool-call-start-hook
                         ,tool-sym ,tool-args-sym)
+                       (setq ,timeout-sym ,timeout-expr)
                        (when ,timeout-sym
                          (setq ,timer-sym
                                (run-at-time
@@ -378,7 +404,7 @@ children of children.  Without it, offer only direct children."
           `(defun ,const-sym ,lambda-args
              ,doc
              (let ((,tool-sym ',const-sym)
-                   (,tool-args-sym (list ,@lambda-args)))
+                   (,tool-args-sym (list ,@arg-names)))
                (condition-case ,err-sym
                    (progn
                      (ellm-tools--tool-call-start-hook
@@ -454,12 +480,12 @@ children of children.  Without it, offer only direct children."
 
 ;;;;; Shell
 
-(ellm-deftool shell/bash (:async t)
-  ((command :string "The Bash command to run."))
+(ellm-deftool shell/bash (:async t :timeout timeout)
+  ((command :string "The Bash command to run.")
+   (timeout :number "Maximum seconds to allow the command to run. Omit to use the standard limit." &optional))
   "Run COMMAND with Bash and return its exit code and output.
 Standard output and standard error are combined.  The command runs with no
-standard input in the frontmatter `cwd', project root, or `default-directory',
-in that order."
+standard input in the conversation working directory."
   (let* ((default-directory (ellm-tools--default-directory))
          (limit ellm-tools-bash-output-character-limit)
          (head-limit (/ (+ limit 1) 2))
@@ -513,11 +539,11 @@ in that order."
 
 (ellm-deftool files/glob (:async t)
   ((pattern :string "File glob pattern to match, for example `*.el' or `src/**/*.ts'.")
-   (path :string "Directory to search. Relative paths are resolved from the current project root or frontmatter `cwd'. Defaults to `.'." &optional)
-   (max-results :integer "Maximum number of matching paths to return. Defaults to `ellm-tools-search-result-limit'." &optional))
+   (path :string "Directory to search. Relative paths are resolved from the conversation working directory. Omit for that directory." &optional)
+   (max-results :integer "Maximum number of matching paths to return. Omit to use the standard limit." &optional))
   "Find files matching PATTERN under PATH.
-Uses `ellm-tools-glob-program' (fd by default) with
-`ellm-tools-glob-options'."
+Hidden files are included, while common dependency and repository directories
+are excluded."
   (ellm-tools--validate-pattern pattern "pattern")
   (let* ((default-directory (ellm-tools--default-directory))
          (search-path (ellm-tools--search-path path))
@@ -534,14 +560,12 @@ Uses `ellm-tools-glob-program' (fd by default) with
 
 (ellm-deftool files/grep (:async t)
   ((pattern :string "Regular expression pattern to search for.")
-   (path :string "File or directory to search. Relative paths are resolved from the current project root or frontmatter `cwd'. Defaults to `.'." &optional)
-   (max-results :integer "Maximum number of matching lines to return. Defaults to `ellm-tools-search-result-limit'." &optional)
+   (path :string "File or directory to search. Relative paths are resolved from the conversation working directory. Omit for that directory." &optional)
+   (max-results :integer "Maximum number of matching lines to return. Omit to use the standard limit." &optional)
    (glob :string "Optional path glob restricting searched files, for example `*.el' or `src/**'." &optional))
   "Search file contents for PATTERN under PATH.
-Uses `ellm-tools-grep-program' (ripgrep by default) with
-`ellm-tools-grep-options'.  The default ripgrep options include
-`--vimgrep', so matches are returned as file:line:column:text lines.
-GLOB is translated using `ellm-tools-grep-glob-options'."
+Matches are returned as file:line:column:text lines.  GLOB restricts the
+files searched."
   (ellm-tools--validate-pattern pattern "pattern")
   (when glob
     (ellm-tools--validate-pattern glob "glob")
@@ -746,8 +770,8 @@ Each issue is returned as line-range:type:message."
 
 (ellm-deftool emacs/elisp-search ()
   ((query :string "Text to fuzzy-match against Emacs Lisp function and variable names.")
-   (search-documentation :boolean "If non-nil, also search function and variable documentation." &optional)
-   (max-results :integer "Maximum number of results to return. Defaults to `ellm-tools-elisp-search-result-limit'." &optional))
+   (search-documentation :boolean "If true, also search function and variable documentation." &optional)
+   (max-results :integer "Maximum number of results to return. Omit to use the standard limit." &optional))
   "Fuzzy-search Emacs Lisp functions and variables for QUERY.
 When SEARCH-DOCUMENTATION is non-nil, also find symbols whose
 documentation contains the query words."
@@ -771,28 +795,25 @@ until the owning ellm buffer or backend session closes."
 
 (ellm-deftool tasks/todowrite ()
   ((todos :array "The complete todo list. Each item must have `content' and `status' (`pending', `in_progress', `completed', or `cancelled'); `priority' may be `high', `medium', or `low'."))
-  "Replace the current buffer's todo list with TODOS.
-This is a classic LLM todo tracker: always pass the full current list, not
-just incremental changes.  The normalized list is stored in
-`ellm-buffer-state' for backend-neutral display."
+  "Replace the current conversation's todo list with TODOS.
+Always pass the full current list, not just incremental changes."
   (ellm-tools--format-todos (ellm-update-todos todos)))
 
 ;;;;; Agents
 
 (ellm-deftool agents/launch-subagent ()
   ((prompt :string "Prompt to put in the new subagent's initial user turn.")
-   (profile :string "Optional subagent profile name from frontmatter `subagents.profiles' or global `ellm-subagents'." &optional)
-   (name :string "Optional display name for the subagent buffer and history entry." &optional)
-   (provider :string "Optional provider name from `ellm-provider-alist'. Overrides inherited/profile provider." &optional)
-   (model :string "Optional model name. Validated against configured model candidates when available." &optional)
-   (tools :array "Optional complete tool list for the child buffer, for example [`@files', `@buffers']. Overrides inherited/profile tools." &optional)
-   (system :string "Optional system prompt for the child buffer. Overrides inherited/profile system." &optional)
-   (cwd :string "Optional working directory for the child buffer. Overrides inherited/profile cwd." &optional))
-  "Launch a subagent in a new `ellm-mode' buffer and start it.
-The child buffer inherits the current buffer's frontmatter, then applies
-the selected subagent profile, then applies explicit PROVIDER/MODEL/TOOLS/
-SYSTEM/CWD overrides.  Frontmatter `subagents:' takes precedence over the
-global `ellm-subagents' variable when selecting profiles."
+   (profile :string "Optional configured subagent profile name." &optional)
+   (name :string "Optional display name for the subagent and its conversation." &optional)
+   (provider :string "Optional provider name. Overrides the inherited or profile provider." &optional)
+   (model :string "Optional model name. Validated against available model choices when possible." &optional)
+   (tools :array "Optional complete tool list for the subagent, for example [`@files', `@buffers']. Overrides inherited or profile tools." &optional)
+   (system :string "Optional system prompt for the subagent. Overrides the inherited or profile prompt." &optional)
+   (cwd :string "Optional working directory for the subagent. Overrides the inherited or profile directory." &optional))
+  "Launch a subagent in a new conversation and start it.
+The subagent inherits the current conversation's settings, applies the
+selected profile, and then applies explicit PROVIDER, MODEL, TOOLS, SYSTEM,
+and CWD overrides."
   (ellm-tools--launch-subagent
    prompt profile name provider model tools system cwd))
 
@@ -802,9 +823,9 @@ global `ellm-subagents' variable when selecting profiles."
   (ellm-tools--format-subagent-history ellm-subagent-history))
 
 (ellm-deftool agents/wait-subagent (:async t :timeout nil)
-  ((subagent :string "Subagent id from `list_subagents' or the subagent buffer name.")
-   (timeout :integer "Maximum seconds to wait. Defaults to `ellm-subagent-wait-default-timeout'." &optional)
-   (max-lines :integer "Maximum lines to return from the last assistant turn and buffer tail. Defaults to `ellm-subagent-wait-result-line-limit'." &optional))
+  ((subagent :string "Subagent id from `list_subagents' or its conversation name.")
+   (timeout :integer "Maximum seconds to wait. Omit to use the standard limit." &optional)
+   (max-lines :integer "Maximum lines to return from the last assistant turn and conversation tail. Omit to use the standard limit." &optional))
   "Wait for SUBAGENT to finish and return its latest result.
 If SUBAGENT is still running after TIMEOUT seconds, return a timeout result
 without cancelling it."
@@ -822,7 +843,7 @@ conversation buffer."
 
 (ellm-deftool web/websearch (:async t)
   ((query :string "Search query.")
-   (max-results :integer "Maximum number of web results to return. Defaults to `ellm-tools-websearch-result-limit'." &optional))
+   (max-results :integer "Maximum number of web results to return. Omit to use the standard limit." &optional))
   "Search the web using DuckDuckGo."
   (ellm-tools--validate-pattern query "query")
   (let ((limit (ellm-tools--normalized-limit
@@ -831,7 +852,7 @@ conversation buffer."
 
 (ellm-deftool web/webfetch (:async t)
   ((url :string "HTTP or HTTPS URL to fetch.")
-   (max-characters :integer "Maximum characters to return, capped by `ellm-tools-webfetch-character-limit'." &optional))
+   (max-characters :integer "Maximum characters to return, subject to the response size limit." &optional))
   "Fetch URL and return its readable textual contents.
 HTML is rendered without images in a child Emacs process.  Textual non-HTML
 responses are returned directly; unsupported binary responses are rejected."
@@ -2064,13 +2085,6 @@ FALLBACK-PROVIDER is used when FRONTMATTER has no `provider:' key."
                  id buffer name profile-name prompt frontmatter)))
     (ellm-tools--format-subagent-launch-result entry buffer)))
 
-(defun ellm-tools--normalize-wait-timeout (timeout)
-  "Return TIMEOUT normalized for `wait_subagent'."
-  (let ((value (or timeout ellm-subagent-wait-default-timeout)))
-    (unless (and (numberp value) (>= value 0))
-      (ellm-tools--error "timeout must be a non-negative number"))
-    value))
-
 (defun ellm-tools--normalize-wait-line-limit (max-lines)
   "Return MAX-LINES normalized for `wait_subagent'."
   (ellm-tools--normalized-limit
@@ -2240,7 +2254,8 @@ SUBAGENT may be a remembered id or a live buffer name."
   "Wait asynchronously for SUBAGENT, then call CALLBACK with its result."
   (let* ((target (ellm-tools--subagent-target subagent))
          (buffer (plist-get target :buffer))
-         (seconds (ellm-tools--normalize-wait-timeout timeout))
+         (seconds (ellm-tools--normalize-timeout
+                   timeout ellm-subagent-wait-default-timeout))
          (line-limit (ellm-tools--normalize-wait-line-limit max-lines))
          timer listener done)
     (cl-labels
