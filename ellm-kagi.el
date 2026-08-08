@@ -57,10 +57,10 @@ with the currently supported models returned by Kagi's `/api/init' endpoint."
 (cl-defstruct
     (ellm-kagi-provider
      (:constructor ellm-make-kagi-provider
-                   (&key session-token model models
-                         (base-url "https://assistant.kagi.com")
-                         (enable-search t) (personalization t)
-                         thinking-preset)))
+      (&key session-token model models
+            (base-url "https://assistant.kagi.com")
+            (enable-search t) (personalization t)
+            thinking-preset)))
   "Configuration for the Kagi Assistant backend.
 SESSION-TOKEN is the value of the `kagi_session' cookie, or a function
 returning it.  MODEL is Kagi's model id.  MODELS optionally supplies model
@@ -208,13 +208,13 @@ provide request defaults that may be overridden by `kagi:' frontmatter."
   (with-current-buffer buffer
     (ellm--apply-working-directory frontmatter)
     (let* ((request
-            (ellm-kagi--make-request
-             :provider provider
-             :buffer buffer
-             :conversation-id
-             (ellm--alist-get-nested frontmatter '(kagi conversation-id))
-             :branch-id
-             (ellm--alist-get-nested frontmatter '(kagi branch-id))))
+             (ellm-kagi--make-request
+              :provider provider
+              :buffer buffer
+              :conversation-id
+              (ellm--alist-get-nested frontmatter '(kagi conversation-id))
+              :branch-id
+              (ellm--alist-get-nested frontmatter '(kagi branch-id))))
            (message (ellm-kagi--last-user-content))
            (payload (ellm-kagi--message-payload provider frontmatter message)))
       (setf (ellm-kagi-request-payload request) payload)
@@ -315,7 +315,7 @@ provide request defaults that may be overridden by `kagi:' frontmatter."
 ACCEPT is the expected response type.  CONTENT-TYPE is included when non-nil."
   (append `(("Accept" . ,accept)
             ("Cookie" . ,(concat "kagi_session="
-                                  (ellm-kagi--session-token provider))))
+                                 (ellm-kagi--session-token provider))))
           (when content-type
             `(("Content-Type" . ,content-type)))))
 
@@ -354,10 +354,10 @@ current.  Retryable failures are surfaced to the core request state machine."
         process)
     (cl-labels
         ((live-p ()
-           (and (not done)
-                (or (not request)
-                    (and (not (ellm-kagi-request-cancelled request))
-                         (= serial (ellm-kagi-request-serial request)))))))
+                 (and (not done)
+                      (or (not request)
+                          (and (not (ellm-kagi-request-cancelled request))
+                               (= serial (ellm-kagi-request-serial request)))))))
       (setq
        process
        (plz method (ellm-kagi--url provider path)

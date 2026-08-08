@@ -396,9 +396,9 @@ so the provider can report a useful malformed-call error."
       text
     (condition-case nil
         (json-parse-string text :object-type 'alist
-                          :array-type 'array
-                          :null-object nil
-                          :false-object :false)
+                           :array-type 'array
+                           :null-object nil
+                           :false-object :false)
       (error text))))
 
 (defun ellm-llm--canonical-tool-param (tool name value)
@@ -513,8 +513,8 @@ reconstructed from the conversation buffer later."
           (cl-find tool-name (llm-chat-prompt-tools base-prompt)
                    :key #'llm-tool-name :test #'equal))
          (params nil)
-        (consumed 0)
-        (rest following-turns))
+         (consumed 0)
+         (rest following-turns))
     (while (and rest
                 (let ((nx (car rest)))
                   (and (equal (ellm-turn-role nx) "tool-param")
@@ -548,13 +548,13 @@ reconstructed from the conversation buffer later."
                                      (and (ellm-tool-args tool)
                                           (plist-get (car (ellm-tool-args tool))
                                                      :name))))))
-                (when arg-name
-                  (list (cons (intern arg-name)
-                              (ellm-llm--deserialize-tool-param
-                               (ellm-tools--unescape-tool-body
-                                (ellm-turn-content tool-call-turn))
-                               (ellm-llm--tool-arg-spec
-                                tool arg-name)))))))
+               (when arg-name
+                 (list (cons (intern arg-name)
+                             (ellm-llm--deserialize-tool-param
+                              (ellm-tools--unescape-tool-body
+                               (ellm-turn-content tool-call-turn))
+                              (ellm-llm--tool-arg-spec
+                               tool arg-name)))))))
             (t nil))))
       (cons args consumed))))
 
@@ -583,14 +583,14 @@ reconstructed from the conversation buffer later."
             (llm-provider-populate-tool-uses
              provider prompt (nreverse tool-uses))))
          ((equal role "reasoning")
-           (ellm-provider-restore-reasoning
-            provider prompt
-            (ellm--unescape-turn-delimiters (ellm-turn-content turn))
-            (when-let* ((id (alist-get "reasoning-state"
-                                       (ellm-turn-attrs turn)
-                                       nil nil #'equal)))
-              (ellm-reasoning-state-read id)))
-           (setq rest (cdr rest)))
+          (ellm-provider-restore-reasoning
+           provider prompt
+           (ellm--unescape-turn-delimiters (ellm-turn-content turn))
+           (when-let* ((id (alist-get "reasoning-state"
+                                      (ellm-turn-attrs turn)
+                                      nil nil #'equal)))
+             (ellm-reasoning-state-read id)))
+          (setq rest (cdr rest)))
          ((equal role "tool-result")
           (let (results)
             (while (and rest (equal (ellm-turn-role (car rest)) "tool-result"))
@@ -599,10 +599,10 @@ reconstructed from the conversation buffer later."
                      (id (alist-get "id" attrs nil nil #'equal))
                      (name (alist-get "arg" attrs nil nil #'equal)))
                 (push (make-llm-chat-prompt-tool-result
-                        :call-id id :tool-name name
-                        :result (ellm-tools--unescape-tool-body
-                                 (ellm-turn-content tr)))
-                       results)
+                       :call-id id :tool-name name
+                       :result (ellm-tools--unescape-tool-body
+                                (ellm-turn-content tr)))
+                      results)
                 (setq rest (cdr rest))))
             ;; Providers do not all represent tool results with the generic
             ;; `tool-results' role.  In particular, Claude requires them to be
@@ -614,7 +614,7 @@ reconstructed from the conversation buffer later."
           (setq rest (cdr rest)))
          ((and (equal role "assistant")
                (string-empty-p (ellm-turn-content turn)))
-           (setq rest (cdr rest)))
+          (setq rest (cdr rest)))
          (t
           (let ((content
                  (if (equal role "assistant")
@@ -642,7 +642,7 @@ reconstructed from the conversation buffer later."
 TOOL-USE is `(:name NAME :args ARGS)' as produced by `llm.el' multi-
 output.  ARGS is an alist of (ARG-SYM . VALUE)."
   (let* ((name (plist-get tool-use :name))
-          (args (plist-get tool-use :args)))
+         (args (plist-get tool-use :args)))
     (ellm--insert-tool-call-with-params name id args)
     (ellm--flush-pending-fold)))
 

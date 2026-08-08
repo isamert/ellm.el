@@ -151,7 +151,7 @@ not set those prompt fields."
   "Return non-nil when PARAM configures Responses prompt caching."
   (member (car-safe param)
           '(prompt_cache_key :prompt_cache_key "prompt_cache_key"
-            prompt_cache_options :prompt_cache_options "prompt_cache_options")))
+             prompt_cache_options :prompt_cache_options "prompt_cache_options")))
 
 (defun ellm-codex--cache-enabled-p (frontmatter)
   "Return whether FRONTMATTER enables Codex prompt caching."
@@ -234,8 +234,8 @@ BODY is a string and CONTENT-TYPE describes it.  HTTP errors are returned;
 transport errors are signaled."
   (condition-case error
       (let ((response (plz method url
-                           :headers `(("Content-Type" . ,content-type))
-                           :body body :as 'response)))
+                        :headers `(("Content-Type" . ,content-type))
+                        :body body :as 'response)))
         (cons (plz-response-status response)
               (ellm-codex--json-parse (plz-response-body response))))
     (plz-error
@@ -647,11 +647,11 @@ browser callback.  Interactively, the first configured Codex provider is used."
   (let* ((configured (llm-chat-prompt-reasoning prompt))
          (configured (and configured (format "%s" configured)))
          (default
-          (or (plist-get
-               (ellm-codex--model-metadata
-                (llm-openai-chat-model provider))
-               :default)
-              "medium"))
+           (or (plist-get
+                (ellm-codex--model-metadata
+                 (llm-openai-chat-model provider))
+                :default)
+               "medium"))
          (effort (pcase configured
                    ((or 'nil "") default)
                    ("light" "low")
@@ -768,30 +768,30 @@ STREAMING non-nil requests an event stream."
   (let* ((tools (llm-chat-prompt-tools prompt))
          (instructions (ellm-codex--instructions prompt))
          (request
-          (append
-           (list :model (llm-openai-chat-model provider)
-                 :input (ellm-codex--input prompt)
-                 :store :false
-                 :stream (if streaming t :false)
-                 :include ["reasoning.encrypted_content"]
-                 :reasoning (ellm-codex--reasoning-parameter provider prompt))
-           (when (not (string-empty-p instructions))
-             (list :instructions instructions))
-           (when tools
-             (list
-              :tools
-              (vconcat
-               (mapcar
-                (lambda (tool)
-                  (list :type "function"
-                        :name (llm-tool-name tool)
-                        :description (llm-tool-description tool)
-                        :parameters
-                        (llm-provider-utils-openai-arguments
-                         (llm-tool-args tool))))
-                tools))
-              :tool_choice "auto"
-              :parallel_tool_calls t)))))
+           (append
+            (list :model (llm-openai-chat-model provider)
+                  :input (ellm-codex--input prompt)
+                  :store :false
+                  :stream (if streaming t :false)
+                  :include ["reasoning.encrypted_content"]
+                  :reasoning (ellm-codex--reasoning-parameter provider prompt))
+            (when (not (string-empty-p instructions))
+              (list :instructions instructions))
+            (when tools
+              (list
+               :tools
+               (vconcat
+                (mapcar
+                 (lambda (tool)
+                   (list :type "function"
+                         :name (llm-tool-name tool)
+                         :description (llm-tool-description tool)
+                         :parameters
+                         (llm-provider-utils-openai-arguments
+                          (llm-tool-args tool))))
+                 tools))
+               :tool_choice "auto"
+               :parallel_tool_calls t)))))
     (llm-provider-merge-non-standard-params
      (llm-chat-prompt-non-standard-params prompt) request)))
 
@@ -864,8 +864,8 @@ The handler passes partial results to RECEIVER and errors to ERR-RECEIVER."
                  (when (plist-get item :encrypted_content)
                    (funcall receiver
                             (list :multi-turn
-                                  (list :ellm-codex-reasoning-items
-                                        (vector item))))))
+                              (list :ellm-codex-reasoning-items
+                                (vector item))))))
                 ("function_call"
                  (funcall
                   receiver
@@ -920,7 +920,7 @@ The handler passes partial results to RECEIVER and errors to ERR-RECEIVER."
            :type 'error
            :data (json-serialize
                   (list :error
-                        (list :message (error-message-string error)))))))))))
+                    (list :message (error-message-string error)))))))))))
 
 (defun ellm-codex--consume-sse (input media-type)
   "Dispatch complete SSE records from INPUT through MEDIA-TYPE.
@@ -982,50 +982,50 @@ SSE responses whose server omits the Content-Type header."
         (media-type (cdr media-type))
         (plz-curl-default-args (cons "--no-buffer" plz-curl-default-args)))
     (plz 'post url
-         :headers (append headers '(("Content-Type" . "application/json")))
-         :body (encode-coding-string (json-serialize data) 'utf-8)
-         :as 'string
-         :filter
-         (lambda (process output)
-           (ellm-codex--insert-process-output process output)
-           (pcase stream-state
-             ('streaming
-              (setq sse-input
-                    (ellm-codex--consume-sse
-                     (concat sse-input output) media-type)))
-             ('ignore nil)
-             (_
-              (setq wire-input (concat wire-input output))
-              (let ((continue t))
-                (while (and continue (string-match "\r?\n\r?\n" wire-input))
-                  (let* ((end (match-end 0))
-                         (header (substring wire-input 0 end))
-                         (remaining (substring wire-input end))
-                         (status
-                          (and (string-match
-                                "\\`HTTP/[^ ]+ \\([0-9]+\\)" header)
-                               (string-to-number (match-string 1 header)))))
-                    (setq wire-input remaining)
-                    (cond
-                     ((and status (<= 200 status 299)
-                           (not (string-match-p "Connection established" header)))
-                      (setq stream-state 'streaming
-                            continue nil
-                            sse-input
-                            (ellm-codex--consume-sse remaining media-type)
-                            wire-input ""))
-                     ((or (and status (<= 100 status 199))
-                          (and status (<= 300 status 399))
-                          (string-match-p "Connection established" header)))
-                     (t
-                      (setq stream-state 'ignore
-                            continue nil
-                            wire-input "")))))))))
-         :then (lambda (_body) (funcall on-success nil))
-         :else (lambda (error) (ellm-codex--stream-error error on-error))
-         :connect-timeout llm-request-plz-connect-timeout
-         :timeout llm-request-plz-timeout
-         :noquery t)))
+      :headers (append headers '(("Content-Type" . "application/json")))
+      :body (encode-coding-string (json-serialize data) 'utf-8)
+      :as 'string
+      :filter
+      (lambda (process output)
+        (ellm-codex--insert-process-output process output)
+        (pcase stream-state
+          ('streaming
+           (setq sse-input
+                 (ellm-codex--consume-sse
+                  (concat sse-input output) media-type)))
+          ('ignore nil)
+          (_
+           (setq wire-input (concat wire-input output))
+           (let ((continue t))
+             (while (and continue (string-match "\r?\n\r?\n" wire-input))
+               (let* ((end (match-end 0))
+                      (header (substring wire-input 0 end))
+                      (remaining (substring wire-input end))
+                      (status
+                       (and (string-match
+                             "\\`HTTP/[^ ]+ \\([0-9]+\\)" header)
+                            (string-to-number (match-string 1 header)))))
+                 (setq wire-input remaining)
+                 (cond
+                  ((and status (<= 200 status 299)
+                        (not (string-match-p "Connection established" header)))
+                   (setq stream-state 'streaming
+                         continue nil
+                         sse-input
+                         (ellm-codex--consume-sse remaining media-type)
+                         wire-input ""))
+                  ((or (and status (<= 100 status 199))
+                       (and status (<= 300 status 399))
+                       (string-match-p "Connection established" header)))
+                  (t
+                   (setq stream-state 'ignore
+                         continue nil
+                         wire-input "")))))))))
+      :then (lambda (_body) (funcall on-success nil))
+      :else (lambda (error) (ellm-codex--stream-error error on-error))
+      :connect-timeout llm-request-plz-connect-timeout
+      :timeout llm-request-plz-timeout
+      :noquery t)))
 
 (cl-defmethod llm-provider-collect-streaming-tool-uses
   ((_provider ellm-codex-provider) data)
@@ -1128,87 +1128,87 @@ response, and ERROR-CALLBACK receives failures.  MULTI-OUTPUT has its standard
         current-result stream-failed completed)
     (cl-labels
         ((send
-           (retried)
-           (unless (ellm-codex-request-cancelled request)
-             (setf
-              (ellm-codex-request-process request)
-              (ellm-codex--stream-request
-               (llm-provider-chat-streaming-url provider)
-               :headers (llm-provider-headers provider)
-               :data (llm-provider-chat-request provider prompt t)
-               :media-type
-               (llm-provider-streaming-media-handler
-                provider
-                (lambda (data)
-                  (when (plist-get data :ellm-codex-completed)
-                    (setq completed t
-                          data (cl-loop for (key value) on data by #'cddr
-                                        unless (eq key :ellm-codex-completed)
-                                        append (list key value))))
-                  (when data
-                    (setq current-result
-                          (llm-provider-utils-streaming-accumulate
-                           current-result data))
-                    (when (and partial-callback
-                               (not (ellm-codex-request-cancelled request)))
-                      (when-let* ((value (if multi-output current-result
-                                           (plist-get current-result :text))))
+          (retried)
+          (unless (ellm-codex-request-cancelled request)
+            (setf
+             (ellm-codex-request-process request)
+             (ellm-codex--stream-request
+              (llm-provider-chat-streaming-url provider)
+              :headers (llm-provider-headers provider)
+              :data (llm-provider-chat-request provider prompt t)
+              :media-type
+              (llm-provider-streaming-media-handler
+               provider
+               (lambda (data)
+                 (when (plist-get data :ellm-codex-completed)
+                   (setq completed t
+                         data (cl-loop for (key value) on data by #'cddr
+                                       unless (eq key :ellm-codex-completed)
+                                       append (list key value))))
+                 (when data
+                   (setq current-result
+                         (llm-provider-utils-streaming-accumulate
+                          current-result data))
+                   (when (and partial-callback
+                              (not (ellm-codex-request-cancelled request)))
+                     (when-let* ((value (if multi-output current-result
+                                          (plist-get current-result :text))))
+                       (llm-provider-utils-callback-in-buffer
+                        buffer partial-callback value)))))
+               (lambda (message)
+                 (setq stream-failed t)
+                 (unless (ellm-codex-request-cancelled request)
+                   (llm-provider-utils-callback-in-buffer
+                    buffer error-callback 'error message))))
+              :on-success
+              (lambda (_data)
+                (unless (or stream-failed
+                            (ellm-codex-request-cancelled request))
+                  (with-current-buffer
+                      (if (buffer-live-p buffer)
+                          buffer
+                        (generate-new-buffer " *ellm-codex-temp*" t))
+                    (if (not completed)
                         (llm-provider-utils-callback-in-buffer
-                         buffer partial-callback value)))))
-                (lambda (message)
-                  (setq stream-failed t)
+                         buffer error-callback 'error
+                         "Codex stream ended before response.completed")
+                      (when (and (plist-get current-result :tool-uses)
+                                 (plist-get current-result :multi-turn)
+                                 (not (plist-get current-result :text)))
+                        (llm-provider-utils-append-to-prompt
+                         prompt nil nil (plist-get current-result :multi-turn)
+                         'assistant))
+                      (llm-provider-utils-process-result
+                       provider prompt current-result multi-output
+                       (lambda (result)
+                         (unless (ellm-codex-request-cancelled request)
+                           (llm-provider-utils-callback-in-buffer
+                            buffer response-callback result)))
+                       (lambda (type message)
+                         (unless (ellm-codex-request-cancelled request)
+                           (llm-provider-utils-callback-in-buffer
+                            buffer error-callback type message))))))))
+              :on-error
+              (lambda (type data)
+                (if (and (eq type 'llm-request-authentication-error)
+                         (not retried)
+                         (not (ellm-codex-request-cancelled request)))
+                    (condition-case error
+                        (progn
+                          (ellm-codex--refresh-auth provider t)
+                          (setq current-result nil
+                                stream-failed nil
+                                completed nil)
+                          (send t))
+                      (error
+                       (unless (ellm-codex-request-cancelled request)
+                         (llm-provider-utils-callback-in-buffer
+                          buffer error-callback (car error)
+                          (error-message-string error)))))
                   (unless (ellm-codex-request-cancelled request)
                     (llm-provider-utils-callback-in-buffer
-                     buffer error-callback 'error message))))
-               :on-success
-               (lambda (_data)
-                 (unless (or stream-failed
-                             (ellm-codex-request-cancelled request))
-                   (with-current-buffer
-                       (if (buffer-live-p buffer)
-                           buffer
-                         (generate-new-buffer " *ellm-codex-temp*" t))
-                     (if (not completed)
-                         (llm-provider-utils-callback-in-buffer
-                          buffer error-callback 'error
-                          "Codex stream ended before response.completed")
-                       (when (and (plist-get current-result :tool-uses)
-                                  (plist-get current-result :multi-turn)
-                                  (not (plist-get current-result :text)))
-                         (llm-provider-utils-append-to-prompt
-                          prompt nil nil (plist-get current-result :multi-turn)
-                          'assistant))
-                       (llm-provider-utils-process-result
-                        provider prompt current-result multi-output
-                        (lambda (result)
-                          (unless (ellm-codex-request-cancelled request)
-                            (llm-provider-utils-callback-in-buffer
-                             buffer response-callback result)))
-                        (lambda (type message)
-                          (unless (ellm-codex-request-cancelled request)
-                            (llm-provider-utils-callback-in-buffer
-                             buffer error-callback type message))))))))
-               :on-error
-               (lambda (type data)
-                 (if (and (eq type 'llm-request-authentication-error)
-                          (not retried)
-                          (not (ellm-codex-request-cancelled request)))
-                     (condition-case error
-                         (progn
-                           (ellm-codex--refresh-auth provider t)
-                           (setq current-result nil
-                                 stream-failed nil
-                                 completed nil)
-                           (send t))
-                       (error
-                        (unless (ellm-codex-request-cancelled request)
-                          (llm-provider-utils-callback-in-buffer
-                           buffer error-callback (car error)
-                           (error-message-string error)))))
-                   (unless (ellm-codex-request-cancelled request)
-                     (llm-provider-utils-callback-in-buffer
-                      buffer error-callback type
-                      (if (stringp data) data (format "%s" data)))))))))))
+                     buffer error-callback type
+                     (if (stringp data) data (format "%s" data)))))))))))
       (send nil))
     request))
 

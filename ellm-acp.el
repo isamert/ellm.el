@@ -444,7 +444,7 @@ Call ON-READY with its effect on success, or ON-ERROR on failure."
              (lambda () (funcall on-ready 'live)) on-error option)
           (funcall on-error
                    `(:message ,(format "ACP config option `%s' is unavailable"
-                                      config-id))))))
+                                       config-id))))))
      (t
       (funcall on-ready
                (ellm-provider-config-effect provider path buffer))))))
@@ -489,9 +489,9 @@ Call ON-READY with its effect on success, or ON-ERROR on failure."
     (let* ((connection (ellm-acp--ensure-connection provider buffer))
            (prompt-text (ellm-acp--last-user-content))
            (request
-            (ellm-acp--make-request
-             :connection connection :provider provider
-             :frontmatter frontmatter :prompt prompt-text)))
+             (ellm-acp--make-request
+              :connection connection :provider provider
+              :frontmatter frontmatter :prompt prompt-text)))
       (setf (ellm-acp--connection-current-request connection) request)
       request)))
 
@@ -691,7 +691,7 @@ Return non-nil when an event sink accepted it."
                (plist-get (plist-get message :result) :stopReason))
       (setf (ellm-acp--connection-prompt-request-id connection) nil)
       (when-let* ((request
-                   (ellm-acp--connection-current-request connection)))
+                    (ellm-acp--connection-current-request connection)))
         (ellm-acp--emit-event request '(:type complete))))))
 
 (defun ellm-acp--log-wire (connection direction line)
@@ -722,7 +722,7 @@ Return non-nil when an event sink accepted it."
       (when (buffer-live-p buffer)
         (with-current-buffer buffer
           (when-let* ((request
-                       (ellm-acp--connection-current-request connection))
+                        (ellm-acp--connection-current-request connection))
                       ((ellm-acp--request-live-p request)))
             (ellm-acp--emit-event
              request
@@ -822,9 +822,9 @@ inactivity is timed centrally by ellm."
   (unless (ellm-acp--connection-initialized connection)
     (let ((result (ellm-acp--request-sync
                    connection :initialize
-                    `(:protocolVersion 1
-                      :clientCapabilities ,(ellm-acp--client-capabilities)
-                      :clientInfo (:name "ellm" :title "ellm" :version "0.0.1")))))
+                   `(:protocolVersion 1
+                     :clientCapabilities ,(ellm-acp--client-capabilities)
+                     :clientInfo (:name "ellm" :title "ellm" :version "0.0.1")))))
       (setf (ellm-acp--connection-agent-capabilities connection)
             (plist-get result :agentCapabilities))
       (setf (ellm-acp--connection-initialized connection) t)
@@ -1267,7 +1267,7 @@ Ignore a trailing user input and the empty assistant placeholder created by
      ((or (not model) (equal model current))
       (funcall on-ready))
      ((not config-id)
-       (funcall on-ready))
+      (funcall on-ready))
      (t
       (ellm-acp--set-model connection config-id model on-ready on-error)))))
 
@@ -1279,7 +1279,7 @@ Ignore a trailing user input and the empty assistant placeholder created by
      ((or (not model) (equal model current))
       nil)
      ((not config-id)
-       nil)
+      nil)
      (t
       (ellm-acp--set-model-sync connection config-id model)))))
 
@@ -1315,9 +1315,9 @@ called with the raw response before ON-READY."
     (ellm-acp--request
      connection :session/set_config_option params
      :success-fn (lambda (result)
-                    (when (plist-member result :configOptions)
-                      (ellm-acp--update-config-options
-                       connection (plist-get result :configOptions)))
+                   (when (plist-member result :configOptions)
+                     (ellm-acp--update-config-options
+                      connection (plist-get result :configOptions)))
                    (when after-success
                      (funcall after-success result))
                    (funcall on-ready))
@@ -1569,14 +1569,14 @@ called with the raw response before ON-READY."
          (type (plist-get option :type))
          (values (ellm-acp--config-option-value-candidates option)))
     (append (list id
-                   :ann (or category type "config")
-                   :type (pcase type
-                           ("select" 'enum)
-                           ("boolean" 'boolean)
-                           (_ 'string))
-                   :editable (member type '("select" "boolean")))
+                  :ann (or category type "config")
+                  :type (pcase type
+                          ("select" 'enum)
+                          ("boolean" 'boolean)
+                          (_ 'string))
+                  :editable (member type '("select" "boolean")))
             (when-let* ((desc (or (plist-get option :description)
-                                   (plist-get option :name))))
+                                  (plist-get option :name))))
               (list :desc desc))
             (when (plist-member option :currentValue)
               (list :current (plist-get option :currentValue)))
@@ -1613,8 +1613,8 @@ called with the raw response before ON-READY."
                             (ellm-acp--live-model-config-id connection)))
              (live
               (cl-loop for option in (and connection
-                                           (ellm-acp--connection-config-options
-                                            connection))
+                                          (ellm-acp--connection-config-options
+                                           connection))
                        for id = (plist-get option :id)
                        unless (or (equal id "model")
                                   (equal id model-id))
@@ -2103,7 +2103,7 @@ When CONNECTION is non-nil, remember marker ranges for incremental updates."
           (when-let* ((kind (plist-get update :kind)))
             (list :kind kind))
           (when-let* ((status (and (not omit-status)
-                                    (plist-get update :status))))
+                                   (plist-get update :status))))
             (unless (member status '("pending" "in_progress"))
               (list :status status)))))
 
@@ -2130,9 +2130,9 @@ When CONNECTION is non-nil, remember marker ranges for incremental updates."
   (cond
    ((null raw-input) nil)
    ((and (listp raw-input) (keywordp (car raw-input)))
-     (cl-loop for (key value) on raw-input by #'cddr
-              collect (cons (substring (symbol-name key) 1)
-                            (ellm-acp--json-serializable-value value))))
+    (cl-loop for (key value) on raw-input by #'cddr
+             collect (cons (substring (symbol-name key) 1)
+                           (ellm-acp--json-serializable-value value))))
    ((listp raw-input) raw-input)
    (t `((input . ,(ellm-acp--json-serializable-value raw-input))))))
 
@@ -2476,7 +2476,7 @@ nested `tool-param' turns."
            (ellm-acp--raw-output-text (plist-get update :rawOutput)))
       (and (plist-member update :rawOutput)
            (ellm-acp--json-section "Raw output"
-                                    (plist-get update :rawOutput)))))
+                                   (plist-get update :rawOutput)))))
 
 (defun ellm-acp--raw-output-text (raw-output)
   "Return readable text from ACP RAW-OUTPUT, if present."
@@ -2651,35 +2651,35 @@ Call ON-READY after applying the value, or ON-ERROR on failure."
         (when on-ready
           (funcall on-ready))
       (let* ((buffer (current-buffer))
-           (config-id (plist-get option :id))
-           (current (and (plist-member option :currentValue)
-                         (ellm-acp--config-value-label
-                          (plist-get option :currentValue))))
-           (saved-cell (ellm--alist-get-nested-cell
-                        (ellm--parse-frontmatter) path))
-           (default (if saved-cell
-                        (ellm-acp--config-value-label (cdr saved-cell))
-                      current))
-           (value (completing-read
-                   (ellm-acp--config-value-prompt option default current)
-                   values nil t nil nil default))
-           (name (or (plist-get option :name) config-id)))
-      (message "ellm ACP: applying %s=%s..." name value)
-      (ellm-acp--set-config-option
-       connection config-id value
-       (lambda ()
-         (when (buffer-live-p buffer)
-           (with-current-buffer buffer
-             (ellm--set-frontmatter-value path value)))
-         (message "ellm ACP: %s set to %s" name value)
-         (when on-ready
-           (funcall on-ready)))
-       (or on-error
-           (lambda (error-object)
-             (message "ellm ACP: failed to set %s: %s"
-                      name (or (plist-get error-object :message)
-                               error-object))))
-       option)))))
+             (config-id (plist-get option :id))
+             (current (and (plist-member option :currentValue)
+                           (ellm-acp--config-value-label
+                            (plist-get option :currentValue))))
+             (saved-cell (ellm--alist-get-nested-cell
+                          (ellm--parse-frontmatter) path))
+             (default (if saved-cell
+                          (ellm-acp--config-value-label (cdr saved-cell))
+                        current))
+             (value (completing-read
+                     (ellm-acp--config-value-prompt option default current)
+                     values nil t nil nil default))
+             (name (or (plist-get option :name) config-id)))
+        (message "ellm ACP: applying %s=%s..." name value)
+        (ellm-acp--set-config-option
+         connection config-id value
+         (lambda ()
+           (when (buffer-live-p buffer)
+             (with-current-buffer buffer
+               (ellm--set-frontmatter-value path value)))
+           (message "ellm ACP: %s set to %s" name value)
+           (when on-ready
+             (funcall on-ready)))
+         (or on-error
+             (lambda (error-object)
+               (message "ellm ACP: failed to set %s: %s"
+                        name (or (plist-get error-object :message)
+                                 error-object))))
+         option)))))
 
 (defun ellm-acp--config-value-label (value)
   "Return VALUE as a human-readable ACP config value."

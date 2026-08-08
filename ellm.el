@@ -359,8 +359,8 @@ call from a defcustom :set before the faces' `defface' forms have run)."
   (pcase-dolist (`(,face ,height ,inherit) ellm--heading-specs)
     (when (facep face)
       (set-face-attribute face nil
-                           :height (if val height 'unspecified)
-                           :inherit inherit :weight 'bold)))
+                          :height (if val height 'unspecified)
+                          :inherit inherit :weight 'bold)))
   (pcase-dolist (`(,face ,height) ellm--turn-heading-specs)
     (when (facep face)
       (set-face-attribute face nil
@@ -1046,9 +1046,9 @@ Also fontifies YAML frontmatter if present and overlaps the region."
                (container (ellm--code-container-bounds-at open))
                (container-end (and container (cdr container)))
                (close (and container-end
-                            (< (1+ index) count)
-                            (< (aref vec (1+ index)) container-end)
-                            (aref vec (1+ index))))
+                           (< (1+ index) count)
+                           (< (aref vec (1+ index)) container-end)
+                           (aref vec (1+ index))))
                (body-end (or close container-end))
                (block-end (if close
                               (save-excursion
@@ -1848,9 +1848,9 @@ BEG END OLD-LEN are passed by `after-change'."
       (pcase-let ((`(,scan-beg . ,scan-end)
                    (ellm--turn-neighborhood-bounds beg end)))
         (unless (and (not (ellm--refresh-fences-in-region scan-beg scan-end))
-                      (not (ellm--in-code-block-p beg))
-                      (not (ellm--in-code-block-p
-                            (max (point-min) (1- beg)))))
+                     (not (ellm--in-code-block-p beg))
+                     (not (ellm--in-code-block-p
+                           (max (point-min) (1- beg)))))
           (setq ellm--fence-structure-changed t))))
     (when frontmatter-structure-changed
       ;; Frontmatter can contain literal ``` and Markdown-looking lines.  A
@@ -2120,15 +2120,15 @@ the user can edit it without the glyph reappearing on every keystroke."
                         (and revealed-beg revealed-end
                              (<= revealed-beg line-beg)
                              (<= line-beg revealed-end)))
-               (let* ((header (match-string-no-properties 1))
-                      (role (match-string-no-properties 2))
-                      (title (ellm--turn-pipe-title
-                              (buffer-substring-no-properties
-                               (match-end 2) (match-end 0))))
-                      (continuation (ellm--continuation-header-p header))
-                      (ov (make-overlay line-beg line-end nil t nil)))
-                 (ellm--apply-pretty-separator
-                  ov role continuation title)))))))))
+              (let* ((header (match-string-no-properties 1))
+                     (role (match-string-no-properties 2))
+                     (title (ellm--turn-pipe-title
+                             (buffer-substring-no-properties
+                              (match-end 2) (match-end 0))))
+                     (continuation (ellm--continuation-header-p header))
+                     (ov (make-overlay line-beg line-end nil t nil)))
+                (ellm--apply-pretty-separator
+                 ov role continuation title)))))))))
 
 (defun ellm--reveal-separator-at-point ()
   "Temporarily reveal the raw turn delimiter line under point."
@@ -3804,7 +3804,7 @@ keep protocol-specific mutable state there, but lifecycle state lives here."
 
 (defconst ellm-backend-event-types
   '(stream usage tool-call tool-update tool-result extension
-    operation continue complete failure)
+           operation continue complete failure)
   "Event types accepted by the core request reducer.
 
 `stream' uses `:mode' `append' with `:channel', `:text', and optional `:id',
@@ -3890,8 +3890,8 @@ Return non-nil when a live top-level assistant header was updated."
                  marker
                  `(("ts" . ,(ellm--timestamp finished-at))
                    ("took" . ,(ellm--format-elapsed-time
-                                (float-time
-                                 (time-subtract finished-at started-at))))))
+                               (float-time
+                                (time-subtract finished-at started-at))))))
                 (setq updated t)))))
       (when (markerp marker)
         (set-marker marker nil))
@@ -4308,9 +4308,9 @@ MESSAGE-TEXT is reported after cleanup when non-nil."
      :desc "ACP related configurations."
      :children (("session-id" :ann "string"
                  :desc "ACP session id used to continue an existing session.")
-                 ("additional-directories" :ann "list"
-                  :desc "Additional ACP workspace roots sent on session lifecycle requests."
-                  :type directories :editable t)
+                ("additional-directories" :ann "list"
+                 :desc "Additional ACP workspace roots sent on session lifecycle requests."
+                 :type directories :editable t)
                 ("config" :ann "map"
                  :desc "ACP session config options advertised by the active agent."
                  :children ellm--capf-acp-config-entries))))
@@ -4598,14 +4598,14 @@ when POS is not inside any token."
                 (and (not (bolp))
                      (not (string-match-p "[ \t\[\]{},:\"'\n]"
                                           (char-to-string (char-before)))))))
-        (when (or after-tok before-tok)
-          (let ((end (save-excursion
-                       (skip-chars-forward token-char)
-                       (point)))
-                (beg (save-excursion
-                       (skip-chars-backward token-char)
-                       (point))))
-            (cons beg end)))))))
+          (when (or after-tok before-tok)
+            (let ((end (save-excursion
+                         (skip-chars-forward token-char)
+                         (point)))
+                  (beg (save-excursion
+                         (skip-chars-backward token-char)
+                         (point))))
+              (cons beg end)))))))
 
 (defun ellm--frontmatter-capf--inline-token-at (pos line-value-beg line-value-end)
   "Return (BEG . END) for the token at POS within an inline value region.
@@ -5268,9 +5268,9 @@ this project.  Without it, offer only main conversation buffers."
                   (language (org-element-property :language context)))
         (setq mode (intern (concat language "-mode")))))
     (thread-last (symbol-name mode)
-       (string-remove-suffix "-mode")
-       (string-remove-suffix "-ts")
-       (replace-regexp-in-string "interaction\\'" ""))))
+                 (string-remove-suffix "-mode")
+                 (string-remove-suffix "-ts")
+                 (replace-regexp-in-string "interaction\\'" ""))))
 
 (defun ellm--region-context-info (root)
   "Return Markdown fence info for the active region relative to ROOT."
@@ -5577,29 +5577,29 @@ When REMOVAL is non-nil, return only settings currently present in frontmatter."
   (with-current-buffer buffer
     (let ((frontmatter (ellm--parse-frontmatter)))
       (cl-labels
-        ((walk (entries prefix)
-           (let (result)
-             (dolist (entry entries result)
-               (let* ((key (car entry))
-                      (spec (cdr entry))
-                      (path (append prefix (list (intern key))))
-                      (children (ellm--config-entry-children spec)))
-                 (if children
-                     (setq result (append result (walk children path)))
-                   (let* ((cell (and removal
-                                     (ellm--alist-get-nested-cell
-                                      frontmatter path)))
-                          (effect
-                           (or (ellm-provider-config-effect
-                                provider path buffer)
-                               (and cell 'next-send))))
-                     (when (and (plist-get spec :editable)
-                                effect
-                                (or (not removal) cell))
-                       (setq result
-                             (append result
-                                     (list (list :path path :spec spec
-                                                 :effect effect))))))))))))
+          ((walk (entries prefix)
+                 (let (result)
+                   (dolist (entry entries result)
+                     (let* ((key (car entry))
+                            (spec (cdr entry))
+                            (path (append prefix (list (intern key))))
+                            (children (ellm--config-entry-children spec)))
+                       (if children
+                           (setq result (append result (walk children path)))
+                         (let* ((cell (and removal
+                                           (ellm--alist-get-nested-cell
+                                            frontmatter path)))
+                                (effect
+                                 (or (ellm-provider-config-effect
+                                      provider path buffer)
+                                     (and cell 'next-send))))
+                           (when (and (plist-get spec :editable)
+                                      effect
+                                      (or (not removal) cell))
+                             (setq result
+                                   (append result
+                                           (list (list :path path :spec spec
+                                                       :effect effect))))))))))))
         (walk (ellm--frontmatter-capf--key-entries nil) nil)))))
 
 (defun ellm--config-current (provider setting frontmatter)
@@ -5762,48 +5762,48 @@ With prefix argument REMOVE, remove the selected frontmatter setting instead."
         (setq frontmatter (ellm--parse-frontmatter)
               provider (ellm--resolve-provider frontmatter)))
       (let* ((settings (ellm--config-settings provider buffer remove))
-           (choices
-            (mapcar (lambda (setting)
-                      (cons (ellm--config-choice-label
-                             provider setting frontmatter)
-                            setting))
-                    settings)))
-      (unless choices
-        (user-error "ellm: provider exposes no editable settings"))
-      (let* ((selected (completing-read "Setting: " choices nil t))
-             (setting (cdr (assoc selected choices)))
-             (path (plist-get setting :path))
-             (effect (plist-get setting :effect)))
-        (if remove
-            (progn
-              (ellm--delete-frontmatter-value path)
-              (message (if (eq effect 'live)
-                           "ellm: %s removed; the existing live session is unchanged"
-                         "ellm: %s removed")
-                       (ellm--config-path-string path)))
-          (let ((value (ellm--config-read-value
-                        provider setting frontmatter)))
-            (when (eq effect 'live)
-              (setq ellm--config-in-flight path))
-            (condition-case err
-                (ellm-provider-apply-config
-                 provider path value frontmatter buffer
-                 (lambda (status)
-                   (when (buffer-live-p buffer)
-                     (with-current-buffer buffer
-                       (setq ellm--config-in-flight nil)
-                       (ellm--set-frontmatter-value path value)
-                       (ellm--config-finish-message path (or status effect)))))
-                 (lambda (error-object)
-                   (when (buffer-live-p buffer)
-                     (with-current-buffer buffer
-                       (setq ellm--config-in-flight nil)))
-                   (message "ellm: failed to set %s: %s"
-                            (ellm--config-path-string path)
-                            (ellm--config-error-message error-object))))
-              (error
-               (setq ellm--config-in-flight nil)
-               (signal (car err) (cdr err)))))))))))
+             (choices
+              (mapcar (lambda (setting)
+                        (cons (ellm--config-choice-label
+                               provider setting frontmatter)
+                              setting))
+                      settings)))
+        (unless choices
+          (user-error "ellm: provider exposes no editable settings"))
+        (let* ((selected (completing-read "Setting: " choices nil t))
+               (setting (cdr (assoc selected choices)))
+               (path (plist-get setting :path))
+               (effect (plist-get setting :effect)))
+          (if remove
+              (progn
+                (ellm--delete-frontmatter-value path)
+                (message (if (eq effect 'live)
+                             "ellm: %s removed; the existing live session is unchanged"
+                           "ellm: %s removed")
+                         (ellm--config-path-string path)))
+            (let ((value (ellm--config-read-value
+                          provider setting frontmatter)))
+              (when (eq effect 'live)
+                (setq ellm--config-in-flight path))
+              (condition-case err
+                  (ellm-provider-apply-config
+                   provider path value frontmatter buffer
+                   (lambda (status)
+                     (when (buffer-live-p buffer)
+                       (with-current-buffer buffer
+                         (setq ellm--config-in-flight nil)
+                         (ellm--set-frontmatter-value path value)
+                         (ellm--config-finish-message path (or status effect)))))
+                   (lambda (error-object)
+                     (when (buffer-live-p buffer)
+                       (with-current-buffer buffer
+                         (setq ellm--config-in-flight nil)))
+                     (message "ellm: failed to set %s: %s"
+                              (ellm--config-path-string path)
+                              (ellm--config-error-message error-object))))
+                (error
+                 (setq ellm--config-in-flight nil)
+                 (signal (car err) (cdr err)))))))))))
 
 (defun ellm--command-frontmatter ()
   "Return frontmatter for the current command context, if available."
@@ -5923,7 +5923,7 @@ session metadata over static provider configuration.")
 Call ON-READY when model candidates are available, or ON-ERROR on failure.")
 
 (cl-defmethod ellm-provider-prepare-new-buffer
-    (_provider _frontmatter _buffer on-ready _on-error)
+  (_provider _frontmatter _buffer on-ready _on-error)
   "Default preparation for providers without session setup."
   (funcall on-ready))
 
@@ -5934,7 +5934,7 @@ FRONTMATTER is the parsed YAML frontmatter after the selected model was saved.
 Implementations call ON-READY when complete, or ON-ERROR on failure.")
 
 (cl-defmethod ellm-provider-configure-new-buffer
-    (_provider _frontmatter _buffer on-ready _on-error)
+  (_provider _frontmatter _buffer on-ready _on-error)
   "Default new-buffer configuration for providers without dynamic options."
   (funcall on-ready))
 
@@ -5969,7 +5969,7 @@ SUMMARY is the editable turn body and STATE is its validated sidecar plist, or
 nil when the state reference is unavailable.")
 
 (cl-defmethod ellm-provider-restore-reasoning
-    (_provider _prompt _summary _state)
+  (_provider _prompt _summary _state)
   "Ignore reasoning turns for providers without restoration support."
   nil)
 
@@ -6034,7 +6034,7 @@ Implementations should avoid frontmatter rewrites that would invalidate the
 completion-at-point bounds when possible.")
 
 (cl-defmethod ellm-provider-start-session-for-model-completion
-    (_provider _frontmatter _buffer)
+  (_provider _frontmatter _buffer)
   "Default model-completion session start implementation."
   nil)
 
