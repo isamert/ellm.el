@@ -227,7 +227,8 @@ lookups are not cached so a later completion attempt can retry."
      (ellm-llm--render-tool-uses
       (plist-get event :tool-uses)
       (plist-get event :tool-results)
-      (plist-get event :call-ids)))
+      (plist-get event :call-ids)
+      (plist-get event :tool-call-ids)))
     ('correction
      (ellm--insert-turn "assistant" :continuation t)
      (insert (ellm--ensure-newline (plist-get event :text))))))
@@ -656,20 +657,24 @@ When ARGS is non-nil, include its single-line values in the folded heading."
            (ellm-tools--transform-tool-result name nil nil result)))
   (ellm--flush-pending-fold))
 
-(defun ellm-llm--render-tool-uses (tool-uses tool-results &optional call-ids)
+(defun ellm-llm--tool-call-ids (tool-uses call-ids)
+  "Return stable rendered IDs for TOOL-USES and provider CALL-IDS."
+  (let ((provider-use-ids (car-safe call-ids)))
+    (cl-loop for tool-use in tool-uses
+             for index from 0
+             for id = (or (plist-get tool-use :id)
+                          (nth index provider-use-ids))
+             collect (if (ellm-llm--persistable-call-id-p id)
+                         id
+                       (ellm-llm--gen-call-id)))))
+
+(defun ellm-llm--render-tool-uses (tool-uses tool-results &optional call-ids ids)
   "Insert `tool-call' / `tool-result' turns for TOOL-USES and TOOL-RESULTS.
 When `ellm-fold-tool-calls' is non-nil each inserted turn is folded.
-CALL-IDS is an optional cons of provider tool-use and tool-result ID lists."
-  (let* ((provider-use-ids (car-safe call-ids))
-         (provider-result-ids (cdr-safe call-ids))
-         (ids
-          (cl-loop for tool-use in tool-uses
-                   for index from 0
-                   for id = (or (plist-get tool-use :id)
-                                (nth index provider-use-ids))
-                   collect (if (ellm-llm--persistable-call-id-p id)
-                               id
-                             (ellm-llm--gen-call-id)))))
+CALL-IDS is an optional cons of provider tool-use and tool-result ID lists.
+IDS, when non-nil, are the stable rendered IDs for TOOL-USES."
+  (let* ((provider-result-ids (cdr-safe call-ids))
+         (ids (or ids (ellm-llm--tool-call-ids tool-uses call-ids))))
     (cl-loop for id in ids
              for tu in tool-uses
              do (ellm-llm--insert-tool-call id tu))
@@ -909,6 +914,27 @@ chat token limit supplies the corresponding context size when available."
      (and (numberp context-size) (> context-size 0)
           (list :context-size context-size)))))
 
+(defun ellm-llm--tool-observations (tool-uses tool-results ids)
+  "Return normalized lifecycle observations for llm.el tool batches using IDS."
+  (append
+   (cl-loop for tool-use in tool-uses
+            for id in ids
+            collect (list :type 'tool-call
+                          :id id
+                          :name (plist-get tool-use :name)
+                          :arguments (plist-get tool-use :args)
+                          :backend 'llm :backend-data tool-use))
+   (cl-loop for result in tool-results
+            for index from 0
+            for tool-use = (nth index tool-uses)
+            for id = (nth index ids)
+            collect (list :type 'tool-finished
+                          :id id
+                          :name (or (plist-get tool-use :name) (car-safe result))
+                          :result (cdr-safe result)
+                          :outcome 'completed
+                          :backend 'llm :backend-data result))))
+
 (cl-defmethod ellm-backend-start ((driver ellm-llm-driver) emit)
   "Start or resume one llm.el leg and emit normalized events."
   (setf (ellm-llm-driver-emit driver) emit)
@@ -950,11 +976,16 @@ chat token limit supplies the corresponding context size when available."
          (continue-with-tools (tool-uses tool-results call-ids)
                               (when (live-p)
                                 (cl-incf (ellm-llm-driver-serial driver)))
-                              (ellm-llm--emit
-                               driver
-                               `(:type tool-call :kind tool-batch
-                                 :tool-uses ,tool-uses :tool-results ,tool-results
-                                 :call-ids ,call-ids))
+                              (let ((tool-call-ids
+                                     (ellm-llm--tool-call-ids tool-uses call-ids)))
+                                (ellm-llm--emit
+                                 driver
+                                 `(:type tool-call :kind tool-batch
+                                   :tool-uses ,tool-uses :tool-results ,tool-results
+                                   :call-ids ,call-ids :tool-call-ids ,tool-call-ids
+                                   :observations
+                                   ,(ellm-llm--tool-observations
+                                     tool-uses tool-results tool-call-ids))))
                               (ellm-llm--canonicalize-new-interactions
                                prompt previous-interaction)
                               (cl-incf (ellm-llm-driver-leg driver))

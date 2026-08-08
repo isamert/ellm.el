@@ -2257,23 +2257,23 @@ SUBAGENT may be a remembered id or a live buffer name."
          timer listener done)
     (cl-labels
         ((running-p ()
-           (and (buffer-live-p buffer)
-                (with-current-buffer buffer ellm--active-request)))
+                    (and (buffer-live-p buffer)
+                         (with-current-buffer buffer ellm--active-request)))
          (cleanup ()
-           (when timer
-             (cancel-timer timer)
-             (setq timer nil))
-           (when (and listener (buffer-live-p buffer))
-             (with-current-buffer buffer
-               (remove-hook 'ellm-request-finished-hook listener t))))
+                  (when timer
+                    (cancel-timer timer)
+                    (setq timer nil))
+                  (when (and listener (buffer-live-p buffer))
+                    (with-current-buffer buffer
+                      (remove-hook 'ellm-request-finished-hook listener t))))
          (finish (timed-out)
-           (unless done
-             (setq done t)
-             (cleanup)
-             (funcall callback
-                      (ellm-tools--format-subagent-wait-result
-                       target timed-out line-limit)))))
-      (setq listener (lambda () (finish nil)))
+                 (unless done
+                   (setq done t)
+                   (cleanup)
+                   (funcall callback
+                            (ellm-tools--format-subagent-wait-result
+                             target timed-out line-limit)))))
+      (setq listener (lambda (_request _outcome) (finish nil)))
       (if (not (running-p))
           (finish nil)
         (with-current-buffer buffer

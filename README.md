@@ -140,6 +140,38 @@ system turns remain at their original positions for providers that accept
 mid-conversation system instructions.  Regular user and assistant turns are
 always literal and are not interpolated.
 
+### Lifecycle hooks
+
+Lifecycle hooks run in the conversation buffer.  Register one for a specific
+conversation with a buffer-local hook, for example:
+
+```elisp
+(add-hook 'ellm-request-finished-hook #'my-ellm-finished nil t)
+
+(defun my-ellm-finished (request outcome)
+  (message "Request %s" (plist-get outcome :state)))
+```
+
+`ellm-before-request-hook` receives `(REQUEST EVENT)` after configuration is
+resolved but before the transcript changes; it may signal an error to veto the
+send.  `ellm-request-started-hook` receives `(REQUEST EVENT)` once before the
+initial backend start.  `ellm-request-finished-hook` receives `(REQUEST
+OUTCOME)` once after final cleanup.  These are logical-request hooks: retries
+and tool-loop continuation legs do not fire them again.
+
+`ellm-tool-call-hook` and `ellm-tool-finished-hook` receive `(REQUEST EVENT)`
+for backend-observed tool lifecycle facts.  Tool support is backend-dependent:
+ACP reports calls and terminal `completed`/`failed` updates, while llm.el
+reports completed local tool batches.  For llm.el, `completed` means a result
+was returned to the model; it does not necessarily mean the local tool
+succeeded.  The existing
+`ellm-tools-tool-call-start-hook` and `ellm-tools-tool-call-end-hook` are
+separate hooks for local `ellm-deftool` execution only.
+
+Permissions use `ellm-permission-function` to choose an option and
+`ellm-before-permission-hook` / `ellm-after-permission-hook` as observers.
+They currently apply to ACP permission requests.
+
 ### Interactive Configuration
 
 Run `M-x ellm-set-config` in a conversation buffer to edit frontmatter without

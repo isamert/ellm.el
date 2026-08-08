@@ -3809,8 +3809,10 @@ keep protocol-specific mutable state there, but lifecycle state lives here."
 
 `stream' uses `:mode' `append' with `:channel', `:text', and optional `:id',
 or `snapshot' with an ordered `:channels' alist and stable `:id'.  `usage'
-accepts normalized token, context, and cost fields.  Tool and `extension'
-events are rendered through `ellm-backend-render-event'.  `operation' resets
+accepts normalized token, context, and cost fields.  Tool events may carry
+`:observations', a list of normalized `tool-call' or `tool-finished' plists;
+tool and `extension' events are rendered through `ellm-backend-render-event'.
+`operation' resets
 the retry budget after a backend phase succeeds; `continue' starts the next
 tool-loop leg.  `complete' and `failure' are terminal unless a failure is
 explicitly marked `:retryable' and the core retry budget remains.")
@@ -3824,10 +3826,80 @@ explicitly marked `:retryable' and the core retry budget remains.")
 (defvar-local ellm--config-in-flight nil
   "Config path currently being applied asynchronously, or nil.")
 
-(defvar-local ellm-request-finished-hook nil
-  "Hook run when the current request fully finishes.
-This runs after success, cancellation, or failure, but not between internal
-backend request legs such as recursive tool-call handling.")
+(defcustom ellm-before-request-hook nil
+  "Hook run before a logical request mutates its conversation.
+Each function receives REQUEST and EVENT.  This runs after configuration is
+resolved but before timestamps, persistence, the assistant turn, or active
+request state are changed.  A function may signal an error to veto sending."
+  :type 'hook
+  :group 'ellm)
+
+(defcustom ellm-request-started-hook nil
+  "Hook run once when a logical request is about to start.
+Each function receives REQUEST and EVENT.  It runs immediately before the
+initial backend start, not for retries or tool-loop continuation legs."
+  :type 'hook
+  :group 'ellm)
+
+(defcustom ellm-request-finished-hook nil
+  "Hook run once when a logical request fully finishes.
+Each function receives REQUEST and OUTCOME.  OUTCOME is a plist containing at
+least `:state', whose value is `completed', `cancelled', or `failed'.  The hook
+runs after core cleanup and final transcript state, but not between backend
+request legs such as recursive tool-call handling."
+  :type 'hook
+  :group 'ellm)
+
+(defcustom ellm-tool-call-hook nil
+  "Hook run for a normalized backend-observed tool invocation.
+Each function receives REQUEST and EVENT.  EVENT contains `:type' `tool-call'
+and backend-normalized tool metadata."
+  :type 'hook
+  :group 'ellm)
+
+(defcustom ellm-tool-finished-hook nil
+  "Hook run for a normalized terminal backend-observed tool outcome.
+Each function receives REQUEST and EVENT.  EVENT contains `:type'
+`tool-finished' and `:outcome', which is `completed' or `failed'.  For llm.el,
+`completed' means a result was returned to the model; it does not necessarily
+mean that the local tool succeeded."
+  :type 'hook
+  :group 'ellm)
+
+(defcustom ellm-before-permission-hook nil
+  "Hook run before `ellm-permission-function' selects a permission option.
+Each function receives REQUEST and normalized PERMISSION data."
+  :type 'hook
+  :group 'ellm)
+
+(defcustom ellm-after-permission-hook nil
+  "Hook run after a permission decision is made.
+Each function receives REQUEST, normalized PERMISSION data, and DECISION.
+DECISION is nil when permission was cancelled."
+  :type 'hook
+  :group 'ellm)
+
+(defun ellm--ask-permission (_request permission)
+  "Interactively select a permission option for REQUEST and PERMISSION."
+  (unless noninteractive
+    (let* ((tool-call (plist-get permission :tool-call))
+           (options (plist-get permission :options))
+           (title (or (plist-get tool-call :title) "Permission request"))
+           (choices (mapcar (lambda (option)
+                              (cons (or (plist-get option :name)
+                                        (plist-get option :id))
+                                    (plist-get option :id)))
+                            options))
+           (choice (completing-read (format "%s: " title)
+                                    (mapcar #'car choices) nil t)))
+      (cdr (assoc choice choices)))))
+
+(defcustom ellm-permission-function #'ellm--ask-permission
+  "Function used to select an option for a normalized permission request.
+It receives REQUEST and PERMISSION, and returns an option identifier or nil
+to cancel."
+  :type 'function
+  :group 'ellm)
 
 (defvar-local ellm--request-finished-notified-p nil
   "Non-nil when the current request has fired `ellm-request-finished-hook'.")
@@ -3899,8 +3971,25 @@ Return non-nil when a live top-level assistant header was updated."
             ellm--request-start-time nil))
     updated))
 
-(defun ellm--notify-request-finished ()
-  "Finalize request metadata and run `ellm-request-finished-hook' once."
+(defun ellm--request-event-context (request type &rest properties)
+  "Return normalized lifecycle event context for REQUEST of TYPE."
+  (append properties
+          (list :type type
+                :generation (ellm-request-generation request)
+                :attempt (ellm-request-attempt request)
+                :provider (type-of (ellm-request-provider request))
+                :backend (and (ellm-request-backend request)
+                              (type-of (ellm-request-backend request))))))
+
+(defun ellm--run-observer-hook (hook &rest args)
+  "Run HOOK with ARGS, logging errors without disrupting request handling."
+  (condition-case err
+      (apply #'run-hook-with-args hook args)
+    (error
+     (message "ellm: %s hook error: %s" hook (error-message-string err)))))
+
+(defun ellm--notify-request-finished (request outcome)
+  "Finalize REQUEST metadata and run its finished hook once with OUTCOME."
   (unless ellm--request-finished-notified-p
     (when (ellm--finalize-request-turn)
       ;; Backends generally checkpoint immediately before notifying.  The
@@ -3908,7 +3997,26 @@ Return non-nil when a live top-level assistant header was updated."
       (ellm--persistence-checkpoint))
     (ellm--flush-pending-fold)
     (setq ellm--request-finished-notified-p t)
-    (run-hooks 'ellm-request-finished-hook)))
+    (ellm--run-observer-hook 'ellm-request-finished-hook request outcome)))
+
+(defun ellm--notify-active-request-finished-on-kill ()
+  "Finalize an active request if buffer teardown bypassed normal cleanup."
+  (when ellm--active-request
+    (ellm--notify-request-finished ellm--active-request '(:state cancelled))))
+
+(defun ellm--request-permission (request permission)
+  "Select an option for REQUEST's normalized PERMISSION request.
+Selector errors are reported and treated as cancellation."
+  (ellm--run-observer-hook 'ellm-before-permission-hook request permission)
+  (let (decision)
+    (condition-case err
+        (setq decision (funcall ellm-permission-function request permission))
+      (error
+       (message "ellm: permission selector error: %s"
+                (error-message-string err))))
+    (ellm--run-observer-hook 'ellm-after-permission-hook
+                             request permission decision)
+    decision))
 
 (defun ellm--request-terminal-p (request)
   "Return non-nil when REQUEST has reached a terminal state."
@@ -4144,7 +4252,10 @@ MESSAGE-TEXT is reported after cleanup when non-nil."
             (ellm--set-active-request nil)
             (ellm--ensure-next-user-turn)
             (ellm--persistence-checkpoint)
-            (ellm--notify-request-finished)))))
+            (ellm--notify-request-finished
+             request
+             (append (list :state state)
+                     (when message-text (list :message message-text))))))))
     (ellm--request-release-streams request)
     (setf (ellm-request-transport request) nil)
     (when message-text
@@ -4173,6 +4284,22 @@ MESSAGE-TEXT is reported after cleanup when non-nil."
   (when (and message-text (> ellm-request-retry-delay 0))
     (message "ellm: %s; retrying" message-text)))
 
+(defun ellm--request-observe-tool-events (request event)
+  "Dispatch normalized tool observations carried by backend EVENT."
+  (let ((observations
+         (or (plist-get event :observations)
+             (pcase (plist-get event :type)
+               ('tool-call (list event))
+               ('tool-result (list (plist-put (copy-sequence event)
+                                              :type 'tool-finished)))))))
+    (dolist (observation observations)
+      (pcase (plist-get observation :type)
+        ('tool-call
+         (ellm--run-observer-hook 'ellm-tool-call-hook request observation))
+        ('tool-finished
+         (ellm--run-observer-hook 'ellm-tool-finished-hook
+                                  request observation))))))
+
 (defun ellm--request-handle-event (request attempt event)
   "Reduce backend EVENT for REQUEST ATTEMPT."
   (when (ellm--request-event-current-p request attempt)
@@ -4194,6 +4321,7 @@ MESSAGE-TEXT is reported after cleanup when non-nil."
               ((or 'tool-call 'tool-update 'tool-result)
                (setf (ellm-request-state request) 'tool-loop
                      (ellm-request-last-stream-key request) nil)
+               (ellm--request-observe-tool-events request event)
                (ellm-backend-render-event
                 (ellm-request-backend request) event request))
               ('extension
@@ -5499,6 +5627,15 @@ Errors during streaming are signalled normally."
           (unless (plist-get system-state :leading)
             (when-let* ((cell (assq 'system fm)))
               (setcdr cell (plist-get system-state :initial))))))
+      (setq request
+            (ellm--make-request
+             :buffer buf :provider provider :frontmatter fm
+             :generation ellm--request-generation))
+      ;; This is the sole lifecycle veto point: no transcript or request state
+      ;; has changed yet.
+      (run-hook-with-args
+       'ellm-before-request-hook request
+       (ellm--request-event-context request 'before-request))
       (ellm--set-turn-header-attrs
        (ellm--turn-delimiter-beg user-turn)
        `(("ts" . ,(ellm--timestamp started-at))))
@@ -5512,15 +5649,14 @@ Errors during streaming are signalled normally."
               (let ((marker (point-marker)))
                 (set-marker-insertion-type marker nil)
                 marker)))
-      (setq request
-            (ellm--make-request
-             :buffer buf :provider provider :frontmatter fm
-             :generation ellm--request-generation))
       (ellm--set-active-request request)
       (condition-case err
           (progn
             (setf (ellm-request-backend request)
                   (ellm-backend-create provider fm buf))
+            (ellm--run-observer-hook
+             'ellm-request-started-hook request
+             (ellm--request-event-context request 'request-started :attempt 1))
             (ellm--request-start-backend request))
         (error
          (ellm--request-terminal-transition
@@ -6407,7 +6543,7 @@ Return a cons of the left and right portions, split at `%>'."
   (add-hook 'completion-at-point-functions #'ellm--slash-command-capf nil t)
   (add-hook 'kill-buffer-hook #'ellm--close-session-on-kill nil t)
   (add-hook 'kill-buffer-hook #'ellm--persistence-before-kill nil t)
-  (add-hook 'kill-buffer-hook #'ellm--notify-request-finished nil t)
+  (add-hook 'kill-buffer-hook #'ellm--notify-active-request-finished-on-kill nil t)
   (setq-local outline-regexp (ellm--outline-regexp))
   (setq-local outline-search-function #'ellm--outline-search-function)
   (setq-local outline-level #'ellm--outline-level)

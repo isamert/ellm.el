@@ -44,13 +44,6 @@
   "ACP backend for ellm."
   :group 'ellm)
 
-(defcustom ellm-acp-permission-function #'ellm-acp-ask-permission
-  "Function used to answer ACP `session/request_permission' requests.
-It is called with two arguments: TOOL-CALL and OPTIONS from the ACP
-request.  It must return the selected option id, or nil to cancel."
-  :type 'function
-  :group 'ellm-acp)
-
 (defcustom ellm-acp-log-messages nil
   "If non-nil, log raw ACP JSON-RPC messages to `ellm-acp-log-buffer-name'."
   :type 'boolean
@@ -1018,11 +1011,11 @@ SESSION-ID, when non-nil, is included for load/resume requests."
       (when (eq provider (ellm--provider-entry-provider (cdr entry)))
         (throw 'name (symbol-name (car entry)))))))
 
-(defun ellm-acp--dispatch-request (_connection method params)
+(defun ellm-acp--dispatch-request (connection method params)
   "Dispatch ACP request METHOD with PARAMS for CONNECTION."
   (pcase method
     ('session/request_permission
-     (ellm-acp--handle-permission-request params))
+     (ellm-acp--handle-permission-request connection params))
     (_
      (jsonrpc-error :code -32601
                     :message (format "Unsupported ACP client method: %s"
@@ -1858,6 +1851,13 @@ When SELECT is non-nil, choose a session from `session/list'."
 
 ;;;; Rendering
 
+(defun ellm-acp--tool-event-name (connection update)
+  "Return the best available display name for ACP tool UPDATE."
+  (or (plist-get update :title)
+      (when-let* ((id (plist-get update :toolCallId))
+                  (state (ellm-acp--tool-state connection id)))
+        (ellm-acp-rendered-tool-call-title state))))
+
 (defun ellm-acp--handle-session-update (connection params)
   "Render ACP session/update PARAMS for CONNECTION."
   (when-let* ((buffer (ellm-acp--connection-buffer connection)))
@@ -1919,7 +1919,11 @@ When SELECT is non-nil, choose a session from `session/list'."
                          (ellm-acp--emit-conversation-event
                           connection
                           `(:type tool-call :connection ,connection
-                            :update ,update))
+                            :update ,update
+                            :id ,(plist-get update :toolCallId)
+                            :name ,(ellm-acp--tool-event-name connection update)
+                            :arguments ,(plist-get update :rawInput)
+                            :backend acp :backend-data ,update))
                        (ellm-acp--insert-tool-call update connection)))
                     ("tool_call_update"
                      (setf (ellm-acp--connection-last-message-key connection) nil)
@@ -1927,7 +1931,24 @@ When SELECT is non-nil, choose a session from `session/list'."
                          (ellm-acp--emit-conversation-event
                           connection
                           `(:type tool-update :connection ,connection
-                            :update ,update))
+                            :update ,update
+                            :observations
+                            ,(pcase (plist-get update :status)
+                               ("completed"
+                                (list `(:type tool-finished
+                                        :id ,(plist-get update :toolCallId)
+                                        :name ,(ellm-acp--tool-event-name connection update)
+                                        :result ,(plist-get update :rawOutput)
+                                        :outcome completed
+                                        :backend acp :backend-data ,update)))
+                               ("failed"
+                                (list `(:type tool-finished
+                                        :id ,(plist-get update :toolCallId)
+                                        :name ,(ellm-acp--tool-event-name connection update)
+                                        :error ,(or (plist-get update :rawOutput)
+                                                    (plist-get update :content))
+                                        :outcome failed
+                                        :backend acp :backend-data ,update))))))
                        (ellm-acp--insert-tool-update update connection)))
                     ("plan"
                      (setf (ellm-acp--connection-last-message-key connection) nil)
@@ -2614,29 +2635,31 @@ If the matched turn has nested child turns, delete those children too."
 
 ;;;; Permission requests
 
-(defun ellm-acp--handle-permission-request (params)
-  "Handle ACP permission request PARAMS and return an ACP response result."
+(defun ellm-acp--normalized-permission (tool-call options)
+  "Return core permission data normalized from ACP TOOL-CALL and OPTIONS."
+  (list :backend 'acp :tool-call tool-call
+        :options (mapcar (lambda (option)
+                           (let ((copy (copy-sequence option)))
+                             (plist-put copy :id (plist-get option :optionId))))
+                         options)))
+
+(defun ellm-acp--handle-permission-request (connection params)
+  "Handle ACP permission PARAMS for CONNECTION and return an ACP response."
   (let* ((tool-call (plist-get params :toolCall))
          (options (plist-get params :options))
-         (option-id (funcall ellm-acp-permission-function tool-call options)))
+         (buffer (ellm-acp--connection-buffer connection))
+         (backend-request (ellm-acp--connection-current-request connection))
+         (permission (ellm-acp--normalized-permission tool-call options))
+         (option-id
+          (and (buffer-live-p buffer)
+               (with-current-buffer buffer
+                 (when-let* ((request ellm--active-request)
+                             ((eq (ellm-request-backend request)
+                                  backend-request)))
+                   (ellm--request-permission request permission))))))
     `(:outcome ,(if option-id
                     `(:outcome "selected" :optionId ,option-id)
                   '(:outcome "cancelled")))))
-
-(defun ellm-acp-ask-permission (tool-call options)
-  "Ask the user to select an ACP permission option for TOOL-CALL.
-OPTIONS is the ACP options list.  In noninteractive sessions this returns
-nil, causing a cancelled outcome."
-  (unless noninteractive
-    (let* ((title (or (plist-get tool-call :title) "ACP tool call"))
-           (labels (mapcar (lambda (option)
-                             (cons (plist-get option :name)
-                                   (plist-get option :optionId)))
-                           options))
-           (choice (completing-read (format "%s: " title)
-                                    (mapcar #'car labels)
-                                    nil t)))
-      (cdr (assoc choice labels)))))
 
 ;;;; Configuration prompts
 
