@@ -2417,12 +2417,131 @@ SUBAGENT may be a remembered id or a live buffer name."
   (setq text (replace-regexp-in-string "\\n\\{3,\\}" "\n\n" text))
   (string-trim text))
 
-(defun ellm-tools--webfetch-render-html (html base-url)
-  "Render HTML with SHR using BASE-URL.
-Return a plist containing `:title' and `:content'."
-  (require 'dom)
+(defconst ellm-tools--webfetch-readable-minimum-words 100
+  "Minimum visible words required for a readable HTML candidate.")
+
+(defconst ellm-tools--webfetch-readable-minimum-characters 400
+  "Minimum rendered characters required for readable HTML output.")
+
+(defconst ellm-tools--webfetch-non-content-tags
+  '(script style noscript template svg)
+  "HTML tags whose text should not affect readability scoring.")
+
+(defconst ellm-tools--webfetch-chrome-tags
+  '(nav header footer aside)
+  "HTML tags that are not themselves readable-content candidates.")
+
+(defun ellm-tools--webfetch-dom-attribute (node attribute)
+  "Return ATTRIBUTE from DOM NODE."
+  (cdr (assq attribute (cadr node))))
+
+(defun ellm-tools--webfetch-word-count (text)
+  "Return the number of whitespace-separated words in TEXT."
+  (length (split-string text "[[:space:]]+" t)))
+
+(defun ellm-tools--webfetch-readable-node (document)
+  "Return the best readable-content node in DOCUMENT, or nil.
+Each candidate is scored from its visible word count minus twice its linked
+word count, which favors prose over navigation.  `main', `article', and
+`role=\"main\"' candidates receive a bonus; common chrome identifiers receive
+a penalty.  Text under chrome tags and non-content tags is ignored, so it
+neither becomes a candidate nor inflates an ancestor's score.  Candidates
+must contain at least `ellm-tools--webfetch-readable-minimum-words' words.
+
+This does not change DOCUMENT: the selected subtree is rendered separately,
+allowing the caller to fall back to the full document when it is too short or
+does not materially reduce the output."
+  (let ((statistics (make-hash-table :test #'eq))
+        candidates)
+    (cl-labels
+        ((visit (node in-link in-chrome)
+                (cond
+                 ((stringp node)
+                  (let ((words (if in-chrome 0
+                                 (ellm-tools--webfetch-word-count node))))
+                    (list :words words :link-words (if in-link words 0))))
+                 ((not (consp node))
+                  (list :words 0 :link-words 0))
+                 (t
+                  (let ((tag (car node)))
+                    (if (memq tag ellm-tools--webfetch-non-content-tags)
+                        (list :words 0 :link-words 0)
+                      (let ((words 0)
+                            (link-words 0)
+                            (chrome (or in-chrome
+                                        (memq tag ellm-tools--webfetch-chrome-tags))))
+                        (dolist (child (cddr node))
+                          (let ((child-statistics
+                                 (visit child (or in-link (eq tag 'a)) chrome)))
+                            (cl-incf words (plist-get child-statistics :words))
+                            (cl-incf link-words
+                                     (plist-get child-statistics :link-words))))
+                        (let* ((role (ellm-tools--webfetch-dom-attribute node 'role))
+                               (identifier
+                                (concat (or (ellm-tools--webfetch-dom-attribute node 'id) "")
+                                        " "
+                                        (or (ellm-tools--webfetch-dom-attribute node 'class) "")))
+                               (semantic (or (memq tag '(main article))
+                                             (equal role "main")))
+                               (score (- words (* 2 link-words))))
+                          (when semantic
+                            (cl-incf score 100))
+                          (when (string-match-p
+                                 "\\_<\\(nav\\|menu\\|sidebar\\|footer\\|cookie\\|banner\\|modal\\)\\_>"
+                                 identifier)
+                            (cl-decf score 100))
+                          (let ((result (list :words words :link-words link-words
+                                              :score score)))
+                            (puthash node result statistics)
+                            (unless chrome
+                              (push node candidates))
+                            result)))))))))
+      (visit document nil nil)
+      (car
+       (sort (seq-filter
+              (lambda (node)
+                (>= (plist-get (gethash node statistics) :words)
+                    ellm-tools--webfetch-readable-minimum-words))
+              candidates)
+             (lambda (left right)
+               (> (plist-get (gethash left statistics) :score)
+                  (plist-get (gethash right statistics) :score))))))))
+
+(defun ellm-tools--webfetch-render-document (document base-url)
+  "Render HTML DOCUMENT with SHR using BASE-URL."
   (require 'shr)
   (require 'url-expand)
+  (with-temp-buffer
+    (let ((shr-base base-url)
+          (shr-use-fonts nil)
+          (shr-fill-text nil)
+          (shr-use-colors nil)
+          (shr-inhibit-images t))
+      (shr-insert-document document))
+    (goto-char (point-min))
+    (while-let ((match (text-property-search-forward 'shr-url nil nil t)))
+      (let* ((begin (prop-match-beginning match))
+             (end (prop-match-end match))
+             (url (url-expand-file-name
+                   (get-text-property begin 'shr-url) base-url))
+             (text (buffer-substring-no-properties begin end))
+             (link (ellm-tools--webfetch-markdown-link text url)))
+        (replace-region-contents begin end (lambda () link))
+        (goto-char (+ begin (length link)))))
+    (ellm-tools--webfetch-clean-text
+     (buffer-substring-no-properties (point-min) (point-max)))))
+
+(defun ellm-tools--webfetch-readable-content-p (content full-content)
+  "Return non-nil when CONTENT is a useful reduction of FULL-CONTENT."
+  (and (>= (ellm-tools--webfetch-word-count content)
+           ellm-tools--webfetch-readable-minimum-words)
+       (>= (length content) ellm-tools--webfetch-readable-minimum-characters)
+       (< (length content) (* (length full-content) 0.95))))
+
+(defun ellm-tools--webfetch-render-html (html base-url)
+  "Render readable HTML from HTML using BASE-URL.
+Return a plist containing `:title', `:content', and `:readable'."
+  (require 'dom)
   (unless (fboundp 'libxml-parse-html-region)
     (error "HTML rendering requires Emacs with libxml2 support"))
   (with-temp-buffer
@@ -2431,28 +2550,18 @@ Return a plist containing `:title' and `:content'."
            (title-node (car (dom-by-tag dom 'title)))
            (title (and title-node
                        (ellm-tools--clean-text (dom-text title-node))))
-           (document (or (car (dom-by-tag dom 'body)) dom)))
-      (erase-buffer)
-      (let ((shr-base base-url)
-            (shr-use-fonts nil)
-            (shr-fill-text nil)
-            (shr-use-colors nil)
-            (shr-inhibit-images t))
-        (shr-insert-document document))
-      (goto-char (point-min))
-      (while-let ((match (text-property-search-forward 'shr-url nil nil t)))
-        (let* ((begin (prop-match-beginning match))
-               (end (prop-match-end match))
-               (url (url-expand-file-name
-                     (get-text-property begin 'shr-url) base-url))
-               (text (buffer-substring-no-properties begin end))
-               (link (ellm-tools--webfetch-markdown-link text url)))
-          (replace-region-contents begin end (lambda () link))
-          (goto-char (+ begin (length link)))))
+           (document (or (car (dom-by-tag dom 'body)) dom))
+           (full-content (ellm-tools--webfetch-render-document document base-url))
+           (readable-node (ellm-tools--webfetch-readable-node document))
+           (readable-content
+            (and readable-node
+                 (ellm-tools--webfetch-render-document readable-node base-url)))
+           (readable (and readable-content
+                          (ellm-tools--webfetch-readable-content-p
+                           readable-content full-content))))
       (list :title title
-            :content (ellm-tools--webfetch-clean-text
-                      (buffer-substring-no-properties
-                       (point-min) (point-max)))))))
+            :content (if readable readable-content full-content)
+            :readable readable))))
 
 (defun ellm-tools--webfetch-response-body (byte-limit)
   "Return the current HTTP response body capped at BYTE-LIMIT.
@@ -2536,6 +2645,7 @@ The return value is a cons of body and whether it was truncated."
                             :status status
                             :content-type content-type
                             :title (plist-get rendered :title)
+                            :readable (plist-get rendered :readable)
                             :truncated (or response-truncated output-truncated)
                             :content (if output-truncated
                                          (substring content 0 character-limit)
@@ -2566,11 +2676,12 @@ The return value is a cons of body and whether it was truncated."
               (or (plist-get result :message) "unknown child process error"))
     (concat
      (format
-      "<webfetch url=%S final-url=%S status=%d content-type=%S truncated=%s>\n"
+      "<webfetch url=%S final-url=%S status=%d content-type=%S readable=%s truncated=%s>\n"
       (plist-get result :url)
       (plist-get result :final-url)
       (plist-get result :status)
       (plist-get result :content-type)
+      (if (plist-get result :readable) "true" "false")
       (if (plist-get result :truncated) "true" "false"))
      (when-let* ((title (plist-get result :title))
                  ((not (s-blank? title))))
