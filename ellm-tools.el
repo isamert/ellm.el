@@ -151,14 +151,18 @@ and path, respectively, and no implicit pattern/path arguments are appended."
   :type 'string
   :group 'ellm-tools)
 
-(defcustom ellm-tools-webfetch-character-limit 50000
-  "Maximum number of rendered characters returned by `webfetch'."
+(defcustom ellm-tools-webfetch-character-limit 40000
+  "Maximum number of rendered characters returned by `webfetch'.
+The default is roughly 10,000 tokens of typical English text."
   :type 'integer
   :group 'ellm-tools)
 
 (defcustom ellm-tools-webfetch-response-byte-limit 2000000
   "Maximum response body size processed by `webfetch', in bytes.
-Larger bodies are truncated before rendering."
+This bounds the memory and CPU used to download, decode, parse, and render an
+untrusted response before its rendered text can be subject to
+`ellm-tools-webfetch-character-limit'.  Larger bodies are truncated before
+rendering."
   :type 'integer
   :group 'ellm-tools)
 
@@ -598,12 +602,11 @@ the operation fails if the target already exists."
     (ellm-tools--edit-tool file-path old-string new-string replace-all)))
 
 (ellm-deftool files/read-file-lines (:async t)
-  ((file-path :string "Path to the file. Path is relative to the current project's root.")
+  ((file-path :string "Path to the file. Relative paths are resolved from the conversation working directory.")
    (start-line :integer "Starting line number.")
    (end-line :integer "Ending line number."))
   "Return text from START-LINE to END-LINE (inclusive).
-The file is inspected and read asynchronously.  For a non-text file,
-return metadata without reading its contents."
+For a non-text file, return metadata without reading its contents."
   (when (or (s-blank? file-path)
             (not (and (numberp start-line) (numberp end-line)))
             (< start-line 1)
@@ -650,8 +653,7 @@ Act directly on buffers if you know the name already, without listing."
   ((buffer-name :string "Name of the buffer to read.")
    (start-line :integer "Starting line number (1-indexed). Optional." &optional)
    (end-line :integer "Ending line number (1-indexed). Optional." &optional))
-  "Return the contents of the buffer with the given name (max 500 lines).
-Optionally specify a line range."
+  "Return the contents of BUFFER-NAME, optionally limited to a line range."
   (when (or (not (stringp buffer-name))
             (string-empty-p buffer-name)
             (not (get-buffer buffer-name))
@@ -693,7 +695,7 @@ Optionally specify a line range."
    (regexp :boolean "If true, treat pattern as a regular expression. Default is false." &optional)
    (case-sensitive :boolean "If true, search is case-sensitive. By default does a case-insensitive search." &optional))
   "Search for PATTERN in BUFFER-NAME.
-Return matching lines with line numbers, capped at 50 matches."
+Return matching lines with line numbers."
   (when (or (not (stringp buffer-name))
             (string-empty-p buffer-name)
             (not (get-buffer buffer-name)))
@@ -782,12 +784,12 @@ documentation contains the query words."
 
 (ellm-deftool emacs/elisp-eval (:async t)
   ((code :string "Emacs Lisp forms to evaluate as an implicit `progn'.")
-   (session :string "Execution session: `temp' (default) uses a fresh child Emacs, `current' uses the live Emacs, and any other name uses a persistent child scoped to this ellm buffer." &optional)
-   (features :array "Feature names to require before evaluating CODE. Isolated sessions inherit the current `load-path' but do not load `init.el'." &optional))
+   (session :string "Execution session: `temp' (default) is isolated; `current' uses the running Emacs; any other name preserves an isolated session for later calls." &optional)
+   (features :array "Feature names to load before evaluating CODE." &optional))
   "Evaluate Emacs Lisp CODE and return its final value and printed output.
-TEMP starts a fresh Emacs which exits afterward.  CURRENT can inspect and
-modify the live Emacs and may block it.  Other SESSION names preserve state
-until the owning ellm buffer or backend session closes."
+Use SESSION `temp' (the default) for isolated evaluation, `current' to inspect
+or modify the running Emacs, or another session name to preserve state for
+later calls in this conversation."
   (ellm-tools--start-elisp-eval
    code session features callback))
 
@@ -806,7 +808,7 @@ Always pass the full current list, not just incremental changes."
    (profile :string "Optional configured subagent profile name." &optional)
    (name :string "Optional display name for the subagent and its conversation." &optional)
    (provider :string "Optional provider name. Overrides the inherited or profile provider." &optional)
-   (model :string "Optional model name. Validated against available model choices when possible." &optional)
+   (model :string "Optional model name. Overrides the inherited or profile model." &optional)
    (tools :array "Optional complete tool list for the subagent, for example [`@files', `@buffers']. Overrides inherited or profile tools." &optional)
    (system :string "Optional system prompt for the subagent. Overrides the inherited or profile prompt." &optional)
    (cwd :string "Optional working directory for the subagent. Overrides the inherited or profile directory." &optional))
@@ -844,26 +846,21 @@ conversation buffer."
 (ellm-deftool web/websearch (:async t)
   ((query :string "Search query.")
    (max-results :integer "Maximum number of web results to return. Omit to use the standard limit." &optional))
-  "Search the web using DuckDuckGo."
+  "Search the web for pages relevant to QUERY."
   (ellm-tools--validate-pattern query "query")
   (let ((limit (ellm-tools--normalized-limit
                 max-results ellm-tools-websearch-result-limit)))
     (ellm-tools--start-websearch query limit callback)))
 
 (ellm-deftool web/webfetch (:async t)
-  ((url :string "HTTP or HTTPS URL to fetch.")
-   (max-characters :integer "Maximum characters to return, subject to the response size limit." &optional))
-  "Fetch URL and return its readable textual contents.
-HTML is rendered without images in a child Emacs process.  Textual non-HTML
-responses are returned directly; unsupported binary responses are rejected."
+  ((url :string "HTTP or HTTPS URL to fetch."))
+  "Fetch a URL and return its readable text.
+Use this to read a specific web page, document, or text resource."
   (ellm-tools--validate-webfetch-url url)
-  (let ((limit (min (ellm-tools--normalized-limit
-                     max-characters ellm-tools-webfetch-character-limit)
-                    ellm-tools-webfetch-character-limit)))
-    (ellm-tools--normalized-limit
-     ellm-tools-webfetch-response-byte-limit
-     ellm-tools-webfetch-response-byte-limit)
-    (ellm-tools--start-webfetch url limit callback)))
+  (ellm-tools--start-webfetch
+   url
+   ellm-tools-webfetch-character-limit
+   callback))
 
 ;;;; Tool helpers
 
