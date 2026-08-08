@@ -172,6 +172,23 @@ Permissions use `ellm-permission-function` to choose an option and
 `ellm-before-permission-hook` / `ellm-after-permission-hook` as observers.
 They currently apply to ACP permission requests.
 
+### Notifications
+
+ellm notifies you when a permission is requested or when a logical
+request completes or fails, but only when the conversation buffer is
+not visible in a focused Emacs frame.  Cancelled requests do not
+notify by default.
+
+`ellm-notification-function` controls delivery.  Its default,
+`ellm-notify-default`, tries native `notifications-notify`, then the
+optional `alert` package, and finally `message`.  A custom function
+receives a plist with `:event`, `:request`, `:buffer`, `:title`,
+`:body`, and `:urgency`, plus event-specific context such as
+`:permission` or `:outcome`.
+
+Use `ellm-notifications-enabled` to disable notifications entirely, or
+`ellm-notification-events` to select notification event categories.
+
 ### Interactive Configuration
 
 Run `M-x ellm-set-config` in a conversation buffer to edit frontmatter without

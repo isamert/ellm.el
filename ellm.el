@@ -4018,6 +4018,31 @@ Selector errors are reported and treated as cancellation."
                              request permission decision)
     decision))
 
+(defun ellm--notify-permission-request (request permission)
+  "Notify when REQUEST needs a permission decision for PERMISSION."
+  (let* ((buffer (ellm-request-buffer request))
+         (tool-call (plist-get permission :tool-call))
+         (tool-title (or (plist-get tool-call :title)
+                         "Agent action requires approval")))
+    (ellm--notify-user
+     request 'permission-requested "ellm: permission requested"
+     (format "%s: %s" (buffer-name buffer) tool-title)
+     :urgency 'critical :permission permission)))
+
+(defun ellm--notify-request-finished-user (request outcome)
+  "Notify when REQUEST ends with an attention-worthy OUTCOME."
+  (when (memq (plist-get outcome :state) '(completed failed))
+    (let* ((failed-p (eq (plist-get outcome :state) 'failed))
+           (buffer (ellm-request-buffer request))
+           (message-text (plist-get outcome :message))
+           (body (if (and failed-p message-text)
+                     (format "%s: %s" (buffer-name buffer) message-text)
+                   (buffer-name buffer))))
+      (ellm--notify-user
+       request 'request-finished
+       (if failed-p "ellm: request failed" "ellm: response finished")
+       body :outcome outcome))))
+
 (defun ellm--request-terminal-p (request)
   "Return non-nil when REQUEST has reached a terminal state."
   (memq (ellm-request-state request) ellm--request-terminal-states))
@@ -4376,6 +4401,92 @@ MESSAGE-TEXT is reported after cleanup when non-nil."
                     :message ,(error-message-string err)
                     :condition ,err))))))
   request)
+
+;;;; Notifications
+
+(declare-function notifications-notify "notifications" (&rest params))
+(declare-function alert "alert" (message &rest args))
+
+(defcustom ellm-notifications-enabled t
+  "Whether ellm sends attention notifications."
+  :type 'boolean
+  :group 'ellm)
+
+(defcustom ellm-notification-events '(permission-requested request-finished)
+  "Events for which ellm may send attention notifications."
+  :type '(repeat (choice (const permission-requested)
+                         (const request-finished)
+                         (const user-input-requested)))
+  :group 'ellm)
+
+(defun ellm-notify-native (notification)
+  "Present NOTIFICATION using Emacs's native notification support.
+Return non-nil when delivery succeeds."
+  (condition-case nil
+      (when (require 'notifications nil t)
+        (notifications-notify
+         :app-name "ellm"
+         :title (plist-get notification :title)
+         :body (plist-get notification :body)
+         :urgency (plist-get notification :urgency))
+        t)
+    (error nil)))
+
+(defun ellm-notify-alert (notification)
+  "Present NOTIFICATION through the optional `alert' package.
+Return non-nil when delivery succeeds."
+  (condition-case nil
+      (when (or (fboundp 'alert) (require 'alert nil t))
+        (alert (plist-get notification :body)
+               :title (plist-get notification :title)
+               :severity (pcase (plist-get notification :urgency)
+                           ('critical 'urgent)
+                           ('low 'low)
+                           (_ 'normal)))
+        t)
+    (error nil)))
+
+(defun ellm-notify-message (notification)
+  "Present NOTIFICATION in the echo area."
+  (message "%s: %s"
+           (plist-get notification :title)
+           (plist-get notification :body))
+  t)
+
+(defun ellm-notify-default (notification)
+  "Present NOTIFICATION through the best available delivery backend."
+  (or (ellm-notify-native notification)
+      (ellm-notify-alert notification)
+      (ellm-notify-message notification)))
+
+(defcustom ellm-notification-function #'ellm-notify-default
+  "Function used to present normalized ellm notifications.
+The function receives a plist containing at least `:event', `:request',
+`:buffer', `:title', `:body', and `:urgency'."
+  :type 'function
+  :group 'ellm)
+
+(defun ellm--request-visible-in-focused-frame-p (request)
+  "Return non-nil when REQUEST's buffer is visible in a focused frame."
+  (when-let* ((buffer (ellm-request-buffer request))
+              ((buffer-live-p buffer)))
+    (seq-some (lambda (window)
+                (eq (frame-focus-state (window-frame window)) t))
+              (get-buffer-window-list buffer nil 'visible))))
+
+(defun ellm--notify-user (request event title body &rest properties)
+  "Present EVENT from REQUEST with TITLE, BODY, and PROPERTIES when needed."
+  (when (and ellm-notifications-enabled
+             (memq event ellm-notification-events)
+             (not (ellm--request-visible-in-focused-frame-p request)))
+    (funcall ellm-notification-function
+             (append properties
+                     (list :event event :request request
+                           :buffer (ellm-request-buffer request)
+                           :title title :body body :urgency 'normal)))))
+
+(add-hook 'ellm-before-permission-hook #'ellm--notify-permission-request)
+(add-hook 'ellm-request-finished-hook #'ellm--notify-request-finished-user)
 
 ;;;; Frontmatter completion
 
