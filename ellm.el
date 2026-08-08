@@ -452,6 +452,85 @@ chosen provider."
   :type 'function
   :group 'ellm)
 
+(defcustom ellm-before-request-hook nil
+  "Hook run before a logical request mutates its conversation.
+Each function receives REQUEST and EVENT.  This runs after configuration is
+resolved but before timestamps, persistence, the assistant turn, or active
+request state are changed.  A function may signal an error to veto sending."
+  :type 'hook
+  :group 'ellm)
+
+(defcustom ellm-request-started-hook nil
+  "Hook run once when a logical request is about to start.
+Each function receives REQUEST and EVENT.  It runs immediately before the
+initial backend start, not for retries or tool-loop continuation legs."
+  :type 'hook
+  :group 'ellm)
+
+(defcustom ellm-request-finished-hook nil
+  "Hook run once when a logical request fully finishes.
+Each function receives REQUEST and OUTCOME.  OUTCOME is a plist containing at
+least `:state', whose value is `completed', `cancelled', or `failed'.  The hook
+runs after core cleanup and final transcript state, but not between backend
+request legs such as recursive tool-call handling."
+  :type 'hook
+  :group 'ellm)
+
+(defcustom ellm-tool-call-hook nil
+  "Hook run for a normalized backend-observed tool invocation.
+Each function receives REQUEST and EVENT.  EVENT contains `:type' `tool-call'
+and backend-normalized tool metadata."
+  :type 'hook
+  :group 'ellm)
+
+(defcustom ellm-tool-finished-hook nil
+  "Hook run for a normalized terminal backend-observed tool outcome.
+Each function receives REQUEST and EVENT.  EVENT contains `:type'
+`tool-finished' and `:outcome', which is `completed' or `failed'.  For llm.el,
+`completed' means a result was returned to the model; it does not necessarily
+mean that the local tool succeeded."
+  :type 'hook
+  :group 'ellm)
+
+(defcustom ellm-before-permission-hook nil
+  "Hook run before `ellm-permission-function' selects a permission option.
+Each function receives REQUEST and normalized PERMISSION data."
+  :type 'hook
+  :group 'ellm)
+
+(defcustom ellm-after-permission-hook nil
+  "Hook run after a permission decision is made.
+Each function receives REQUEST, normalized PERMISSION data, and DECISION.
+DECISION is nil when permission was cancelled."
+  :type 'hook
+  :group 'ellm)
+
+(defcustom ellm-permission-function #'ellm--ask-permission
+  "Function used to select an option for a normalized permission request.
+It receives REQUEST and PERMISSION, and returns an option identifier or nil
+to cancel."
+  :type 'function
+  :group 'ellm)
+
+(defcustom ellm-notifications-enabled t
+  "Whether ellm sends attention notifications."
+  :type 'boolean
+  :group 'ellm)
+
+(defcustom ellm-notification-events '(permission-requested request-finished)
+  "Events for which ellm may send attention notifications."
+  :type '(repeat (choice (const permission-requested)
+                         (const request-finished)
+                         (const user-input-requested)))
+  :group 'ellm)
+
+(defcustom ellm-notification-function #'ellm-notify-default
+  "Function used to present normalized ellm notifications.
+The function receives a plist containing at least `:event', `:request',
+`:buffer', `:title', `:body', and `:urgency'."
+  :type 'function
+  :group 'ellm)
+
 ;;;; Regexps & predicates
 
 ;;;;; Regexpes
@@ -3823,62 +3902,6 @@ explicitly marked `:retryable' and the core retry budget remains.")
 (defvar-local ellm--request-generation 0
   "Monotonic identity of the current request lifecycle.")
 
-(defvar-local ellm--config-in-flight nil
-  "Config path currently being applied asynchronously, or nil.")
-
-(defcustom ellm-before-request-hook nil
-  "Hook run before a logical request mutates its conversation.
-Each function receives REQUEST and EVENT.  This runs after configuration is
-resolved but before timestamps, persistence, the assistant turn, or active
-request state are changed.  A function may signal an error to veto sending."
-  :type 'hook
-  :group 'ellm)
-
-(defcustom ellm-request-started-hook nil
-  "Hook run once when a logical request is about to start.
-Each function receives REQUEST and EVENT.  It runs immediately before the
-initial backend start, not for retries or tool-loop continuation legs."
-  :type 'hook
-  :group 'ellm)
-
-(defcustom ellm-request-finished-hook nil
-  "Hook run once when a logical request fully finishes.
-Each function receives REQUEST and OUTCOME.  OUTCOME is a plist containing at
-least `:state', whose value is `completed', `cancelled', or `failed'.  The hook
-runs after core cleanup and final transcript state, but not between backend
-request legs such as recursive tool-call handling."
-  :type 'hook
-  :group 'ellm)
-
-(defcustom ellm-tool-call-hook nil
-  "Hook run for a normalized backend-observed tool invocation.
-Each function receives REQUEST and EVENT.  EVENT contains `:type' `tool-call'
-and backend-normalized tool metadata."
-  :type 'hook
-  :group 'ellm)
-
-(defcustom ellm-tool-finished-hook nil
-  "Hook run for a normalized terminal backend-observed tool outcome.
-Each function receives REQUEST and EVENT.  EVENT contains `:type'
-`tool-finished' and `:outcome', which is `completed' or `failed'.  For llm.el,
-`completed' means a result was returned to the model; it does not necessarily
-mean that the local tool succeeded."
-  :type 'hook
-  :group 'ellm)
-
-(defcustom ellm-before-permission-hook nil
-  "Hook run before `ellm-permission-function' selects a permission option.
-Each function receives REQUEST and normalized PERMISSION data."
-  :type 'hook
-  :group 'ellm)
-
-(defcustom ellm-after-permission-hook nil
-  "Hook run after a permission decision is made.
-Each function receives REQUEST, normalized PERMISSION data, and DECISION.
-DECISION is nil when permission was cancelled."
-  :type 'hook
-  :group 'ellm)
-
 (defun ellm--ask-permission (_request permission)
   "Interactively select a permission option for REQUEST and PERMISSION."
   (unless noninteractive
@@ -3893,13 +3916,6 @@ DECISION is nil when permission was cancelled."
            (choice (completing-read (format "%s: " title)
                                     (mapcar #'car choices) nil t)))
       (cdr (assoc choice choices)))))
-
-(defcustom ellm-permission-function #'ellm--ask-permission
-  "Function used to select an option for a normalized permission request.
-It receives REQUEST and PERMISSION, and returns an option identifier or nil
-to cancel."
-  :type 'function
-  :group 'ellm)
 
 (defvar-local ellm--request-finished-notified-p nil
   "Non-nil when the current request has fired `ellm-request-finished-hook'.")
@@ -4407,18 +4423,6 @@ MESSAGE-TEXT is reported after cleanup when non-nil."
 (declare-function notifications-notify "notifications" (&rest params))
 (declare-function alert "alert" (message &rest args))
 
-(defcustom ellm-notifications-enabled t
-  "Whether ellm sends attention notifications."
-  :type 'boolean
-  :group 'ellm)
-
-(defcustom ellm-notification-events '(permission-requested request-finished)
-  "Events for which ellm may send attention notifications."
-  :type '(repeat (choice (const permission-requested)
-                         (const request-finished)
-                         (const user-input-requested)))
-  :group 'ellm)
-
 (defun ellm-notify-native (notification)
   "Present NOTIFICATION using Emacs's native notification support.
 Return non-nil when delivery succeeds."
@@ -4458,13 +4462,6 @@ Return non-nil when delivery succeeds."
   (or (ellm-notify-native notification)
       (ellm-notify-alert notification)
       (ellm-notify-message notification)))
-
-(defcustom ellm-notification-function #'ellm-notify-default
-  "Function used to present normalized ellm notifications.
-The function receives a plist containing at least `:event', `:request',
-`:buffer', `:title', `:body', and `:urgency'."
-  :type 'function
-  :group 'ellm)
 
 (defun ellm--request-visible-in-focused-frame-p (request)
   "Return non-nil when REQUEST's buffer is visible in a focused frame."
@@ -5794,6 +5791,9 @@ If QUIET is non-nil, then do not print any messages."
       (message "ellm: request cancelled"))))
 
 ;;;; Configuration
+
+(defvar-local ellm--config-in-flight nil
+  "Config path currently being applied asynchronously, or nil.")
 
 (defun ellm--ensure-no-config-in-flight ()
   "Signal when a live configuration change is still being applied."

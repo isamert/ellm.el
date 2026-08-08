@@ -534,7 +534,6 @@ standard input in the conversation working directory."
                  (funcall callback
                           (format "Exit code: %d\n%s"
                                   (process-exit-status process) output))))))))
-    (process-send-eof proc)
     (lambda ()
       (when (process-live-p proc)
         (kill-process proc)))))
