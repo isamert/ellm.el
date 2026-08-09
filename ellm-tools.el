@@ -3023,26 +3023,17 @@ exactly one occurrence."
          (name (if is-file?
                    (concat "file " buffer-or-file)
                  (concat "buffer " (buffer-name buffer-or-file))))
-         (file-path (when is-file? (expand-file-name buffer-or-file)))
-         (existing-buffer (when file-path (find-buffer-visiting file-path))))
+         (file-path (when is-file? (expand-file-name buffer-or-file))))
     (cond
      ((string-empty-p old-string)
       (unless is-file?
         (ellm-tools--error "`old_string' cannot be empty for buffer edits"))
-      (ellm-tools--create-file file-path new-string name existing-buffer))
+      (ellm-tools--create-file file-path new-string name))
      ((bufferp buffer-or-file)
       (with-current-buffer buffer-or-file
         (ellm-tools--do-edit old-string new-string replace-all name)))
-     (existing-buffer
-      (when (buffer-modified-p existing-buffer)
-        (ellm-tools--error
-         "Refusing to edit %s because it has unsaved changes" name))
-      (with-current-buffer existing-buffer
-        (let ((result (ellm-tools--do-edit
-                       old-string new-string replace-all name)))
-          (save-buffer)
-          result)))
      (t
+      (ellm-tools--prepare-visiting-buffer-for-file-write file-path)
       (let ((temp-buf (generate-new-buffer " *ellm-tools-edit*")))
         (unwind-protect
             (with-current-buffer temp-buf
@@ -3050,30 +3041,42 @@ exactly one occurrence."
               (let ((result (ellm-tools--do-edit
                              old-string new-string replace-all name)))
                 (write-region (point-min) (point-max) file-path nil 'silent)
+                (ellm-tools--refresh-clean-visiting-buffer file-path)
                 result))
           (when (buffer-live-p temp-buf)
             (kill-buffer temp-buf))))))))
 
-(defun ellm-tools--create-file (file-path content name existing-buffer)
-  "Create FILE-PATH with CONTENT for tool target NAME.
-Refuse to overwrite an existing file or a non-empty visiting buffer.
-Refresh EXISTING-BUFFER after creation when it visits FILE-PATH."
+(defun ellm-tools--prepare-visiting-buffer-for-file-write (file-path)
+  "Prepare FILE-PATH's visiting buffer for a direct disk write."
+  (when-let ((buffer (find-buffer-visiting file-path)))
+    (with-current-buffer buffer
+      (if (buffer-modified-p)
+          ;; Suppress the supersession check for this intentional disk write.
+          ;; Its modtime becomes stale again as soon as the write completes.
+          (set-visited-file-modtime)
+        (revert-buffer t t t)))))
+
+(defun ellm-tools--refresh-clean-visiting-buffer (file-path)
+  "Refresh FILE-PATH's clean visiting buffer and mark others stale."
+  (when-let ((buffer (find-buffer-visiting file-path)))
+    (with-current-buffer buffer
+      (if (buffer-modified-p)
+          ;; Ensure a later save detects the disk edit even on filesystems
+          ;; whose modification-time resolution is too coarse for this write.
+          (set-visited-file-modtime -1)
+        (revert-buffer t t t)))))
+
+(defun ellm-tools--create-file (file-path content name)
+  "Create FILE-PATH with CONTENT for tool target NAME."
   (when (or (file-exists-p file-path)
             (file-symlink-p file-path))
     (ellm-tools--error
      "Refusing to create %s because it already exists" name))
-  (when (and existing-buffer
-             (with-current-buffer existing-buffer
-               (or (buffer-modified-p) (> (buffer-size) 0))))
-    (ellm-tools--error
-     "Refusing to create %s because its buffer has unsaved content" name))
   (let ((parent-directory (file-name-directory file-path)))
     (unless (file-directory-p parent-directory)
       (make-directory parent-directory t)))
   (write-region content nil file-path nil 'silent nil 'excl)
-  (when (buffer-live-p existing-buffer)
-    (with-current-buffer existing-buffer
-      (revert-buffer t t t)))
+  (ellm-tools--refresh-clean-visiting-buffer file-path)
   (ellm-tools--success "Successfully created %s" name))
 
 (defun ellm-tools--do-edit (old-string new-string replace-all name)
