@@ -294,7 +294,28 @@ children of children.  Without it, offer only direct children."
 
 (eval-and-compile
   (defun ellm-tools--normalize-name (s)
-    (string-replace "-" "_" s)))
+    (string-replace "-" "_" s))
+
+  (defun ellm-tools--argument-optional-p (arg)
+    "Return non-nil when tool argument specification ARG is optional."
+    (let ((tail (nthcdr 3 arg)))
+      (or (eq (car tail) '&optional)
+          (and (eq (car tail) :optional)
+               (or (null (cdr tail))
+                   (not (memq (cadr tail) '(nil t)))))
+          (plist-get tail :optional))))
+
+  (defun ellm-tools--argument-schema-metadata (arg)
+    "Return JSON Schema metadata from tool argument specification ARG."
+    (let ((tail (nthcdr 3 arg)))
+      (when (or (eq (car tail) '&optional)
+                (and (eq (car tail) :optional)
+                     (or (null (cdr tail))
+                         (not (memq (cadr tail) '(nil t))))))
+        (setq tail (cdr tail)))
+      (cl-loop for (key value) on tail by #'cddr
+               unless (eq key :optional)
+               append (list key value)))))
 
 (defmacro ellm-deftool (name specs arglist doc &rest body)
   (declare (indent 2))
@@ -305,8 +326,7 @@ children of children.  Without it, offer only direct children."
                (lambda-args
                 (let (args optional)
                   (dolist (arg arglist (nreverse args))
-                    (when (and (or (eq (nth 3 arg) '&optional)
-                                   (eq (nth 3 arg) :optional))
+                    (when (and (ellm-tools--argument-optional-p arg)
                                (not optional))
                       (push '&optional args)
                       (setq optional t))
@@ -346,13 +366,15 @@ children of children.  Without it, offer only direct children."
                :async ,async?
                :args ',(mapcar
                         (lambda (it)
-                          (list :name (ellm-tools--normalize-name (symbol-name (nth 0 it)))
-                                :type  (intern (string-trim-left (symbol-name (nth 1 it)) ":"))
-                                :optional (or (eq (nth 3 it) '&optional) (eq (nth 3 it) :optional))
-                                :description
-                                (s-replace-all
-                                 param-name-replacements
-                                 (nth 2 it))))
+                          (append
+                           (list :name (ellm-tools--normalize-name (symbol-name (nth 0 it)))
+                                 :type  (intern (string-trim-left (symbol-name (nth 1 it)) ":"))
+                                 :optional (ellm-tools--argument-optional-p it)
+                                 :description
+                                 (s-replace-all
+                                  param-name-replacements
+                                  (nth 2 it)))
+                           (ellm-tools--argument-schema-metadata it)))
                         arglist)
                :function #',const-sym
                :category ,category)
@@ -481,6 +503,104 @@ children of children.  Without it, offer only direct children."
     result))
 
 ;;;; Tools
+
+;;;;; User input
+
+(defun ellm-tools--ask-question (question)
+  "Normalize one `ask' QUESTION specification."
+  (let* ((text (ellm--plistish-get question :question))
+         (raw-options (ellm--plistish-get question :options))
+         (options (cond ((vectorp raw-options) (append raw-options nil))
+                        ((listp raw-options) raw-options)
+                        ((null raw-options) nil)
+                        (t (ellm-tools--error "ask options must be an array"))))
+         (multiple (not (ellm--false-value-p
+                         (ellm--plistish-get question :multiple))))
+         (custom-value (ellm--plistish-get question :custom))
+         (custom (if (null custom-value)
+                     t
+                   (not (ellm--false-value-p custom-value)))))
+    (unless (and (stringp text) (not (string-empty-p text)))
+      (ellm-tools--error "ask question must be a non-empty string"))
+    (unless (cl-every #'stringp options)
+      (ellm-tools--error "ask options must contain only strings"))
+    (when (and multiple (null options))
+      (ellm-tools--error "ask multiple selection requires options"))
+    (list :question text :options options :multiple multiple :custom custom)))
+
+(defun ellm-tools--format-ask-result (questions answers)
+  "Format QUESTIONS and their ANSWERS as plain text for the model."
+  (mapconcat
+   #'identity
+   (cl-mapcar (lambda (question answer)
+                (format "Question: %s\nAnswer: %s"
+                        (plist-get question :question)
+                        (string-join answer ", ")))
+              questions answers)
+   "\n\n"))
+
+(ellm-deftool user/ask (:async t :timeout nil)
+  ((questions :array "Questions to ask."
+    :items
+    (:type object
+     :properties
+     (:question (:type string
+                 :description "The question to ask the user.")
+      :options (:type array
+                :items (:type string)
+                :description "Suggested answers.")
+      :multiple (:type boolean
+                 :description "Whether more than one answer may be selected.")
+      :custom (:type boolean
+               :description "Whether input outside `options` is accepted."))
+     :required ["question"])))
+  "Ask the user one or more QUESTIONS and return their answers.
+
+Each question has a required non-empty `question` string.  It may have an
+`options` array of strings, `multiple` to allow more than one selection, and
+`custom` to allow input outside the options (default true).  Omit `options`
+for free-form text.  Do not add an \"Other\" option: custom input is handled
+by the user interface."
+  (unless (derived-mode-p 'ellm-mode)
+    (ellm-tools--error "ask must run in an ellm conversation buffer"))
+  (unless ellm--active-request
+    (ellm-tools--error "ask requires an active ellm request"))
+  (let* ((raw-questions (if (vectorp questions) (append questions nil) questions))
+         (normalized (mapcar #'ellm-tools--ask-question raw-questions))
+         (answers (make-vector (length normalized) nil))
+         (remaining (length normalized))
+         cancelled)
+    (unless normalized
+      (ellm-tools--error "ask requires at least one question"))
+    (let ((ellm--inhibit-user-prompt-activation t))
+      (cl-loop for question in normalized
+               for index from 0
+               do (let ((index index))
+                    (ellm--request-user-prompt
+                   ellm--active-request
+                   (list :kind 'question
+                         :title "Agent question"
+                         :message (plist-get question :question)
+                         :options (mapcar (lambda (option)
+                                            (list :id option :label option))
+                                          (plist-get question :options))
+                         :multiple (plist-get question :multiple)
+                         :custom (plist-get question :custom))
+                   (lambda (outcome)
+                     (when (eq (plist-get outcome :status) 'cancelled)
+                       (setq cancelled t))
+                     (aset answers index
+                           (let ((value (plist-get outcome :value)))
+                             (if (listp value) value (list value))))
+                     (cl-decf remaining)
+                     (when (zerop remaining)
+                       (funcall callback
+                                (if cancelled
+                                    "The user cancelled the questions."
+                                  (ellm-tools--format-ask-result
+                                   normalized (append answers nil)))))))))
+    (ellm--activate-next-user-prompt))
+  nil))
 
 ;;;;; Shell
 

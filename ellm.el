@@ -3932,6 +3932,10 @@ explicitly marked `:retryable' and the core retry budget remains.")
    nil
    :type boolean
    :documentation "Whether more than one option may be selected.")
+  (custom
+   nil
+   :type boolean
+   :documentation "Whether input outside `options' is accepted.")
   (secret
    nil
    :type boolean
@@ -3954,6 +3958,9 @@ explicitly marked `:retryable' and the core retry budget remains.")
 
 (defvar-local ellm--active-user-prompt nil
   "Queue head currently waiting for or collecting user input.")
+
+(defvar ellm--inhibit-user-prompt-activation nil
+  "When non-nil, queue prompts without activating their head.")
 
 (defun ellm--user-prompt-option-candidates (options)
   "Return unique completion candidates for OPTIONS."
@@ -4025,16 +4032,19 @@ When SUPPRESS-NEXT is non-nil, do not activate the next queued prompt."
                  ((ellm-user-prompt-multiple prompt)
                   (let* ((candidates (ellm--user-prompt-option-candidates options))
                          (values (completing-read-multiple
-                                  prompt-text (mapcar #'car candidates) nil t)))
+                                  prompt-text (mapcar #'car candidates) nil
+                                  (not (ellm-user-prompt-custom prompt)))))
                     (list :status 'selected
                           :value (mapcar (lambda (value)
-                                           (cdr (assoc value candidates)))
+                                           (or (cdr (assoc value candidates)) value))
                                          values))))
                  (options
                   (let* ((candidates (ellm--user-prompt-option-candidates options))
                          (choice (completing-read prompt-text (mapcar #'car candidates)
-                                                  nil t)))
-                    (list :status 'selected :value (cdr (assoc choice candidates)))))
+                                                  nil (not (ellm-user-prompt-custom prompt))))
+                         (value (cdr (assoc choice candidates))))
+                    (list :status (if value 'selected 'submitted)
+                          :value (or value choice))))
                  (t
                   (list :status 'submitted
                         :value (read-string prompt-text nil nil
@@ -4101,7 +4111,7 @@ When SUPPRESS-NEXT is non-nil, do not activate the next queued prompt."
        request 'user-input-requested "ellm: input requested"
        (format "%s: %s" (buffer-name (ellm-request-buffer request))
                (or (ellm-user-prompt-title pending) "Agent interaction"))))
-    (when empty
+    (when (and empty (not ellm--inhibit-user-prompt-activation))
       (ellm--activate-next-user-prompt))
     pending))
 
