@@ -287,7 +287,7 @@ their nested `tool-param' turns but omitted from the title."
   :type 'natnum
   :group 'ellm)
 
-(defcustom ellm-header-line-template "%l%>%r"
+(defcustom ellm-header-line-template "%l%>%q%r"
   "Template for the `ellm-mode' header line.
 
 The following placeholders are expanded:
@@ -296,6 +296,7 @@ The following placeholders are expanded:
   %p  TODO completion progress
   %u  context usage
   %c  request cost
+  %q  pending user-prompt status
   %l  title and TODO progress, joined with \" — \", when both exist
   %r  context usage and cost, joined with a space, when both exist
   %>  align all following text against the right edge
@@ -493,7 +494,7 @@ mean that the local tool succeeded."
   :group 'ellm)
 
 (defcustom ellm-before-permission-hook nil
-  "Hook run before `ellm-permission-function' selects a permission option.
+  "Hook run before ellm queues a normalized permission prompt.
 Each function receives REQUEST and normalized PERMISSION data."
   :type 'hook
   :group 'ellm)
@@ -505,11 +506,14 @@ DECISION is nil when permission was cancelled."
   :type 'hook
   :group 'ellm)
 
-(defcustom ellm-permission-function #'ellm--ask-permission
-  "Function used to select an option for a normalized permission request.
-It receives REQUEST and PERMISSION, and returns an option identifier or nil
-to cancel."
-  :type 'function
+(defcustom ellm-user-prompt-activation 'when-selected
+  "When ellm activates an agent request for user input.
+
+`when-selected' waits until the conversation buffer is selected, or until
+`ellm-answer-prompt' is invoked.  `immediate' opens the standard Emacs reader
+as soon as the agent asks."
+  :type '(choice (const :tag "When conversation buffer is selected" when-selected)
+                 (const :tag "Immediately" immediate))
   :group 'ellm)
 
 (defcustom ellm-notifications-enabled t
@@ -3902,20 +3906,226 @@ explicitly marked `:retryable' and the core retry budget remains.")
 (defvar-local ellm--request-generation 0
   "Monotonic identity of the current request lifecycle.")
 
-(defun ellm--ask-permission (_request permission)
-  "Interactively select a permission option for REQUEST and PERMISSION."
-  (unless noninteractive
-    (let* ((tool-call (plist-get permission :tool-call))
-           (options (plist-get permission :options))
-           (title (or (plist-get tool-call :title) "Permission request"))
-           (choices (mapcar (lambda (option)
-                              (cons (or (plist-get option :name)
-                                        (plist-get option :id))
-                                    (plist-get option :id)))
+(cl-defstruct (ellm-user-prompt (:constructor ellm--make-user-prompt))
+  "A pending asynchronous request for user input."
+  (request
+    nil
+    :type (or null ellm-request)
+    :documentation "Logical request that owns this prompt.")
+  (kind
+   'question
+   :type symbol
+   :documentation "Prompt kind, such as `permission' or `question'.")
+  (title
+   nil
+   :type (or null string)
+   :documentation "Short user-facing title for the prompt.")
+  (message
+   nil
+   :type (or null string)
+   :documentation "Optional explanatory text for the prompt.")
+  (options
+   nil
+   :type list
+   :documentation "Normalized option plists, each with at least `:id'.")
+  (multiple
+   nil
+   :type boolean
+   :documentation "Whether more than one option may be selected.")
+  (secret
+   nil
+   :type boolean
+   :documentation "Whether the response must be read as a secret.")
+  (default
+    nil
+    :type (or null string)
+    :documentation "Default response or option identifier, when any.")
+  (respond
+   nil
+   :type function
+   :documentation "One-shot callback receiving the normalized outcome.")
+  (activated
+   nil
+   :type t
+   :documentation "Nil while queued, non-nil while active, or `resolved'."))
+
+(defvar-local ellm--user-prompt-queue nil
+  "FIFO queue of `ellm-user-prompt' records for the current buffer.")
+
+(defvar-local ellm--active-user-prompt nil
+  "Queue head currently waiting for or collecting user input.")
+
+(defun ellm--user-prompt-option-candidates (options)
+  "Return unique completion candidates for OPTIONS."
+  (let ((seen (make-hash-table :test #'equal)))
+    (mapcar
+     (lambda (option)
+       (let* ((id (format "%s" (plist-get option :id)))
+              (label (or (plist-get option :label)
+                         (plist-get option :name) id))
+              (candidate label)
+              (suffix 1))
+         (while (gethash candidate seen)
+           (setq candidate
+                 (format "%s [%s%s]" label id
+                         (if (= suffix 1) "" (format " %d" suffix)))
+                 suffix (1+ suffix)))
+         (puthash candidate t seen)
+         (cons candidate id)))
+     options)))
+
+(defun ellm--activate-next-user-prompt ()
+  "Make and, when appropriate, activate the next queued user prompt."
+  (unless ellm--active-user-prompt
+    (setq ellm--active-user-prompt (car ellm--user-prompt-queue))
+    (when ellm--active-user-prompt
+      (force-mode-line-update)
+      (when (or (eq ellm-user-prompt-activation 'immediate)
+                (eq (window-buffer (selected-window)) (current-buffer)))
+        (ellm--activate-user-prompt ellm--active-user-prompt)))))
+
+(defun ellm--resolve-user-prompt (prompt outcome &optional suppress-next)
+  "Resolve active PROMPT once with normalized OUTCOME.
+When SUPPRESS-NEXT is non-nil, do not activate the next queued prompt."
+  (when (and (eq ellm--active-user-prompt prompt)
+             (not (eq (ellm-user-prompt-activated prompt) 'resolved)))
+    (setf (ellm-user-prompt-activated prompt) 'resolved)
+    (setq ellm--user-prompt-queue (delq prompt ellm--user-prompt-queue)
+          ellm--active-user-prompt nil)
+    (force-mode-line-update)
+    (condition-case err
+        (funcall (ellm-user-prompt-respond prompt) outcome)
+      (error
+       (message "ellm: user prompt callback error: %s" (error-message-string err))))
+    (if ellm--user-prompt-queue
+        (unless suppress-next
+          (ellm--activate-next-user-prompt))
+      (when-let* ((request (ellm-user-prompt-request prompt))
+                  ((ellm--request-event-current-p
+                    request (ellm-request-attempt request))))
+        (ellm--request-reset-idle-timer request (ellm-request-attempt request))))))
+
+(defun ellm--activate-user-prompt (prompt)
+  "Read and resolve pending PROMPT with a standard Emacs reader."
+  (when (and (ellm-user-prompt-p prompt)
+             (not (ellm-user-prompt-activated prompt)))
+    (setf (ellm-user-prompt-activated prompt) t)
+    (condition-case err
+        (let* ((title (or (ellm-user-prompt-title prompt) "Input required"))
+               (message (ellm-user-prompt-message prompt))
+               (options (ellm-user-prompt-options prompt))
+               (prompt-text (format "%s%s: " title
+                                    (if message (format " — %s" message) "")))
+               outcome)
+          (setq outcome
+                (cond
+                 (noninteractive '(:status cancelled))
+                 ((ellm-user-prompt-secret prompt)
+                  (list :status 'submitted :value (read-passwd prompt-text)))
+                 ((ellm-user-prompt-multiple prompt)
+                  (let* ((candidates (ellm--user-prompt-option-candidates options))
+                         (values (completing-read-multiple
+                                  prompt-text (mapcar #'car candidates) nil t)))
+                    (list :status 'selected
+                          :value (mapcar (lambda (value)
+                                           (cdr (assoc value candidates)))
+                                         values))))
+                 (options
+                  (let* ((candidates (ellm--user-prompt-option-candidates options))
+                         (choice (completing-read prompt-text (mapcar #'car candidates)
+                                                  nil t)))
+                    (list :status 'selected :value (cdr (assoc choice candidates)))))
+                 (t
+                  (list :status 'submitted
+                        :value (read-string prompt-text nil nil
+                                            (ellm-user-prompt-default prompt))))))
+          (ellm--resolve-user-prompt prompt outcome))
+      (quit (ellm--resolve-user-prompt prompt '(:status cancelled)))
+      (error
+       (message "ellm: user prompt error: %s" (error-message-string err))
+       (ellm--resolve-user-prompt prompt '(:status cancelled))))))
+
+(defun ellm--maybe-activate-user-prompt ()
+  "Activate the queue head after the conversation buffer is selected."
+  (when (eq (window-buffer (selected-window)) (current-buffer))
+    (if ellm--active-user-prompt
+        (ellm--activate-user-prompt ellm--active-user-prompt)
+      (ellm--activate-next-user-prompt))))
+
+(defun ellm--cancel-pending-user-prompt ()
+  "Cancel and drain the current buffer's queued user prompts."
+  (while ellm--active-user-prompt
+    (ellm--resolve-user-prompt ellm--active-user-prompt
+                                '(:status cancelled) t))
+  ;; This also handles queued prompts if cancellation occurs reentrantly while
+  ;; no queue head is active.
+  (while ellm--user-prompt-queue
+    (setq ellm--active-user-prompt (car ellm--user-prompt-queue))
+    (ellm--resolve-user-prompt ellm--active-user-prompt
+                                '(:status cancelled) t)))
+
+(defun ellm-answer-prompt ()
+  "Answer the active agent prompt in the current ellm buffer."
+  (interactive)
+  (if ellm--active-user-prompt
+      (ellm--activate-user-prompt ellm--active-user-prompt)
+    (user-error "ellm: no input is pending")))
+
+(defun ellm-answer-prompt-mouse (event)
+  "Answer the pending prompt in the window clicked by mouse EVENT."
+  (interactive "e")
+  (when-let* ((window (posn-window (event-start event)))
+              ((windowp window)))
+    (with-selected-window window
+      (ellm-answer-prompt))))
+
+(defvar ellm--user-prompt-header-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map [header-line mouse-1] #'ellm-answer-prompt-mouse)
+    map)
+  "Keymap for the pending user-prompt header-line indicator.")
+
+(defun ellm--request-user-prompt (request prompt respond)
+  "Append normalized PROMPT for REQUEST and call RESPOND with its outcome."
+  (let ((pending (apply #'ellm--make-user-prompt
+                        :request request :respond respond prompt))
+        (empty (null ellm--user-prompt-queue)))
+    (setq ellm--user-prompt-queue
+          (nconc ellm--user-prompt-queue (list pending)))
+    (when (ellm-request-p request)
+      (ellm--request-cancel-idle-timer request))
+    (when (and empty
+               (eq (ellm-user-prompt-kind pending) 'question)
+               (ellm-request-p request))
+      (ellm--notify-user
+       request 'user-input-requested "ellm: input requested"
+       (format "%s: %s" (buffer-name (ellm-request-buffer request))
+               (or (ellm-user-prompt-title pending) "Agent interaction"))))
+    (when empty
+      (ellm--activate-next-user-prompt))
+    pending))
+
+(defun ellm--request-permission (request permission respond)
+  "Queue a permission request and call RESPOND with its option ID or nil."
+  (ellm--run-observer-hook 'ellm-before-permission-hook request permission)
+  (let* ((tool-call (plist-get permission :tool-call))
+         (options (plist-get permission :options)))
+    (ellm--request-user-prompt
+     request
+     (list :kind 'permission
+           :title (or (plist-get tool-call :title) "Permission request")
+           :message (plist-get tool-call :description)
+           :options (mapcar (lambda (option)
+                              (list :id (plist-get option :id)
+                                    :label (or (plist-get option :name)
+                                               (plist-get option :id))))
                             options))
-           (choice (completing-read (format "%s: " title)
-                                    (mapcar #'car choices) nil t)))
-      (cdr (assoc choice choices)))))
+     (lambda (outcome)
+       (let ((decision (and (eq (plist-get outcome :status) 'selected)
+                            (plist-get outcome :value))))
+         (ellm--run-observer-hook 'ellm-after-permission-hook
+                                  request permission decision)
+         (funcall respond decision))))))
 
 (defvar-local ellm--request-finished-notified-p nil
   "Non-nil when the current request has fired `ellm-request-finished-hook'.")
@@ -4019,20 +4229,6 @@ Return non-nil when a live top-level assistant header was updated."
   "Finalize an active request if buffer teardown bypassed normal cleanup."
   (when ellm--active-request
     (ellm--notify-request-finished ellm--active-request '(:state cancelled))))
-
-(defun ellm--request-permission (request permission)
-  "Select an option for REQUEST's normalized PERMISSION request.
-Selector errors are reported and treated as cancellation."
-  (ellm--run-observer-hook 'ellm-before-permission-hook request permission)
-  (let (decision)
-    (condition-case err
-        (setq decision (funcall ellm-permission-function request permission))
-      (error
-       (message "ellm: permission selector error: %s"
-                (error-message-string err))))
-    (ellm--run-observer-hook 'ellm-after-permission-hook
-                             request permission decision)
-    decision))
 
 (defun ellm--notify-permission-request (request permission)
   "Notify when REQUEST needs a permission decision for PERMISSION."
@@ -4290,6 +4486,7 @@ MESSAGE-TEXT is reported after cleanup when non-nil."
         (when (eq ellm--active-request request)
           (ellm--preserve-user-position
             (ellm--request-record-usage request)
+            (ellm--cancel-pending-user-prompt)
             (ellm--set-active-request nil)
             (ellm--ensure-next-user-turn)
             (ellm--persistence-checkpoint)
@@ -6552,6 +6749,24 @@ the resulting normalized list."
     (ellm--escape-header-line-text
      (replace-regexp-in-string "[\n\r\t]+" " " title))))
 
+(defun ellm--user-prompt-header-status ()
+  "Return the clickable header-line status for queued user prompts."
+  (when ellm--user-prompt-queue
+    (let* ((count (length ellm--user-prompt-queue))
+           (title (ellm-user-prompt-title ellm--active-user-prompt))
+           (text (format "Input required%s "
+                         (if (> count 1) (format " (%d)" count) ""))))
+      (propertize text
+                  'face 'warning
+                  'mouse-face 'highlight
+                  'keymap ellm--user-prompt-header-map
+                  'help-echo
+                  (format "%s%s Click or type C-c C-a to answer."
+                          (if title (concat title ".") "")
+                          (if (> count 1)
+                              (format " %d prompts are queued." count)
+                            ""))))))
+
 (defun ellm--header-line-fields ()
   "Return field values for `ellm-header-line-template'."
   (let* ((title (ellm--format-header-title ellm--session-title))
@@ -6567,12 +6782,14 @@ the resulting normalized list."
          (cost-text (ellm--format-cost
                      (ellm-buffer-state-cost-amount ellm-buffer-state)
                      (ellm-buffer-state-cost-currency ellm-buffer-state)))
-         (cost (and cost-text (ellm--escape-header-line-text cost-text))))
+         (cost (and cost-text (ellm--escape-header-line-text cost-text)))
+         (prompt-status (ellm--user-prompt-header-status)))
     `((?t . ,title)
       (?a . ,active)
       (?p . ,progress)
       (?u . ,usage)
       (?c . ,cost)
+      (?q . ,prompt-status)
       (?l . ,(string-join (delq nil (list title todos)) " — "))
       (?r . ,(string-join (delq nil (list usage cost)) " ")))))
 
@@ -6583,7 +6800,7 @@ Return a cons of the left and right portions, split at `%>'."
         (right nil)
         (right-aligned nil)
         (start 0))
-    (while (string-match "%[%%tapulrc>]" template start)
+    (while (string-match "%[%%tapulrcq>]" template start)
       (let ((literal (substring template start (match-beginning 0)))
             (placeholder (aref template (1+ (match-beginning 0)))))
         (push (ellm--escape-header-line-text literal)
@@ -6626,6 +6843,7 @@ Return a cons of the left and right portions, split at `%>'."
     (define-key map (kbd "<backtab>") #'ellm-outline-cycle-buffer)
     (define-key map (kbd "C-c C-c")   #'ellm-send)
     (define-key map (kbd "C-c C-k")   #'ellm-cancel)
+    (define-key map (kbd "C-c C-a")   #'ellm-answer-prompt)
     (define-key map (kbd "C-c C-s")   #'ellm-start-session)
     (define-key map (kbd "C-c C-l")   #'ellm-load-session)
     (define-key map (kbd "C-c C-o")   #'ellm-open-session)
@@ -6650,6 +6868,7 @@ Return a cons of the left and right portions, split at `%>'."
   (add-hook 'after-change-functions #'ellm--after-change-function nil t)
   (ellm--configure-turn-rules t)
   (add-hook 'post-command-hook #'ellm--reveal-separator-at-point nil t)
+  (add-hook 'post-command-hook #'ellm--maybe-activate-user-prompt nil t)
   (add-hook 'completion-at-point-functions #'ellm--frontmatter-capf nil t)
   (add-hook 'completion-at-point-functions #'ellm--slash-command-capf nil t)
   (add-hook 'kill-buffer-hook #'ellm--close-session-on-kill nil t)

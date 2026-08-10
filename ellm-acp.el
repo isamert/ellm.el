@@ -671,7 +671,9 @@ Return non-nil when an event sink accepted it."
                                                 :false-object :json-false)))
                 (setq message (plist-put message :jsonrpc-json line))
                 (ellm-acp--maybe-finish-prompt-reply connection message)
-                (jsonrpc-connection-receive connection message))
+                (if (ellm-acp--deferred-user-prompt-request-p message)
+                    (ellm-acp--handle-deferred-user-prompt connection message)
+                  (jsonrpc-connection-receive connection message)))
             (error
              (message "ellm ACP: failed to handle message: %S" err)))))
       (setf (ellm-acp--connection-input connection) input))))
@@ -2635,6 +2637,13 @@ If the matched turn has nested child turns, delete those children too."
 
 ;;;; Permission requests
 
+(defun ellm-acp--deferred-user-prompt-request-p (message)
+  "Return non-nil when MESSAGE is an ACP request needing deferred input."
+  (and (plist-member message :id)
+       (plist-get message :method)
+       (equal (ellm-acp--method-name (plist-get message :method))
+              "session/request_permission")))
+
 (defun ellm-acp--normalized-permission (tool-call options)
   "Return core permission data normalized from ACP TOOL-CALL and OPTIONS."
   (list :backend 'acp :tool-call tool-call
@@ -2643,23 +2652,41 @@ If the matched turn has nested child turns, delete those children too."
                              (plist-put copy :id (plist-get option :optionId))))
                          options)))
 
-(defun ellm-acp--handle-permission-request (connection params)
-  "Handle ACP permission PARAMS for CONNECTION and return an ACP response."
-  (let* ((tool-call (plist-get params :toolCall))
+(defun ellm-acp--permission-outcome (option-id)
+  "Return the ACP permission outcome for OPTION-ID."
+  `(:outcome ,(if option-id
+                  `(:outcome "selected" :optionId ,option-id)
+                '(:outcome "cancelled"))))
+
+(defun ellm-acp--handle-deferred-user-prompt (connection message)
+  "Queue MESSAGE's permission request and reply to it after user input."
+  (let* ((params (plist-get message :params))
+         (id (plist-get message :id))
+         (tool-call (plist-get params :toolCall))
          (options (plist-get params :options))
          (buffer (ellm-acp--connection-buffer connection))
          (backend-request (ellm-acp--connection-current-request connection))
-         (permission (ellm-acp--normalized-permission tool-call options))
-         (option-id
-          (and (buffer-live-p buffer)
-               (with-current-buffer buffer
-                 (when-let* ((request ellm--active-request)
-                             ((eq (ellm-request-backend request)
-                                  backend-request)))
-                   (ellm--request-permission request permission))))))
-    `(:outcome ,(if option-id
-                    `(:outcome "selected" :optionId ,option-id)
-                  '(:outcome "cancelled")))))
+         (permission (ellm-acp--normalized-permission tool-call options)))
+    (if (not (buffer-live-p buffer))
+        (jsonrpc-connection-send connection :id id
+                                 :result (ellm-acp--permission-outcome nil))
+      (with-current-buffer buffer
+        (if-let* ((request ellm--active-request)
+                  ((eq (ellm-request-backend request) backend-request)))
+            (ellm--request-permission
+             request permission
+             (lambda (option-id)
+               (when (jsonrpc-running-p connection)
+                 (jsonrpc-connection-send
+                  connection :id id
+                  :result (ellm-acp--permission-outcome option-id)))))
+          (jsonrpc-connection-send connection :id id
+                                   :result (ellm-acp--permission-outcome nil)))))))
+
+(defun ellm-acp--handle-permission-request (_connection _params)
+  "Reject a permission request that bypassed deferred ACP dispatch."
+  (jsonrpc-error :code -32603
+                 :message "ACP permission request was not deferred"))
 
 ;;;; Configuration prompts
 
