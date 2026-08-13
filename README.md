@@ -262,6 +262,38 @@ Enable built-in local tools:
 (require 'ellm-tools)
 ```
 
+### Profiles and subagents
+
+`ellm-profiles` defines reusable global conversation defaults.  A buffer can
+select one with `profile:` and locally add or override definitions with
+`profiles:`.  Maps merge recursively; scalar values and lists such as `tools:`
+replace inherited values.  Ordinary frontmatter overrides the selected profile.
+Profile `description:` is discovery metadata and is not sent to a provider.
+
+```elisp
+(setq ellm-profiles
+      '((explore . ((description . "Read-only codebase exploration.")
+                    (model . "cheap-model")
+                    (tools . ("@files" "@buffers"))
+                    (system . "Explore the codebase. Do not edit files.")))))
+```
+
+```yaml
+---
+profile: explore
+profiles:
+  explore:
+    system: Explore this project's architecture and report relevant files.
+---
+```
+
+With `ellm-tools` enabled, `list_profiles` exposes the effective named-profile
+catalog to the model.  `launch_subagent` accepts an optional `profile` name;
+call `list_profiles` before choosing one.  A child launched with a profile uses
+that profile as its baseline; without one it inherits the parent's effective
+configuration.  `cwd` remains available as a per-launch override.
+
+
 ```markdown
 ---
 provider: openai

@@ -800,7 +800,7 @@ earlier observations from the same request leg."
         (setq usage (plist-put usage key value))))))
 
 (cl-defun ellm-llm--parse-buffer-as-chat
-    (provider &optional (frontmatter (ellm--parse-frontmatter)))
+    (provider &optional (frontmatter (ellm--effective-frontmatter)))
   "Build an `llm-chat-prompt' from the current buffer for PROVIDER.
 FRONTMATTER, when supplied, is the already parsed YAML frontmatter alist."
   (let* ((fm          frontmatter)

@@ -130,21 +130,25 @@ Nil disables the limit."
                  (natnum :tag "Characters"))
   :group 'ellm)
 
-(defcustom ellm-subagents nil
-  "Global defaults and profiles for subagent buffers.
-This has the same shape as frontmatter `subagents:'.  A buffer-local
-frontmatter `subagents:' map takes precedence when present.
+(defcustom ellm-profiles nil
+  "Global reusable conversation profiles.
+Each entry maps a profile name to frontmatter defaults.  Buffer-local
+frontmatter `profiles:' entries overlay these definitions by name, and a
+buffer selects one with top-level `profile:'.  Ordinary frontmatter settings
+then override the selected profile.
 
-The common shape is:
+For example:
 
-  ((default . \"cheap\")
-   (profiles . ((cheap . ((model . \"small\")))
-                (reviewer . ((model . \"large\")
-                             (tools . (\"@files\" \"@buffers\")))))))
+  ((explore . ((description . \"Read-only codebase exploration.\")
+               (model . \"small\")
+               (tools . (\"@files\" \"@buffers\"))
+               (system . \"Explore the codebase. Do not edit files.\")))
+   (reviewer . ((description . \"Independent code review.\")
+                (model . \"large\")
+                (tools . (\"@files\" \"@buffers\")))))
 
-`default' may be a profile name or a map of settings.  Profile maps may
-set any frontmatter key useful to a child buffer, most commonly `provider',
-`model', `tools', `system', and `cwd'."
+`description' is profile metadata for discovery and is not sent to a
+provider.  Profiles cannot themselves select or define profiles."
   :type 'sexp
   :group 'ellm)
 
@@ -2472,6 +2476,85 @@ parsing fails.  Unless QUIET is non-nil, parsing failures issue a
     (setq ellm--frontmatter-cache-valid nil)
     nil))
 
+(defun ellm--profile-name (value)
+  "Return VALUE as a non-empty profile name, or signal an error."
+  (let ((name (cond ((symbolp value) (symbol-name value))
+                    ((stringp value) value))))
+    (unless (and name (not (string-empty-p name)))
+      (user-error "ellm: profile must be a non-empty string or symbol"))
+    name))
+
+(defun ellm--frontmatter-map (value label)
+  "Return VALUE as an alist map, or signal an error using LABEL."
+  (unless (or (null value)
+              (and (listp value) (cl-every #'consp value)))
+    (user-error "ellm: %s must be a map" label))
+  value)
+
+(defun ellm--merge-frontmatter-maps (base override)
+  "Recursively merge frontmatter maps BASE and OVERRIDE.
+Map values merge recursively; all other values, including lists, replace."
+  (let ((result (copy-tree (ellm--frontmatter-map base "profile"))))
+    (dolist (entry (ellm--frontmatter-map override "profile") result)
+      (let* ((key (car entry))
+             (old (cl-find key result :key #'car
+                           :test #'ellm--frontmatter-key-equal-p))
+             (value (cdr entry)))
+        (if old
+            (setcdr old (if (and (listp (cdr old))
+                                 (listp value)
+                                 (cl-every #'consp (cdr old))
+                                 (cl-every #'consp value))
+                            (ellm--merge-frontmatter-maps (cdr old) value)
+                          (copy-tree value)))
+          (push (cons key (copy-tree value)) result))))))
+
+(defun ellm--profile-map (profiles name)
+  "Return profile NAME from PROFILES, or signal a useful error."
+  (let ((cell (cl-find name profiles :key (lambda (entry)
+                                            (ellm--profile-name (car entry)))
+                     :test #'equal)))
+    (unless cell
+      (user-error "ellm: profile not found: %s" name))
+    (let ((map (cdr cell)))
+      (ellm--frontmatter-map map (format "profile `%s'" name))
+      (when (or (assq 'profile map) (assq 'profiles map))
+        (user-error "ellm: profile `%s' cannot select or define profiles" name))
+      map)))
+
+(defun ellm--effective-profiles (frontmatter)
+  "Return global profiles overlaid by FRONTMATTER's local `profiles:' map."
+  (let ((profiles (copy-tree (ellm--frontmatter-map ellm-profiles "ellm-profiles"))))
+    (dolist (entry (ellm--frontmatter-map (alist-get 'profiles frontmatter)
+                                           "frontmatter `profiles'")
+             profiles)
+      (let* ((name (ellm--profile-name (car entry)))
+             (old (cl-find name profiles :key (lambda (candidate)
+                                                 (ellm--profile-name (car candidate)))
+                           :test #'equal))
+             (value (ellm--frontmatter-map (cdr entry)
+                                            (format "profile `%s'" name))))
+        (if old
+            (setcdr old (ellm--merge-frontmatter-maps (cdr old) value))
+          (push (cons name (copy-tree value)) profiles))))))
+
+(defun ellm--effective-frontmatter (&optional frontmatter)
+  "Return effective configuration from FRONTMATTER or the current buffer.
+A selected `profile:' is resolved from global `ellm-profiles' overlaid by
+buffer-local `profiles:'.  Ordinary frontmatter keys override the profile.
+Profile metadata and the profile catalog are not passed to providers."
+  (let* ((frontmatter (copy-tree (or frontmatter (ellm--parse-frontmatter))))
+         (profile (alist-get 'profile frontmatter))
+         (profiles (ellm--effective-profiles frontmatter))
+         (overrides (ellm--alist-delete-nested
+                     (ellm--alist-delete-nested frontmatter 'profiles) 'profile))
+         (effective (if profile
+                        (ellm--merge-frontmatter-maps
+                         (ellm--profile-map profiles (ellm--profile-name profile))
+                         overrides)
+                      overrides)))
+    (ellm--alist-delete-nested effective 'description)))
+
 (defun ellm--false-value-p (value)
   "Return non-nil when VALUE represents boolean false."
   (or (null value)
@@ -4742,12 +4825,13 @@ Return non-nil when delivery succeeds."
     ("cwd"         :ann "directory"
      :desc "Working directory used by backends and local tools when supported."
      :type directory :editable t)
-    ("subagents"   :ann "map"
-     :desc "Subagent defaults and named profiles. Buffer-local `subagents:' overrides `ellm-subagents'."
-     :children (("default" :ann "profile|map"
-                 :desc "Default subagent profile name or inline settings map.")
-                ("profiles" :ann "map"
-                 :desc "Named subagent profile maps. Each profile may set provider, model, tools, system, cwd, and related frontmatter.")))
+    ("profile"     :ann "name"
+     :desc "Active profile name from `ellm-profiles' or local `profiles:'."
+     :type string :editable t)
+    ("profiles"    :ann "map"
+     :desc "Local profile definitions that overlay global `ellm-profiles' by name."
+     :children (("NAME" :ann "map"
+                 :desc "Profile settings and optional discovery-only `description'.")))
     ("ellm"        :ann "metadata"
      :desc "Persistence metadata maintained by ellm."
      :children (("session-id" :ann "string"
@@ -5185,7 +5269,7 @@ Completes:
           (let ((beg (match-beginning 1))
                 (end (match-end 1)))
             (when (and (>= orig beg) (<= orig end))
-              (let* ((fm (ellm--parse-frontmatter))
+              (let* ((fm (ellm--effective-frontmatter))
                      (provider (ignore-errors (ellm--resolve-provider fm)))
                      (commands (and provider
                                     (ellm-provider-slash-command-candidates
@@ -5981,7 +6065,7 @@ Errors during streaming are signalled normally."
     (ellm--ensure-trailing-user-turn)
     (setq ellm--request-finished-notified-p nil)
     (cl-incf ellm--request-generation)
-    (let* ((fm       (ellm--parse-frontmatter))
+    (let* ((fm       (ellm--effective-frontmatter))
            (provider (ellm--resolve-provider fm))
            (buf      (current-buffer))
            (started-at (ellm--now))
@@ -6082,7 +6166,7 @@ If QUIET is non-nil, then do not print any messages."
   "Return editable settings supported by PROVIDER in BUFFER.
 When REMOVAL is non-nil, return only settings currently present in frontmatter."
   (with-current-buffer buffer
-    (let ((frontmatter (ellm--parse-frontmatter)))
+    (let ((frontmatter (ellm--effective-frontmatter)))
       (cl-labels
           ((walk (entries prefix)
                  (let (result)
@@ -6258,7 +6342,8 @@ With prefix argument REMOVE, remove the selected frontmatter setting instead."
     (user-error "ellm: cannot change configuration while a request is active"))
   (ellm--ensure-no-config-in-flight)
   (let* ((buffer (current-buffer))
-         (frontmatter (ellm--parse-frontmatter)))
+         (raw-frontmatter (ellm--parse-frontmatter))
+         (frontmatter (ellm--effective-frontmatter raw-frontmatter)))
     (when ellm--frontmatter-cache-error
       (user-error "ellm: cannot edit malformed frontmatter"))
     (let ((provider (ellm--resolve-provider frontmatter)))
@@ -6266,7 +6351,8 @@ With prefix argument REMOVE, remove the selected frontmatter setting instead."
                  (ellm-provider-config-metadata-session-start-p provider buffer)
                  (y-or-n-p "Start provider session to load configuration options? "))
         (ellm-provider-prepare-config-metadata provider frontmatter buffer)
-        (setq frontmatter (ellm--parse-frontmatter)
+        (setq raw-frontmatter (ellm--parse-frontmatter)
+              frontmatter (ellm--effective-frontmatter raw-frontmatter)
               provider (ellm--resolve-provider frontmatter)))
       (let* ((settings (ellm--config-settings provider buffer remove))
              (choices
@@ -6313,9 +6399,9 @@ With prefix argument REMOVE, remove the selected frontmatter setting instead."
                  (signal (car err) (cdr err)))))))))))
 
 (defun ellm--command-frontmatter ()
-  "Return frontmatter for the current command context, if available."
+  "Return effective frontmatter for the current command context, if available."
   (if (derived-mode-p 'ellm-mode)
-      (ellm--parse-frontmatter)
+      (ellm--effective-frontmatter)
     nil))
 
 (defun ellm--command-provider (frontmatter)

@@ -1616,7 +1616,8 @@ called with the raw response before ON-READY."
                        collect (ellm-acp--config-option-frontmatter-entry
                                 option)))
              (saved (ellm--alist-get-nested
-                     (ellm--parse-frontmatter t) '(acp config))))
+                     (ellm--effective-frontmatter
+                      (ellm--parse-frontmatter t)) '(acp config))))
         (append
          live
          (cl-loop for cell in (and (listp saved)
@@ -1834,7 +1835,7 @@ When SELECT is non-nil, choose a session from `session/list'."
                       (or (ellm-acp-provider-model provider) "null")
                       cwd session-id))
       (ellm-mode)
-      (let ((frontmatter (ellm--parse-frontmatter)))
+      (let ((frontmatter (ellm--effective-frontmatter)))
         (ellm-acp--apply-working-directory provider frontmatter)
         (ellm-update-session-title title buf)
         (setq connection (ellm-acp--ensure-connection provider buf))
@@ -2706,7 +2707,7 @@ Call ON-READY after applying the value, or ON-ERROR on failure."
                            (ellm-acp--config-value-label
                             (plist-get option :currentValue))))
              (saved-cell (ellm--alist-get-nested-cell
-                          (ellm--parse-frontmatter) path))
+                          (ellm--effective-frontmatter) path))
              (default (if saved-cell
                           (ellm-acp--config-value-label (cdr saved-cell))
                         current))

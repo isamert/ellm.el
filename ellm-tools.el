@@ -922,21 +922,20 @@ Always pass the full current list, not just incremental changes."
 
 ;;;;; Agents
 
+(ellm-deftool agents/list-profiles ()
+  ()
+  "List effective named profiles available to this conversation."
+  (ellm-tools--format-profiles (ellm--parse-frontmatter)))
+
 (ellm-deftool agents/launch-subagent ()
   ((prompt :string "Prompt to put in the new subagent's initial user turn.")
-   (profile :string "Optional configured subagent profile name." &optional)
+   (profile :string "Optional active profile name for the child. Call `list_profiles' before selecting one; omit it to inherit the current effective configuration. Do not invent profile names." &optional)
    (name :string "Optional display name for the subagent and its conversation." &optional)
-   (provider :string "Optional provider name. Overrides the inherited or profile provider." &optional)
-   (model :string "Optional model name. Overrides the inherited or profile model." &optional)
-   (tools :array "Optional complete tool list for the subagent, for example [`@files', `@buffers']. Overrides inherited or profile tools." &optional)
-   (system :string "Optional system prompt for the subagent. Overrides the inherited or profile prompt." &optional)
    (cwd :string "Optional working directory for the subagent. Overrides the inherited or profile directory." &optional))
   "Launch a subagent in a new conversation and start it.
-The subagent inherits the current conversation's settings, applies the
-selected profile, and then applies explicit PROVIDER, MODEL, TOOLS, SYSTEM,
-and CWD overrides."
-  (ellm-tools--launch-subagent
-   prompt profile name provider model tools system cwd))
+When PROFILE is supplied, it is the child's active profile.  Otherwise the
+child inherits the current effective configuration."
+  (ellm-tools--launch-subagent prompt profile name cwd))
 
 (ellm-deftool agents/list-subagents ()
   ()
@@ -1871,91 +1870,41 @@ KEYS may be a single key or a list of keys.  Empty parent maps are removed."
              (t cell)))
           alist))))))
 
-(defun ellm-tools--map-entries (object)
-  "Return OBJECT as a list of (KEY . VALUE) frontmatter entries.
-OBJECT may be a YAML-style alist or an Elisp plist."
-  (cond
-   ((null object) nil)
-   ((and (listp object) (keywordp (car object)))
-    (let ((rest object)
-          entries)
-      (while rest
-        (let ((key (pop rest))
-              (value (pop rest)))
-          (push (cons (ellm-tools--key-symbol key) value) entries)))
-      (nreverse entries)))
-   ((listp object)
-    (cl-loop for cell in object
-             when (consp cell)
-             collect (cons (ellm-tools--key-symbol (car cell))
-                           (cdr cell))))
-   (t
-    (ellm-tools--error "subagent profile must be a map: %S" object))))
-
 (defun ellm-tools--frontmatter-set (frontmatter key value)
   "Return FRONTMATTER with top-level KEY set to VALUE."
   (append (ellm-tools--alist-delete-nested frontmatter key)
           (list (cons (ellm-tools--key-symbol key) value))))
 
-(defun ellm-tools--merge-frontmatter-map (frontmatter map)
-  "Return FRONTMATTER with every entry from MAP set at the top level."
-  (let ((result frontmatter))
-    (dolist (entry (ellm-tools--map-entries map) result)
-      (setq result (ellm-tools--frontmatter-set
-                    result (car entry) (cdr entry))))))
-
-(defun ellm-tools--subagent-config (frontmatter)
-  "Return subagent config from FRONTMATTER or global `ellm-subagents'."
-  (if-let* ((cell (and frontmatter
-                       (ellm--alist-get-nested-cell frontmatter 'subagents))))
-      (cdr cell)
-    ellm-subagents))
-
-(defun ellm-tools--subagent-profile-name (value)
-  "Return VALUE as a subagent profile name, or nil."
-  (cond
-   ((null value) nil)
-   ((symbolp value) (symbol-name value))
-   ((stringp value) (ellm-tools--present-string value))
-   (t nil)))
-
-(defun ellm-tools--resolve-subagent-profile (config profile)
-  "Return (PROFILE-NAME . PROFILE-MAP) selected from CONFIG.
-PROFILE may be nil.  CONFIG `default' may name a profile or be an inline
-map; when no profile/default map is selected, both parts are nil."
-  (let* ((requested (ellm-tools--present-string profile))
-         (default (ellm--plistish-get config 'default))
-         (profile-name (or requested
-                           (ellm-tools--subagent-profile-name default)))
-         (default-map (and (not profile-name)
-                           (listp default)
-                           default)))
-    (if profile-name
-        (let* ((profiles (ellm--plistish-get config 'profiles))
-               (profile-map (ellm--plistish-get profiles profile-name)))
-          (unless profile-map
-            (ellm-tools--error "subagent profile not found: %s" profile-name))
-          (cons profile-name profile-map))
-      (cons nil default-map))))
-
-(defun ellm-tools--normalize-tool-list (tools)
-  "Return TOOLS normalized for frontmatter."
-  (cond
-   ((eq tools t) t)
-   ((null tools) nil)
-   ((stringp tools)
-    (let ((tool (ellm-tools--present-string tools)))
-      (and tool (list tool))))
-   ((vectorp tools)
-    (mapcar (lambda (tool)
-              (format "%s" tool))
-            (append tools nil)))
-   ((listp tools)
-    (mapcar (lambda (tool)
-              (format "%s" tool))
-            tools))
-   (t
-    (ellm-tools--error "tools must be a string or array"))))
+(defun ellm-tools--format-profiles (frontmatter)
+  "Return a model-readable catalog of effective profiles for FRONTMATTER."
+  (let* ((profiles (ellm--effective-profiles frontmatter))
+         (active (alist-get 'profile frontmatter)))
+    (concat
+     (format "<profiles%s>\n"
+             (if active
+                 (format " active=%S" (ellm--profile-name active))
+               ""))
+     (if profiles
+         (string-join
+          (mapcar
+           (lambda (entry)
+             (let* ((name (ellm--profile-name (car entry)))
+                    (profile (cdr entry))
+                    (description (alist-get 'description profile))
+                    (model (alist-get 'model profile))
+                    (tools (alist-get 'tools profile)))
+               (concat
+                (format "- name=%S" name)
+                (and description (format " description=%S" description))
+                (and model (format " model=%S" model))
+                (and tools (format " tools=%S" tools)))))
+           (sort (copy-sequence profiles)
+                 (lambda (left right)
+                   (string< (ellm--profile-name (car left))
+                            (ellm--profile-name (car right))))))
+          "\n")
+       "No profiles configured.")
+     "\n</profiles>")))
 
 (defun ellm-tools--provider-name (provider)
   "Return PROVIDER as a provider name string, or nil."
@@ -2011,42 +1960,30 @@ FALLBACK-PROVIDER is used when FRONTMATTER has no `provider:' key."
                     (acp updated-at)
                     (ellm role)
                     (subagent)))
-      (setq result (ellm-tools--alist-delete-nested result path)))
+      (setq result (ellm--alist-delete-nested result path)))
     result))
 
 (defun ellm-tools--subagent-frontmatter
     (parent-frontmatter id parent-id parent-name parent-file name prompt profile
-                        provider model tools system cwd fallback-provider)
+                        cwd fallback-provider)
   "Return (FRONTMATTER . PROFILE-NAME) for a new subagent."
-  (let* ((config (ellm-tools--subagent-config parent-frontmatter))
-         (profile-entry (ellm-tools--resolve-subagent-profile config profile))
-         (profile-name (car profile-entry))
-         (profile-map (cdr profile-entry))
-         (frontmatter (ellm-tools--sanitize-subagent-frontmatter
-                       parent-frontmatter)))
-    (when profile-map
-      (setq frontmatter
-            (ellm-tools--merge-frontmatter-map frontmatter profile-map)))
-    (when-let* ((value (ellm-tools--provider-name provider)))
-      (setq frontmatter (ellm-tools--frontmatter-set frontmatter 'provider value)))
-    (when-let* ((value (ellm-tools--model-name model)))
-      (setq frontmatter (ellm-tools--frontmatter-set frontmatter 'model value)))
-    (when (or tools (vectorp tools))
-      (setq frontmatter
-            (ellm-tools--frontmatter-set
-             frontmatter 'tools (ellm-tools--normalize-tool-list tools))))
-    (when-let* ((value (ellm-tools--present-string system)))
-      ;; Tool arguments are model-produced text, never trusted executable
-      ;; prompt templates.
-      (setq frontmatter
-            (ellm-tools--frontmatter-set
-             frontmatter 'system
-             (ellm-escape-prompt-interpolations value))))
+  (let* ((profile-name (and (ellm-tools--present-string profile)
+                            (ellm--profile-name profile)))
+         (inherited (ellm--effective-frontmatter parent-frontmatter))
+         (frontmatter
+          (if profile-name
+              ;; The selected profile is the baseline.  Keep the catalog so the
+              ;; child can resolve it itself, but do not inherit parent overrides.
+              ;; `fallback-provider' remains buffer-local: it is used only when
+              ;; the selected profile does not choose a provider.
+              (let ((base (when-let* ((profiles (alist-get 'profiles parent-frontmatter)))
+                            (list (cons 'profiles (copy-tree profiles))))))
+                (ellm-tools--frontmatter-set base 'profile profile-name))
+            (ellm-tools--sanitize-subagent-frontmatter inherited))))
     (when-let* ((value (ellm-tools--present-string cwd)))
       (setq frontmatter (ellm-tools--frontmatter-set frontmatter 'cwd value)))
     (setq frontmatter
-          (ellm-tools--frontmatter-set
-           frontmatter 'created (ellm--timestamp)))
+          (ellm-tools--frontmatter-set frontmatter 'created (ellm--timestamp)))
     (setq frontmatter
           (ellm-tools--frontmatter-set
            frontmatter 'subagent
@@ -2055,11 +1992,11 @@ FALLBACK-PROVIDER is used when FRONTMATTER has no `provider:' key."
                        (and parent-id (cons 'parent-id parent-id))
                        (cons 'parent-buffer parent-name)
                        (and parent-file (cons 'parent-file parent-file))
-                       (and (ellm-tools--present-string name)
-                            (cons 'name name))
+                       (and (ellm-tools--present-string name) (cons 'name name))
                        (and profile-name (cons 'profile profile-name))
                        (cons 'prompt (ellm-tools--prompt-summary prompt))))))
-    (ellm-tools--validate-subagent-frontmatter frontmatter fallback-provider)
+    (ellm-tools--validate-subagent-frontmatter
+     (ellm--effective-frontmatter frontmatter) fallback-provider)
     (cons frontmatter profile-name)))
 
 (defun ellm-tools--next-subagent-id ()
@@ -2167,8 +2104,7 @@ FALLBACK-PROVIDER is used when FRONTMATTER has no `provider:' key."
           (buffer-name buffer)
           (ellm-tools--ellm-buffer-status buffer)))
 
-(defun ellm-tools--launch-subagent
-    (prompt profile name provider model tools system cwd)
+(defun ellm-tools--launch-subagent (prompt profile name cwd)
   "Implementation for the `launch_subagent' tool."
   (ellm-tools--validate-pattern prompt "prompt")
   (ellm--persistence-checkpoint)
@@ -2184,14 +2120,18 @@ FALLBACK-PROVIDER is used when FRONTMATTER has no `provider:' key."
          (parent-frontmatter (if (derived-mode-p 'ellm-mode)
                                  (ellm--parse-frontmatter)
                                nil))
-         (fallback-provider ellm-provider)
+         (fallback-provider
+          (if parent-frontmatter
+              (ellm--resolve-provider
+               (ellm--effective-frontmatter parent-frontmatter))
+            ellm-provider))
          (parent-default-directory default-directory)
          (parent-ephemeral-p ellm--persistence-ephemeral-p)
          (id (ellm-tools--next-subagent-id))
          (frontmatter-entry
           (ellm-tools--subagent-frontmatter
            parent-frontmatter id parent-id parent-buffer-name parent-file name prompt
-           profile provider model tools system cwd fallback-provider))
+           profile cwd fallback-provider))
          (frontmatter (car frontmatter-entry))
          (profile-name (cdr frontmatter-entry))
          (buffer (ellm-tools--create-subagent-buffer

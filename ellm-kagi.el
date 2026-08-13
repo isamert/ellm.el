@@ -416,7 +416,7 @@ current.  Retryable failures are surfaced to the core request state machine."
 (defun ellm-kagi--configured-provider ()
   "Return the configured Kagi provider for the current command context."
   (let* ((frontmatter (and (derived-mode-p 'ellm-mode)
-                           (ellm--parse-frontmatter)))
+                           (ellm--effective-frontmatter)))
          (name (alist-get 'provider frontmatter))
          (entry (and name
                      (alist-get (if (symbolp name) name (intern name))
