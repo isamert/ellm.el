@@ -2098,6 +2098,7 @@ FALLBACK-PROVIDER is used when FRONTMATTER has no `provider:' key."
           (insert "---\n" (ellm--ensure-newline (ellm--yaml-encode frontmatter))
                   "---\n\n")
           (ellm-mode)
+          (setq-local ellm--session-titling-p nil)
           (ellm--insert-turn "user")
           (insert (ellm--ensure-newline prompt))
           (ellm-send)

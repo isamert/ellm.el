@@ -2374,30 +2374,37 @@ stored without their leading colon, e.g. `:id call_1' becomes
 (defvar-local ellm--session-title nil
   "Current generic session title, or nil.")
 
+(defvar-local ellm--session-titling-p t
+  "Whether backend session titles are accepted or generated for this buffer.")
+
 (defun ellm-set-session-title (title &optional buffer)
   "Persist TITLE as BUFFER's generic session title and update its name.
-BUFFER defaults to the current buffer.  Invalid or empty titles are ignored."
+BUFFER defaults to the current buffer.  Invalid or empty titles are ignored,
+as are titles for buffers with session titling disabled."
   (let ((buffer (or buffer (current-buffer))))
     (when (and (stringp title) (not (string-empty-p title))
                (buffer-live-p buffer))
       (with-current-buffer buffer
-        (setq ellm--session-title title)
-        (let ((inhibit-read-only t))
-          (ellm--preserve-user-position
-            (ellm--set-frontmatter-value '(title) title)))
-        (ellm-update-session-title title buffer)
-        (force-mode-line-update)))))
+        (when ellm--session-titling-p
+          (setq ellm--session-title title)
+          (let ((inhibit-read-only t))
+            (ellm--preserve-user-position
+              (ellm--set-frontmatter-value '(title) title)))
+          (ellm-update-session-title title buffer)
+          (force-mode-line-update))))))
 
 (defun ellm-update-session-title (title &optional buffer)
   "Update BUFFER's name from backend-provided session TITLE.
-BUFFER defaults to the current buffer.  Do nothing when
-TITLE is missing, or `ellm-buffer-name-function' is nil or returns nil."
+BUFFER defaults to the current buffer.  Do nothing when TITLE is missing,
+session titling is disabled, or `ellm-buffer-name-function' is nil or
+returns nil."
   (let ((buffer (or buffer (current-buffer))))
     (when (and (stringp title) (not (string-empty-p title))
                ellm-buffer-name-function (buffer-live-p buffer))
       (with-current-buffer buffer
-        (when-let* ((name (funcall ellm-buffer-name-function title)))
-          (rename-buffer name t))))))
+        (when ellm--session-titling-p
+          (when-let* ((name (funcall ellm-buffer-name-function title)))
+            (rename-buffer name t)))))))
 
 (defvar-local ellm--frontmatter-cwd-directory nil
   "Resolved directory from frontmatter `cwd:', or nil when unset.")

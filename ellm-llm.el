@@ -719,6 +719,8 @@ IDS, when non-nil, are the stable rendered IDs for TOOL-USES."
 (defun ellm-llm--start-title-generation (driver)
   "Start best-effort title generation for DRIVER when eligible."
   (when (and ellm-llm-generate-title
+             (with-current-buffer (ellm-llm-driver-buffer driver)
+               ellm--session-titling-p)
              (not (ellm-llm-driver-title-started driver))
              (ellm-llm-driver-title-prompt driver))
     (setf (ellm-llm-driver-title-started driver) t)
