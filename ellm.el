@@ -91,7 +91,7 @@ buffer's frontmatter, and by `ellm--frontmatter-capf' for completion."
                                          (:small-model string)))))
   :group 'ellm)
 
-(defcustom ellm-request-timeout 120
+(defcustom ellm-request-timeout 300
   "Maximum seconds an asynchronous request may remain idle.
 The deadline is restarted whenever the backend emits an event, so an active
 stream may run indefinitely.  Set to nil to disable ellm's idle timeout and

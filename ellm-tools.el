@@ -208,16 +208,6 @@ It receives one `%s' argument: the subagent display name or id."
   :type 'string
   :group 'ellm-tools)
 
-(defcustom ellm-subagent-wait-default-timeout ellm-tools-default-timeout
-  "Default maximum seconds `wait_subagent' waits for a subagent."
-  :type 'number
-  :group 'ellm-tools)
-
-(defcustom ellm-subagent-wait-result-line-limit 120
-  "Default maximum lines returned by `wait_subagent' result sections."
-  :type 'integer
-  :group 'ellm-tools)
-
 (defvar-local ellm-subagent-history nil
   "Buffer-local history of subagents launched from this ellm buffer.
 Each entry is a plist with serializable values such as `:id',
@@ -942,14 +932,10 @@ child inherits the current effective configuration."
   "List subagents launched from the current ellm buffer."
   (ellm-tools--format-subagent-history ellm-subagent-history))
 
-(ellm-deftool agents/wait-subagent (:async t :timeout nil)
-  ((subagent :string "Subagent id from `list_subagents' or its conversation name.")
-   (timeout :integer "Maximum seconds to wait. Omit to use the standard limit." &optional)
-   (max-lines :integer "Maximum lines to return from the last assistant turn and conversation tail. Omit to use the standard limit." &optional))
-  "Wait for SUBAGENT to finish and return its latest result.
-If SUBAGENT is still running after TIMEOUT seconds, return a timeout result
-without cancelling it."
-  (ellm-tools--wait-subagent subagent timeout max-lines callback))
+(ellm-deftool agents/wait-subagent (:async t)
+  ((subagent :string "Subagent id from `list_subagents' or its conversation name."))
+  "Wait for SUBAGENT to finish and return its latest result."
+  (ellm-tools--wait-subagent subagent callback))
 
 (ellm-deftool buffers/send-ellm-buffer ()
   ((buffer-name :string "Name of the ellm buffer to send.")
@@ -2142,11 +2128,6 @@ FALLBACK-PROVIDER is used when FRONTMATTER has no `provider:' key."
                  id buffer name profile-name prompt frontmatter)))
     (ellm-tools--format-subagent-launch-result entry buffer)))
 
-(defun ellm-tools--normalize-wait-line-limit (max-lines)
-  "Return MAX-LINES normalized for `wait_subagent'."
-  (ellm-tools--normalized-limit
-   max-lines ellm-subagent-wait-result-line-limit))
-
 (defun ellm-tools--subagent-target (subagent)
   "Return plist describing SUBAGENT from current buffer history.
 SUBAGENT may be a remembered id or a live buffer name."
@@ -2242,17 +2223,6 @@ SUBAGENT may be a remembered id or a live buffer name."
                     into maximum
                     finally return (or maximum 0))))))))
 
-(defun ellm-tools--limited-lines (text max-lines)
-  "Return TEXT limited to its last MAX-LINES lines as a plist."
-  (let* ((lines (split-string (or text "") "\n"))
-         (total (length lines))
-         (drop (max 0 (- total max-lines)))
-         (shown (nthcdr drop lines)))
-    (list :text (string-join shown "\n")
-          :total total
-          :shown (length shown)
-          :truncated (> drop 0))))
-
 (defun ellm-tools--last-assistant-content (buffer)
   "Return BUFFER's last assistant turn content, or nil."
   (when (buffer-live-p buffer)
@@ -2263,82 +2233,30 @@ SUBAGENT may be a remembered id or a live buffer name."
                          (reverse (ellm--parse-turns)))))
         (ellm-turn-content turn)))))
 
-(defun ellm-tools--buffer-text (buffer)
-  "Return BUFFER text without properties, or nil when it is not live."
-  (when (buffer-live-p buffer)
-    (with-current-buffer buffer
-      (buffer-substring-no-properties (point-min) (point-max)))))
-
-(defun ellm-tools--format-limited-section (tag attrs limited)
-  "Return TAG section with ATTRS and LIMITED line data."
-  (format "<%s%s lines=%d total-lines=%d%s>\n%s\n</%s>\n"
-          tag
-          (if attrs (concat " " attrs) "")
-          (plist-get limited :shown)
-          (plist-get limited :total)
-          (if (plist-get limited :truncated) " truncated=true" "")
-          (plist-get limited :text)
-          tag))
-
-(defun ellm-tools--format-subagent-wait-result (target timed-out max-lines)
-  "Return model-readable wait result for TARGET."
-  (let* ((buffer (plist-get target :buffer))
-         (buffer-name (plist-get target :buffer-name))
-         (status (ellm-tools--ellm-buffer-status buffer))
-         (last-assistant (and buffer
-                              (ellm-tools--last-assistant-content buffer)))
-         (tail (and buffer (ellm-tools--buffer-text buffer))))
-    (concat
-     (format "<subagent id=%S buffer=%S status=%S%s>\n"
-             (plist-get target :id)
-             buffer-name
-             status
-             (if timed-out " timed-out=true" ""))
-     (if (not (buffer-live-p buffer))
-         "Buffer is not live.\n"
-       (concat
-        (if last-assistant
-            (ellm-tools--format-limited-section
-             "last_assistant" nil
-             (ellm-tools--limited-lines last-assistant max-lines))
-          "No assistant turn found.\n")
-        (ellm-tools--format-limited-section
-         "buffer_tail" nil
-         (ellm-tools--limited-lines tail max-lines))))
-     "</subagent>")))
-
-(defun ellm-tools--wait-subagent (subagent timeout max-lines callback)
+(defun ellm-tools--wait-subagent (subagent callback)
   "Wait asynchronously for SUBAGENT, then call CALLBACK with its result."
   (let* ((target (ellm-tools--subagent-target subagent))
          (buffer (plist-get target :buffer))
-         (seconds (ellm-tools--normalize-timeout
-                   timeout ellm-subagent-wait-default-timeout))
-         (line-limit (ellm-tools--normalize-wait-line-limit max-lines))
-         timer listener done)
+         listener done)
     (cl-labels
         ((running-p ()
                     (and (buffer-live-p buffer)
                          (with-current-buffer buffer ellm--active-request)))
          (cleanup ()
-                  (when timer
-                    (cancel-timer timer)
-                    (setq timer nil))
                   (when (and listener (buffer-live-p buffer))
                     (with-current-buffer buffer
                       (remove-hook 'ellm-request-finished-hook listener t))))
-         (finish (timed-out)
+         (finish ()
                  (unless done
                    (setq done t)
                    (cleanup)
                    (funcall callback
-                            (ellm-tools--format-subagent-wait-result
-                             target timed-out line-limit)))))
-      (setq listener (lambda (_request _outcome) (finish nil)))
-      (if (not (running-p))
-          (finish nil)
-        (with-current-buffer buffer
-          (add-hook 'ellm-request-finished-hook listener nil t))
-        (setq timer (run-at-time seconds nil (lambda () (finish t)))))
+                            (ellm-tools--last-assistant-content buffer)))))
+      (setq listener (lambda (_request _outcome) (finish)))
+      (if (running-p)
+          (with-current-buffer buffer
+            (add-hook 'ellm-request-finished-hook listener nil t))
+        (finish))
       (lambda ()
         (setq done t)
         (cleanup)))))
