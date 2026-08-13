@@ -5686,7 +5686,11 @@ Without INCLUDE-SUBAGENTS, omit subagent buffers."
 
 (defun ellm--read-project-buffer (prompt buffers)
   "Read an ellm buffer from BUFFERS using PROMPT."
-  (let ((names (mapcar #'buffer-name buffers)))
+  (let ((names (mapcar #'buffer-name buffers))
+        (completion-extra-properties
+         (append '(:display-sort-function identity
+                   :cycle-sort-function identity)
+                 completion-extra-properties)))
     (get-buffer
      (read-buffer
       prompt nil t
