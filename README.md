@@ -524,8 +524,29 @@ ACP agents always support stdio MCP servers.  URL-based MCP servers are
 sent only when the agent advertises the matching ACP MCP transport
 capability.
 
-*NOTE*: MCP servers only work with ACP backend right now, but I'll
-implement it for the llm backend shortly.
+#### mcp.el tools with the llm.el backend
+
+The optional `ellm-mcp` integration exposes tools from
+[lizqwerscott/mcp.el](https://github.com/lizqwerscott/mcp.el) to ellm's
+`llm.el` backend.  Start and connect your `mcp-hub-servers` first, then load
+the integration and register their tools:
+
+```elisp
+(require 'ellm-mcp)
+(mcp-hub-start-all-server #'ellm-register-mcp-tools)
+```
+
+`ellm-register-mcp-tools` may be called again after a reconnect or tool-list
+change.  It registers asynchronous tools with server-qualified names, such as
+`mcp-filesystem--read_file`, and preserves their `mcp-SERVER` category.  Enable
+one server's tools in a conversation with regular `tools:` frontmatter:
+
+```yaml
+tools: ["@mcp-filesystem"]
+```
+
+This is separate from `ellm-mcp-servers` and `mcp:` above, which configure MCP
+servers for ACP agents.
 
 ### Automatic Persistence
 
