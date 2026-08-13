@@ -5877,7 +5877,8 @@ With prefix argument NEW, create a new ellm buffer.  If called from an ellm
 buffer without a prefix argument or active region, prompt to switch to another
 conversation for the project when one exists.  If the region is active, append
 it to the target conversation and show the side window instead of hiding an
-already visible target buffer."
+already visible target buffer.  When its side window is visible but not
+selected, select it rather than hiding it."
   (interactive "P")
   (let* ((had-region (use-region-p))
          (root (ellm--current-project-root-or-directory))
@@ -5896,7 +5897,9 @@ already visible target buffer."
        (ellm--read-project-buffer "Switch to project ellm buffer: " other-buffers)))
      (visible-side-window
       (let ((buffer (window-buffer visible-side-window)))
-        (delete-window visible-side-window)
+        (if (eq visible-side-window (selected-window))
+            (delete-window visible-side-window)
+          (select-window visible-side-window))
         buffer))
      (t
       (let ((buffer (save-window-excursion
