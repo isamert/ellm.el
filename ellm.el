@@ -5722,8 +5722,8 @@ this project.  Without it, offer only main conversation buffers."
                  (string-remove-suffix "-ts")
                  (replace-regexp-in-string "interaction\\'" ""))))
 
-(defun ellm--region-context-info (root)
-  "Return Markdown fence info for the active region relative to ROOT."
+(defun ellm--snippet-context-info (root start end)
+  "Return Markdown fence info for text from START to END relative to ROOT."
   (let* ((language (ellm--language-at-point))
          (file (buffer-file-name))
          (location
@@ -5734,21 +5734,60 @@ this project.  Without it, offer only main conversation buffers."
                            file))))
               (format "%s:%s:%s"
                       path
-                      (line-number-at-pos (region-beginning) 'absolute)
-                      (line-number-at-pos (region-end) 'absolute))))))
+                      (line-number-at-pos start 'absolute)
+                      (line-number-at-pos end 'absolute))))))
     (string-join (delq nil (list language location)) " ")))
+
+(defun ellm--snippet (root start end)
+  "Return text from START to END as a Markdown fenced code block.
+ROOT is used to make file names relative in the fence info string."
+  (let ((text (string-trim (buffer-substring-no-properties start end) "\n" "\n"))
+        (info (ellm--snippet-context-info root start end)))
+    (format "```%s\n%s\n```\n"
+            (if (string-empty-p info) "" (concat " " info))
+            text)))
 
 (defun ellm--region-snippet (root)
   "Return the active region as a Markdown fenced code block.
 ROOT is used to make file names relative in the fence info string."
   (when (use-region-p)
-    (let ((text (string-trim (buffer-substring-no-properties
-                              (region-beginning) (region-end))
-                             "\n" "\n"))
-          (info (ellm--region-context-info root)))
-      (format "```%s\n%s\n```\n"
-              (if (string-empty-p info) "" (concat " " info))
-              text))))
+    (ellm--snippet root (region-beginning) (region-end))))
+
+(defun ellm--quote (text)
+  "Return TEXT as a Markdown block quote, without outer blank lines."
+  (let ((text (string-trim text "[\n]+" "[\n]+")))
+    (unless (string-empty-p text)
+      (concat "> " (replace-regexp-in-string "\n" "\n> " text t t)))))
+
+(defun ellm--comment-entry (text comment &optional fenced-snippet)
+  "Return TEXT and COMMENT formatted as a conversation entry.
+When FENCED-SNIPPET is non-nil, use it instead of quoting TEXT."
+  (let ((body (or fenced-snippet (ellm--quote text))))
+    (concat body
+            (unless (string-empty-p comment)
+              (concat (unless (string-suffix-p "\n" body) "\n") comment))
+            "\n")))
+
+;;;###autoload
+(defun ellm-comment (&optional new)
+  "Append a comment on the active region or current line.
+In an ellm buffer, quote the text in the current conversation.  Else append it
+as a fenced code block to an ellm conversation for the current project or
+directory without selecting that buffer.  With prefix argument NEW, create a
+new target conversation outside an ellm buffer."
+  (interactive "P")
+  (let* ((in-ellm (derived-mode-p 'ellm-mode))
+         (start (if (use-region-p) (region-beginning) (line-beginning-position)))
+         (end (if (use-region-p) (region-end) (line-end-position)))
+         (text (buffer-substring-no-properties start end))
+         (root (unless in-ellm (ellm--current-project-root-or-directory)))
+         (snippet (unless in-ellm (ellm--snippet root start end)))
+         (comment (read-string "Comment: "))
+         (entry (ellm--comment-entry text comment snippet)))
+    (if in-ellm
+        (ellm--append-snippet (current-buffer) entry)
+      (ellm--append-snippet
+       (ellm--select-or-create-project-buffer root new) entry))))
 
 (defun ellm--append-snippet (buffer snippet)
   "Append SNIPPET to BUFFER at the end of the conversation."
@@ -6864,6 +6903,7 @@ Return a cons of the left and right portions, split at `%>'."
     (define-key map (kbd "C-c C-s")   #'ellm-start-session)
     (define-key map (kbd "C-c C-l")   #'ellm-load-session)
     (define-key map (kbd "C-c C-o")   #'ellm-open-session)
+    (define-key map (kbd "C-c C-m")   #'ellm-comment)
     map)
   "Keymap for `ellm-mode'.")
 
