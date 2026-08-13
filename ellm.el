@@ -3790,7 +3790,7 @@ values are omitted because their nested turns remain available when unfolded."
 Whitespace is collapsed and colons at token boundaries are escaped so a
 display summary cannot be parsed as real turn metadata."
   (let ((text (replace-regexp-in-string
-               "[ \t]+" " " (format "%s" value))))
+               "[[:space:]]+" " " (string-trim (format "%s" value)))))
     (setq text (string-replace " :" " \\:" text))
     (if (string-prefix-p ":" text)
         (concat "\\" text)
