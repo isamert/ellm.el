@@ -273,6 +273,11 @@ extend or exclude inherited entries (including entries selected by a category).
 An ordinary `tools:` or `mcp:` value resets prior additions and exclusions.
 Profile `description:` is discovery metadata and is not sent to a provider.
 
+New conversations select the built-in `agent` profile.  It contains the
+standard coding-agent system prompt and enables `@files`, `@shell`, `@web`,
+`@tasks`, `@agents`, and `ask`; override `tools:` or use `tools+` / `tools-`
+in frontmatter to adjust that selection.
+
 ```elisp
 (setq ellm-profiles
       '((explore . ((description . "Read-only codebase exploration.")
