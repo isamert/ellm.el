@@ -176,6 +176,46 @@ rendering."
   :type 'natnum
   :group 'ellm-tools)
 
+(defcustom ellm-tools-file-edit-shell-program "bash"
+  "Shell executable used by `ellm-tools-file-edit-check-shell-syntax'."
+  :type 'string
+  :group 'ellm-tools)
+
+(defcustom ellm-tools-file-edit-python-program "python"
+  "Python executable used by `ellm-tools-file-edit-check-python-syntax'."
+  :type 'string
+  :group 'ellm-tools)
+
+(defcustom ellm-tools-file-edit-checkers
+  '(ellm-tools-file-edit-check-elisp-parens
+    ellm-tools-file-edit-check-json)
+  "Functions that check files after `files/file-edit' changes them.
+
+Each function is called with FILE-PATH, BUFFER, and CALLBACK.  FILE-PATH is
+an absolute file name and BUFFER contains the edited contents.  A checker
+must call CALLBACK with nil when it finds no problem, or a concise diagnostic
+string otherwise.  It may do this synchronously or asynchronously, and may
+return a cancellation function, timer, or process.  The buffer remains live
+until CALLBACK is called.
+
+The default checkers validate Emacs Lisp delimiters and JSON syntax.  The
+following opt-in checkers are also provided:
+
+- `ellm-tools-file-edit-check-shell-syntax' runs
+  `ellm-tools-file-edit-shell-program' with `-n' for .sh files and files with
+  a shell shebang.
+- `ellm-tools-file-edit-check-python-syntax' runs
+  `ellm-tools-file-edit-python-program -m py_compile' for .py files.
+
+For example, add both optional checkers with:
+
+  (add-to-list \='ellm-tools-file-edit-checkers
+               \='ellm-tools-file-edit-check-shell-syntax)
+  (add-to-list \='ellm-tools-file-edit-checkers
+               \='ellm-tools-file-edit-check-python-syntax)"
+  :type '(repeat function)
+  :group 'ellm-tools)
+
 ;;;; Variables
 
 (defvar ellm-tools-refs '()
@@ -697,7 +737,7 @@ files searched."
         "No matches found" 1))
      callback)))
 
-(ellm-deftool files/file-edit ()
+(ellm-deftool files/file-edit (:async t)
   ((file-path :string "The absolute or relative path to the file to edit.")
    (old-string :string "The exact text to replace, or an empty string to create a new file.")
    (new-string :string "The text to replace OLD-STRING with.")
@@ -708,7 +748,7 @@ is non-nil, in which case all occurrences are replaced.  To create a
 new file, pass an empty OLD-STRING; parent directories are created and
 the operation fails if the target already exists."
   (let ((default-directory (ellm-tools--default-directory)))
-    (ellm-tools--edit-tool file-path old-string new-string replace-all)))
+    (ellm-tools--edit-tool file-path old-string new-string callback replace-all)))
 
 (ellm-deftool files/read-file-lines (:async t)
   ((file-path :string "Path to the file. Relative paths are resolved from the conversation working directory.")
@@ -727,7 +767,7 @@ For a non-text file, return metadata without reading its contents."
 
 ;;;;; Buffers
 
-(ellm-deftool buffers/buffer-edit ()
+(ellm-deftool buffers/buffer-edit (:async t)
   ((buffer-name :string "The name of the buffer to edit.")
    (old-string :string "The exact text to search for and replace in the buffer.")
    (new-string :string "The text to replace OLD-STRING with.")
@@ -740,7 +780,7 @@ is non-nil, in which case all occurrences are replaced."
             (not (get-buffer buffer-name)))
     (ellm-tools--error "invalid buffer name"))
   (ellm-tools--edit-tool (get-buffer buffer-name)
-                         old-string new-string replace-all))
+                         old-string new-string callback replace-all))
 
 (ellm-deftool buffers/list-buffers ()
   ()
@@ -2987,9 +3027,185 @@ The return value is a cons of body and whether it was truncated."
 
 ;;;;;; Edit tool
 
-(defun ellm-tools--edit-tool (buffer-or-file old-string new-string &optional replace-all)
+(defun ellm-tools-file-edit-check-elisp-parens (file-path buffer callback)
+  "Report an unmatched delimiter in Emacs Lisp FILE-PATH, if any.
+BUFFER contains the edited contents.  CALLBACK receives nil when the contents
+are balanced, or a concise diagnostic string otherwise."
+  (if (not (string-equal (downcase (or (file-name-extension file-path) ""))
+                         "el"))
+      (funcall callback nil)
+    (with-current-buffer buffer
+      (save-excursion
+        (save-restriction
+          (widen)
+          (condition-case err
+              (progn
+                (check-parens)
+                (funcall callback nil))
+            (user-error
+             (funcall callback
+                      (format "Emacs Lisp has an unmatched delimiter near line %d, column %d: %s"
+                              (line-number-at-pos) (current-column)
+                              (error-message-string err)))))))))
+  nil)
+
+(defun ellm-tools-file-edit-check-json (file-path buffer callback)
+  "Report invalid JSON in FILE-PATH, if any.
+JSON with comments is deliberately not supported.  BUFFER contains the edited
+contents and CALLBACK receives nil or a concise diagnostic string."
+  (if (not (string-equal (downcase (or (file-name-extension file-path) ""))
+                         "json"))
+      (funcall callback nil)
+    (with-current-buffer buffer
+      (save-excursion
+        (save-restriction
+          (widen)
+          (goto-char (point-min))
+          (condition-case err
+              (progn
+                (require 'json)
+                (if (fboundp 'json-parse-buffer)
+                    (json-parse-buffer)
+                  (json-read))
+                (skip-chars-forward " \t\n\r")
+                (unless (eobp)
+                  (error "Unexpected content after JSON value"))
+                (funcall callback nil))
+            (error
+             (funcall callback
+                      (format "JSON is invalid near line %d, column %d: %s"
+                              (line-number-at-pos) (current-column)
+                              (error-message-string err)))))))))
+  nil)
+
+(defun ellm-tools--file-edit-shell-shebang-p (buffer)
+  "Return non-nil when BUFFER starts with a shell shebang."
+  (with-current-buffer buffer
+    (save-excursion
+      (goto-char (point-min))
+      (looking-at "#!.*\\_<[^ \\t\\n]*sh\\_>"))))
+
+(defun ellm-tools--start-file-edit-command-checker
+    (name program arguments callback)
+  "Run PROGRAM with ARGUMENTS and report a failed check through CALLBACK."
+  (if (not (executable-find program))
+      (progn
+        (funcall callback (format "%s check could not find executable %S"
+                                  name program))
+        nil)
+    (let ((output-buffer (generate-new-buffer " *ellm-tools-check*"))
+          finished process)
+      (setq process
+            (make-process
+             :name (concat "ellm-tools-" (downcase name) "-check")
+             :buffer output-buffer
+             :stderr output-buffer
+             :command (cons program arguments)
+             :noquery t
+             :connection-type 'pipe
+             :sentinel
+             (lambda (proc _event)
+               (when (and (memq (process-status proc) '(exit signal))
+                          (not finished))
+                 (setq finished t)
+                 (let ((exit-code (process-exit-status proc))
+                       (output (with-current-buffer output-buffer
+                                 (string-trim (buffer-string)))))
+                   (when (buffer-live-p output-buffer)
+                     (kill-buffer output-buffer))
+                   (funcall callback
+                            (unless (zerop exit-code)
+                              (format "%s check failed (exit code %d)%s"
+                                      name exit-code
+                                      (if (string-empty-p output)
+                                          ""
+                                        (concat ": " output))))))))))
+      (lambda ()
+        (when (process-live-p process)
+          (kill-process process))
+        (when (buffer-live-p output-buffer)
+          (kill-buffer output-buffer))))))
+
+(defun ellm-tools-file-edit-check-shell-syntax (file-path buffer callback)
+  "Run a configurable shell syntax check for FILE-PATH when applicable.
+The checker applies to .sh files and shell shebangs.  It skips modified
+visiting buffers because the external program can only inspect disk contents."
+  (if (and file-path
+           (not (buffer-modified-p buffer))
+           (or (string-equal (downcase (or (file-name-extension file-path) ""))
+                             "sh")
+               (ellm-tools--file-edit-shell-shebang-p buffer)))
+      (ellm-tools--start-file-edit-command-checker
+       "Shell syntax" ellm-tools-file-edit-shell-program
+       (list "-n" file-path) callback)
+    (funcall callback nil)
+    nil))
+
+(defun ellm-tools-file-edit-check-python-syntax (file-path buffer callback)
+  "Run a configurable Python syntax check for .py FILE-PATH.
+The checker skips modified visiting buffers because the external program can
+only inspect disk contents."
+  (if (and file-path
+           (not (buffer-modified-p buffer))
+           (string-equal (downcase (or (file-name-extension file-path) ""))
+                         "py"))
+      (ellm-tools--start-file-edit-command-checker
+       "Python syntax" ellm-tools-file-edit-python-program
+       (list "-m" "py_compile" file-path) callback)
+    (funcall callback nil)
+    nil))
+
+(defun ellm-tools--run-file-edit-checkers (file-path buffer callback)
+  "Run `ellm-tools-file-edit-checkers' for FILE-PATH and BUFFER.
+CALLBACK receives a list of diagnostic strings.  Return a function that
+cancels the checker currently in progress."
+  (let ((checkers ellm-tools-file-edit-checkers)
+        diagnostics active)
+    (cl-labels
+        ((run-next ()
+           (if-let ((checker (pop checkers)))
+               (let (called checker-callback)
+                 (setq checker-callback
+                       (lambda (diagnostic)
+                         (unless called
+                           (setq called t)
+                           (when diagnostic
+                             (unless (stringp diagnostic)
+                               (setq diagnostic
+                                     (format "Post-edit checker %S returned a non-string diagnostic: %S"
+                                             checker diagnostic)))
+                             (push diagnostic diagnostics))
+                           (run-next))))
+                 (let ((handle
+                        (condition-case err
+                            (funcall checker file-path buffer checker-callback)
+                          (error
+                           (funcall checker-callback
+                                    (format "Post-edit checker %S failed: %s"
+                                            checker (error-message-string err)))
+                           nil))))
+                   ;; A synchronous checker has already advanced the pipeline;
+                   ;; preserve the cancellation handle of a later checker.
+                   (unless called
+                     (setq active handle))))
+             (funcall callback (nreverse diagnostics)))))
+      (run-next)
+      (lambda ()
+        (ellm-tools--cancel-async-handle active)))))
+
+(defun ellm-tools--format-file-edit-result (result diagnostics)
+  "Append post-edit DIAGNOSTICS to successful edit RESULT."
+  (if diagnostics
+      (concat result "\n\nPost-edit checks reported:\n"
+              (mapconcat (lambda (diagnostic) (concat "- " diagnostic))
+                         diagnostics "\n"))
+    result))
+
+(defun ellm-tools--edit-tool (buffer-or-file old-string new-string callback
+                                              &optional replace-all)
   "Replace occurrence(s) of OLD-STRING with NEW-STRING.
-BUFFER-OR-FILE is either a buffer object or a file path string.
+BUFFER-OR-FILE is either a buffer object or a file path string.  CALLBACK
+receives the edit result after configured post-edit checkers have finished.
 If REPLACE-ALL is non-nil, replace all occurrences; otherwise replace
 exactly one occurrence."
   (unless buffer-or-file
@@ -3002,28 +3218,54 @@ exactly one occurrence."
          (name (if is-file?
                    (concat "file " buffer-or-file)
                  (concat "buffer " (buffer-name buffer-or-file))))
-         (file-path (when is-file? (expand-file-name buffer-or-file))))
-    (cond
-     ((string-empty-p old-string)
-      (unless is-file?
-        (ellm-tools--error "`old_string' cannot be empty for buffer edits"))
-      (ellm-tools--create-file file-path new-string name))
-     ((bufferp buffer-or-file)
-      (with-current-buffer buffer-or-file
-        (ellm-tools--do-edit old-string new-string replace-all name)))
-     (t
-      (ellm-tools--prepare-visiting-buffer-for-file-write file-path)
-      (let ((temp-buf (generate-new-buffer " *ellm-tools-edit*")))
-        (unwind-protect
-            (with-current-buffer temp-buf
-              (insert-file-contents file-path)
-              (let ((result (ellm-tools--do-edit
-                             old-string new-string replace-all name)))
-                (write-region (point-min) (point-max) file-path nil 'silent)
-                (ellm-tools--refresh-clean-visiting-buffer file-path)
-                result))
-          (when (buffer-live-p temp-buf)
-            (kill-buffer temp-buf))))))))
+         (file-path (if is-file?
+                        (expand-file-name buffer-or-file)
+                      (buffer-local-value 'buffer-file-name buffer-or-file))))
+    (cl-labels ((finish (result buffer &optional kill-buffer)
+                  (let ((cancel
+                         (ellm-tools--run-file-edit-checkers
+                          file-path buffer
+                          (lambda (diagnostics)
+                            (unwind-protect
+                                (funcall callback
+                                         (ellm-tools--format-file-edit-result
+                                          result diagnostics))
+                              (when (and kill-buffer (buffer-live-p buffer))
+                                (kill-buffer buffer)))))))
+                    (lambda ()
+                      (funcall cancel)
+                      (when (and kill-buffer (buffer-live-p buffer))
+                        (kill-buffer buffer))))))
+      (cond
+       ((string-empty-p old-string)
+        (unless is-file?
+          (ellm-tools--error "`old_string' cannot be empty for buffer edits"))
+        (let ((result (ellm-tools--create-file file-path new-string name))
+              (buffer (generate-new-buffer " *ellm-tools-edit*")))
+          (with-current-buffer buffer
+            (insert new-string)
+            (set-buffer-modified-p nil))
+          (finish result buffer t)))
+       ((bufferp buffer-or-file)
+        (with-current-buffer buffer-or-file
+          (finish (ellm-tools--do-edit old-string new-string replace-all name)
+                  buffer-or-file)))
+       (t
+        (ellm-tools--prepare-visiting-buffer-for-file-write file-path)
+        (let ((buffer (generate-new-buffer " *ellm-tools-edit*")))
+          (condition-case err
+              (with-current-buffer buffer
+                (insert-file-contents file-path)
+                (let ((result (ellm-tools--do-edit
+                               old-string new-string replace-all name)))
+                  (write-region (point-min) (point-max) file-path nil 'silent)
+                  (set-buffer-modified-p nil)
+                  (ellm-tools--refresh-clean-visiting-buffer file-path)
+                  (finish result buffer t)))
+            (error
+             (when (buffer-live-p buffer)
+               (kill-buffer buffer))
+             (signal (car err) (cdr err))))))))))
 
 (defun ellm-tools--prepare-visiting-buffer-for-file-write (file-path)
   "Prepare FILE-PATH's visiting buffer for a direct disk write."
