@@ -268,6 +268,9 @@ Enable built-in local tools:
 select one with `profile:` and locally add or override definitions with
 `profiles:`.  Maps merge recursively; scalar values and lists such as `tools:`
 replace inherited values.  Ordinary frontmatter overrides the selected profile.
+For named selections, `tools+` / `tools-` and `mcp+` / `mcp-` respectively
+extend or exclude inherited entries (including entries selected by a category).
+An ordinary `tools:` or `mcp:` value resets prior additions and exclusions.
 Profile `description:` is discovery metadata and is not sent to a provider.
 
 ```elisp
@@ -281,6 +284,7 @@ Profile `description:` is discovery metadata and is not sent to a provider.
 ```yaml
 ---
 profile: explore
+tools+: [current_time]
 profiles:
   explore:
     system: Explore this project's architecture and report relevant files.

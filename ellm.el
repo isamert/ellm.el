@@ -148,7 +148,9 @@ For example:
                 (tools . (\"@files\" \"@buffers\")))))
 
 `description' is profile metadata for discovery and is not sent to a
-provider.  Profiles cannot themselves select or define profiles."
+provider.  Profiles cannot themselves select or define profiles.  `tools+'
+and `tools-' (and likewise `mcp+' and `mcp-') extend or exclude inherited
+named selections; an ordinary `tools:' or `mcp:' value still replaces them."
   :type 'sexp
   :group 'ellm)
 
@@ -327,7 +329,10 @@ value may be:
   [SERVER, ...]   enable several named servers
   [\"@CAT\", ...]  enable servers with `:category' CAT
   [{name: ..., command: ...}, ...]
-                   define inline server configurations"
+                   define inline server configurations
+
+`mcp+' and `mcp-' extend or exclude inherited named server selections;
+an ordinary `mcp:' value replaces them."
   :type '(alist :key-type (choice string symbol)
                 :value-type
                 (plist :options ((:command string)
@@ -2491,23 +2496,112 @@ parsing fails.  Unless QUIET is non-nil, parsing failures issue a
     (user-error "ellm: %s must be a map" label))
   value)
 
-(defun ellm--merge-frontmatter-maps (base override)
+(defconst ellm--frontmatter-selector-keys '(tools mcp)
+  "Frontmatter keys supporting `+' and `-' overlay operators.")
+
+(defun ellm--frontmatter-selector-key (key operator)
+  "Return the overlay key for selector KEY and OPERATOR character."
+  (intern (concat (symbol-name key) (string operator))))
+
+(defun ellm--frontmatter-selector-entry-list (key value)
+  "Return VALUE as a list of selector entries for KEY.
+Signal an error for boolean selector overlays, whose meaning would be
+ambiguous."
+  (when (memq value '(t :false :json-false))
+    (user-error "ellm: %s overlay must name one or more entries"
+                (symbol-name key)))
+  (cond
+   ;; An inline MCP server is one entry, despite itself being a list.
+   ((and (eq key 'mcp) (ellm--mcp-inline-server-p value)) (list value))
+   ((listp value) value)
+   ((null value) nil)
+   (t (list value))))
+
+(defun ellm--frontmatter-selector-append (key old additions)
+  "Append ADDITIONS to selector KEY's OLD value."
+  (let ((old-entries (if (or (null old) (ellm--false-value-p old))
+                         nil
+                       (ellm--frontmatter-selector-entry-list key old))))
+    (append old-entries
+            (ellm--frontmatter-selector-entry-list key additions))))
+
+(defun ellm--merge-frontmatter-maps (base override &optional nested)
   "Recursively merge frontmatter maps BASE and OVERRIDE.
-Map values merge recursively; all other values, including lists, replace."
-  (let ((result (copy-tree (ellm--frontmatter-map base "profile"))))
-    (dolist (entry (ellm--frontmatter-map override "profile") result)
-      (let* ((key (car entry))
-             (old (cl-find key result :key #'car
-                           :test #'ellm--frontmatter-key-equal-p))
-             (value (cdr entry)))
-        (if old
-            (setcdr old (if (and (listp (cdr old))
-                                 (listp value)
-                                 (cl-every #'consp (cdr old))
-                                 (cl-every #'consp value))
-                            (ellm--merge-frontmatter-maps (cdr old) value)
-                          (copy-tree value)))
-          (push (cons key (copy-tree value)) result))))))
+Map values merge recursively; all other values, including lists, replace.
+At the top level, selector keys in `ellm--frontmatter-selector-keys' support
+KEY+ to append entries and KEY- to exclude entries after selector resolution.
+An explicit KEY in OVERRIDE resets earlier additions and exclusions.  NESTED
+is internal and prevents these frontmatter-only operators from affecting
+nested provider configuration maps."
+  (let ((result (copy-tree (ellm--frontmatter-map base "profile")))
+        (override (ellm--frontmatter-map override "profile")))
+    ;; Merge ordinary keys first.  Selector overlays have a defined order,
+    ;; independent of their order in YAML.
+    (dolist (entry override)
+      (unless (and (not nested)
+                   (cl-loop for key in ellm--frontmatter-selector-keys
+                            thereis (memq (car entry)
+                                          (list (ellm--frontmatter-selector-key key ?+)
+                                                (ellm--frontmatter-selector-key key ?-)))))
+        (let* ((key (car entry))
+               (old (cl-find key result :key #'car
+                             :test #'ellm--frontmatter-key-equal-p))
+               (value (cdr entry)))
+          (if old
+              (setcdr old (if (and (listp (cdr old))
+                                   (listp value)
+                                   (cl-every #'consp (cdr old))
+                                   (cl-every #'consp value))
+                              (ellm--merge-frontmatter-maps (cdr old) value t)
+                            (copy-tree value)))
+            (push (cons key (copy-tree value)) result)))))
+    (unless nested
+      (dolist (key ellm--frontmatter-selector-keys result)
+        (let* ((plus (ellm--frontmatter-selector-key key ?+))
+               (minus (ellm--frontmatter-selector-key key ?-))
+               (replacement (assoc key override))
+               (additions (assoc plus override))
+               (removals (assoc minus override))
+               (old (assoc key result))
+               (old-removals (assoc minus result)))
+          (when replacement
+            ;; A normal selector value begins a new selection layer.
+            (setq old-removals nil)
+            (setq result (assq-delete-all minus result)))
+          (when additions
+            (if old
+                (setcdr old (ellm--frontmatter-selector-append
+                             key (cdr old) (cdr additions)))
+              (push (cons key (ellm--frontmatter-selector-entry-list
+                               key (cdr additions)))
+                    result)))
+          (when removals
+            (let ((value (append (and old-removals
+                                      (ellm--frontmatter-selector-entry-list
+                                       key (cdr old-removals)))
+                                 (ellm--frontmatter-selector-entry-list
+                                  key (cdr removals)))))
+              (if old-removals
+                  (setcdr old-removals value)
+                (push (cons minus value) result)))))))
+    result))
+
+(defun ellm--normalize-frontmatter-selector-overlays (map)
+  "Apply selector overlays within MAP to an empty configuration."
+  (ellm--merge-frontmatter-maps nil map))
+
+(defun ellm--apply-selector-exclusions (items exclusions resolve key)
+  "Remove EXCLUSIONS resolved by RESOLVE from ITEMS using KEY.
+RESOLVE accepts one selector entry and returns matching items."
+  (let (excluded)
+    (dolist (entry exclusions)
+      (dolist (item (funcall resolve entry))
+        (cl-pushnew item excluded :test (lambda (left right)
+                                          (equal (funcall key left)
+                                                 (funcall key right))))))
+    (cl-remove-if (lambda (item)
+                    (cl-find (funcall key item) excluded :key key :test #'equal))
+                  items)))
 
 (defun ellm--profile-map (profiles name)
   "Return profile NAME from PROFILES, or signal a useful error."
@@ -2520,11 +2614,16 @@ Map values merge recursively; all other values, including lists, replace."
       (ellm--frontmatter-map map (format "profile `%s'" name))
       (when (or (assq 'profile map) (assq 'profiles map))
         (user-error "ellm: profile `%s' cannot select or define profiles" name))
-      map)))
+      (ellm--normalize-frontmatter-selector-overlays map))))
 
 (defun ellm--effective-profiles (frontmatter)
   "Return global profiles overlaid by FRONTMATTER's local `profiles:' map."
-  (let ((profiles (copy-tree (ellm--frontmatter-map ellm-profiles "ellm-profiles"))))
+  (let ((profiles
+         (mapcar (lambda (entry)
+                   (cons (car entry)
+                         (ellm--normalize-frontmatter-selector-overlays
+                          (cdr entry))))
+                 (ellm--frontmatter-map ellm-profiles "ellm-profiles"))))
     (dolist (entry (ellm--frontmatter-map (alist-get 'profiles frontmatter)
                                            "frontmatter `profiles'")
              profiles)
@@ -2536,7 +2635,8 @@ Map values merge recursively; all other values, including lists, replace."
                                             (format "profile `%s'" name))))
         (if old
             (setcdr old (ellm--merge-frontmatter-maps (cdr old) value))
-          (push (cons name (copy-tree value)) profiles))))))
+          (push (cons name (ellm--normalize-frontmatter-selector-overlays value))
+                profiles))))))
 
 (defun ellm--effective-frontmatter (&optional frontmatter)
   "Return effective configuration from FRONTMATTER or the current buffer.
@@ -2553,7 +2653,10 @@ Profile metadata and the profile catalog are not passed to providers."
                          (ellm--profile-map profiles (ellm--profile-name profile))
                          overrides)
                       overrides)))
-    (ellm--alist-delete-nested effective 'description)))
+    (ellm--alist-delete-nested
+     (if profile effective
+       (ellm--normalize-frontmatter-selector-overlays effective))
+     'description)))
 
 (defun ellm--false-value-p (value)
   "Return non-nil when VALUE represents boolean false."
@@ -3473,6 +3576,7 @@ each entry resolves it against `ellm-tools-list':
   - A string of the form `@CATEGORY' expands to every `ellm-tool' in
     `ellm-tools-list' whose `category' slot equals CATEGORY."
   (let ((entries (alist-get 'tools frontmatter))
+        (exclusions (alist-get 'tools- frontmatter))
         (resolved nil))
     (cond
      ((listp entries)
@@ -3486,7 +3590,8 @@ each entry resolves it against `ellm-tools-list':
           (push tool resolved))))
      ((eq entries t)
       (setq resolved (copy-sequence ellm-tools-list))))
-    resolved))
+    (ellm--apply-selector-exclusions
+     resolved exclusions #'ellm--resolve-tool #'ellm-tool-name)))
 
 (defun ellm--resolve-tool (entry)
   "Given string ENTRY, resolve the tool corresponding to that.
@@ -3535,6 +3640,7 @@ all configured servers, strings name servers, and strings beginning with
 @ expand categories.  Unlike `tools:', inline server maps are also
 accepted."
   (let ((entries (alist-get 'mcp frontmatter))
+        (exclusions (alist-get 'mcp- frontmatter))
         resolved)
     (cond
      ((ellm--false-value-p entries)
@@ -3550,7 +3656,8 @@ accepted."
         (dolist (server (ellm--resolve-mcp-server entry))
           (unless (cl-find (car server) resolved :key #'car :test #'equal)
             (push server resolved))))))
-    (nreverse resolved)))
+    (ellm--apply-selector-exclusions
+     (nreverse resolved) exclusions #'ellm--resolve-mcp-server #'car)))
 
 (defun ellm--resolve-mcp-server (entry)
   "Resolve MCP server ENTRY to a list of (NAME . CONFIG) conses."
@@ -4816,11 +4923,23 @@ Return non-nil when delivery succeeds."
      :desc "Tools enabled for this buffer; names from `ellm-tools-list' or `@CATEGORY'."
      :type list :editable t
      :items ellm--capf-tool-candidates)
+    ("tools+"      :ann "list"
+     :desc "Add tools to the inherited `tools:' selection."
+     :items ellm--capf-tool-candidates)
+    ("tools-"      :ann "list"
+     :desc "Exclude tools from the inherited `tools:' selection."
+     :items ellm--capf-tool-candidates)
     ("mcp"         :ann "list|true"
      :desc "MCP servers enabled for this buffer; true means all, names come from `ellm-mcp-servers', and `@CATEGORY' expands categories."
      :type mcp :editable t
      :values (("true" :value t
                :desc "Enable every MCP server in `ellm-mcp-servers'."))
+     :items ellm--capf-mcp-candidates)
+    ("mcp+"        :ann "list"
+     :desc "Add MCP servers to the inherited `mcp:' selection."
+     :items ellm--capf-mcp-candidates)
+    ("mcp-"        :ann "list"
+     :desc "Exclude MCP servers from the inherited `mcp:' selection."
      :items ellm--capf-mcp-candidates)
     ("cwd"         :ann "directory"
      :desc "Working directory used by backends and local tools when supported."
