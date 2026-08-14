@@ -165,10 +165,25 @@ Work autonomously when the request is clear:
    :heading \"Follow these project instructions:\"
    :tag \"project-instructions\")}")
 
+(defconst ellm--explore-system-prompt
+  "You are a read-only exploration agent. Investigate codebases, changes,
+behavior, history, dependencies, and external documentation as requested.
+Gather evidence with the available tools, follow relevant code paths, and
+return concise, useful findings with file references or sources where
+applicable. Focus on answering the assigned question; do not expand the task
+into implementation work.")
+
+(defconst ellm--trusted-prompt-templates
+  (list ellm--agent-system-prompt ellm--explore-system-prompt)
+  "Built-in prompt templates whose interpolation may run without confirmation.")
+
 (defcustom ellm-profiles
   `((agent . ((description . "Autonomous coding agent with local tools and optional delegation.")
               (tools . ("@files" "@shell" "@web" "@tasks" "@agents" "ask"))
-              (system . ,ellm--agent-system-prompt))))
+              (system . ,ellm--agent-system-prompt)))
+    (explore . ((description . "Read-only codebase exploration, change analysis, and external research.")
+                (tools . ("glob" "grep" "read_file_lines" "websearch" "webfetch" "git"))
+                (system . ,ellm--explore-system-prompt))))
   "Global reusable conversation profiles.
 Each entry maps a profile name to frontmatter defaults.  Buffer-local
 frontmatter `profiles:' entries overlay these definitions by name, and a
@@ -3040,7 +3055,8 @@ the syntax `#{(FORM)}'; `\\#{' inserts a literal opener.  Generated text is
 not recursively expanded."
   (unless (stringp template)
     (user-error "ellm: prompt template must be a string"))
-  (when (ellm--prompt-template-interpolation-p template)
+  (when (and (ellm--prompt-template-interpolation-p template)
+             (not (member template ellm--trusted-prompt-templates)))
     (ellm--authorize-prompt-interpolation))
   (let* ((context
           (or context

@@ -64,6 +64,11 @@ omitted middle is replaced with a truncation marker."
   :type 'natnum
   :group 'ellm-tools)
 
+(defcustom ellm-tools-git-program "git"
+  "Git executable used by the read-only `git' tool."
+  :type 'string
+  :group 'ellm-tools)
+
 (defconst ellm-tools--default-glob-options
   '("--hidden" "--follow" "--exclude" ".git" "--exclude" "node_modules" "--glob")
   "Default value for `ellm-tools-glob-options'.")
@@ -687,6 +692,135 @@ standard input in the conversation working directory."
     (lambda ()
       (when (process-live-p proc)
         (kill-process proc)))))
+
+;;;;; Git
+
+(defun ellm-tools--git-string (value name)
+  "Return VALUE as a safe Git argument named NAME."
+  (unless (and (stringp value)
+               (not (s-blank? value))
+               (not (string-prefix-p "-" value))
+               (not (string-match-p "\0" value)))
+    (ellm-tools--error "%s must be a non-empty argument that does not start with -" name))
+  value)
+
+(defun ellm-tools--git-paths (paths)
+  "Return PATHS as safe Git path arguments."
+  (let ((paths (cond ((null paths) nil)
+                     ((vectorp paths) (append paths nil))
+                     ((listp paths) paths)
+                     (t (ellm-tools--error "paths must be an array")))))
+    (mapcar (lambda (path) (ellm-tools--git-string path "path")) paths)))
+
+(defun ellm-tools--git-unused-arguments (operation arguments)
+  "Signal when OPERATION was given unsupported ARGUMENTS."
+  (when arguments
+    (ellm-tools--error "%s does not accept: %s"
+                       operation (string-join arguments ", "))))
+
+(defun ellm-tools--git-command
+    (operation revision base paths start-line end-line limit)
+  "Return Git arguments for the validated read-only OPERATION."
+  (let* ((revision (and revision (ellm-tools--git-string revision "revision")))
+         (base (and base (ellm-tools--git-string base "base")))
+         (paths (ellm-tools--git-paths paths))
+         (limit (ellm-tools--normalized-limit limit ellm-tools-search-result-limit))
+         (path-arguments (and paths (append (list "--") paths))))
+    (pcase operation
+      ("status"
+       (ellm-tools--git-unused-arguments
+        operation (delq nil (list (and revision "revision") (and base "base")
+                                   (and paths "paths") (and start-line "start-line")
+                                   (and end-line "end-line"))))
+       (cons limit '("status" "--porcelain=v1" "--branch" "--untracked-files=normal")))
+      ("diff"
+       (ellm-tools--git-unused-arguments
+        operation (delq nil (list (and start-line "start-line")
+                                   (and end-line "end-line"))))
+       (cons limit
+             (append '("diff" "--no-ext-diff" "--no-textconv")
+                     (cond ((and base revision) (list base revision))
+                           (base (list base))
+                           (revision (list revision))
+                           (t '("HEAD")))
+                     path-arguments)))
+      ("log"
+       (ellm-tools--git-unused-arguments
+        operation (delq nil (list (and base "base") (and start-line "start-line")
+                                   (and end-line "end-line"))))
+       (cons limit
+             (append (list "log" "--no-decorate" (format "--max-count=%d" limit))
+                     (and revision (list revision)) path-arguments)))
+      ("show"
+       (ellm-tools--git-unused-arguments
+        operation (delq nil (list (and base "base") (and start-line "start-line")
+                                   (and end-line "end-line"))))
+       (cons limit
+             (append '("show" "--no-ext-diff" "--no-textconv" "--format=fuller")
+                     (list (or revision "HEAD")) path-arguments)))
+      ("blame"
+       (ellm-tools--git-unused-arguments
+        operation (delq nil (list (and base "base"))))
+       (unless (and (= (length paths) 1)
+                    (integerp start-line) (integerp end-line)
+                    (> start-line 0) (>= end-line start-line))
+         (ellm-tools--error
+          "blame requires one path and positive start-line and end-line values"))
+       (cons limit
+             (append (list "blame" (format "-L%d,%d" start-line end-line))
+                     (and revision (list revision))
+                     (list "--" (car paths)))))
+      ("ls-files"
+       (ellm-tools--git-unused-arguments
+        operation (delq nil (list (and revision "revision") (and base "base")
+                                   (and start-line "start-line")
+                                   (and end-line "end-line"))))
+       (cons limit (append '("ls-files") path-arguments)))
+      (_ (ellm-tools--error "unsupported git operation: %s" operation)))))
+
+(defun ellm-tools--format-git-result (operation limit exit-code stdout stderr)
+  "Format a bounded result from Git OPERATION."
+  (if (not (zerop exit-code))
+      (ellm-tools--format-command-error "git" exit-code stdout stderr)
+    (let* ((lines (split-string (string-trim-right stdout) "\n" t))
+           (total (length lines))
+           (shown (seq-take lines limit)))
+      (concat
+       (format "<git operation=%S lines=%d%s>\n" operation total
+               (if (> total limit) " truncated=true" ""))
+       (string-join shown "\n")
+       (when (> total limit)
+         (format "\n[... truncated, showing first %d of %d lines ...]" limit total))
+       (unless (string-empty-p (string-trim stderr))
+         (format "\n<warnings>\n%s\n</warnings>" (string-trim-right stderr)))
+       "\n</git>"))))
+
+(ellm-deftool git/git (:async t)
+  ((operation :string "Read-only operation: status, diff, log, show, blame, or ls-files."
+              :enum ["status" "diff" "log" "show" "blame" "ls-files"])
+   (revision :string "Optional revision for diff, log, show, or blame." &optional)
+   (base :string "Optional base revision for diff." &optional)
+   (paths :array "Optional paths for diff, log, show, or ls-files." &optional)
+   (start-line :integer "Required first line for blame." &optional)
+   (end-line :integer "Required last line for blame." &optional)
+   (max-results :integer "Maximum output lines. Omit to use the standard limit." &optional))
+  "Inspect Git state and history using a fixed read-only operation.
+The tool rejects unsupported operations and arbitrary Git arguments."
+  (unless (member operation '("status" "diff" "log" "show" "blame" "ls-files"))
+    (ellm-tools--error "unsupported git operation: %s" operation))
+  (pcase-let* ((`(,limit . ,arguments)
+                (ellm-tools--git-command operation revision base paths start-line end-line
+                                          max-results))
+               (process-environment
+                (cons "GIT_TERMINAL_PROMPT=0"
+                      (cons "GIT_OPTIONAL_LOCKS=0" process-environment))))
+    (ellm-tools--start-command
+     "ellm-tools-git" ellm-tools-git-program
+     (append '("--no-pager" "-c" "core.pager=cat" "-c" "color.ui=false"
+               "-c" "core.fsmonitor=false")
+             arguments)
+     (apply-partially #'ellm-tools--format-git-result operation limit)
+     callback)))
 
 ;;;;; Files
 

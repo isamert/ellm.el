@@ -278,6 +278,11 @@ standard coding-agent system prompt and enables `@files`, `@shell`, `@web`,
 `@tasks`, `@agents`, and `ask`; override `tools:` or use `tools+` / `tools-`
 in frontmatter to adjust that selection.
 
+The built-in `explore` profile is a read-only worker for codebase exploration,
+change analysis, and external research.  It enables source-reading and web
+tools plus the structured `git` tool, which supports only `status`, `diff`,
+`log`, `show`, `blame`, and `ls-files` operations.
+
 ```elisp
 (setq ellm-profiles
       '((explore . ((description . "Read-only codebase exploration.")
