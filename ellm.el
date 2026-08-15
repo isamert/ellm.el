@@ -4188,6 +4188,9 @@ explicitly marked `:retryable' and the core retry budget remains.")
 (defvar-local ellm--composer-conversation nil
   "Conversation buffer owned by the current `ellm-compose-mode' buffer.")
 
+(defvar-local ellm--composer-window-configuration nil
+  "Window configuration from before displaying the current composer.")
+
 (defvar-local ellm--request-generation 0
   "Monotonic identity of the current request lifecycle.")
 
@@ -6334,12 +6337,20 @@ append-at-end behavior.  Return `draft' or `prompt' for the selected target."
       (ellm--append-snippet buffer text)
       'prompt)))
 
+(defun ellm--restore-composer-window-configuration ()
+  "Restore the window layout from before displaying this conversation's draft."
+  (when-let* ((configuration ellm--composer-window-configuration)
+              ((window-configuration-p configuration)))
+    (set-window-configuration configuration))
+  (setq ellm--composer-window-configuration nil))
+
 (defun ellm--kill-composer ()
   "Discard the current conversation's composer buffer during cleanup."
   (when-let* ((composer ellm--composer-buffer)
               ((buffer-live-p composer)))
     (kill-buffer composer))
-  (setq ellm--composer-buffer nil))
+  (setq ellm--composer-buffer nil
+        ellm--composer-window-configuration nil))
 
 (defun ellm--commit-composer-draft ()
   "Move this conversation's draft into its trailing user turn.
@@ -6358,7 +6369,8 @@ when the request ends as well."
         (set-window-buffer window (current-buffer))
         (set-window-point window (point-max)))
       (kill-buffer composer)
-      (setq ellm--composer-buffer nil)
+      (setq ellm--composer-buffer nil
+            ellm--composer-window-configuration nil)
       (force-mode-line-update)
       text)))
 
@@ -6375,7 +6387,11 @@ point to the real trailing user turn in the current conversation."
    ((not (derived-mode-p 'ellm-mode))
     (user-error "ellm: not in an ellm conversation"))
    (ellm--active-request
-    (pop-to-buffer (ellm--ensure-composer) ellm-compose-display-action)
+    (let ((conversation (current-buffer))
+          (configuration (current-window-configuration)))
+      (pop-to-buffer (ellm--ensure-composer) ellm-compose-display-action)
+      (with-current-buffer conversation
+        (setq ellm--composer-window-configuration configuration)))
     (goto-char (point-max)))
    (t
     (ellm--ensure-next-user-turn)
@@ -6393,7 +6409,9 @@ While the request is still active, retain the draft for review when it ends."
       (user-error "ellm: draft's conversation no longer exists"))
     (with-current-buffer conversation
       (if ellm--active-request
-          (message "ellm: draft saved for next user prompt")
+          (progn
+            (ellm--restore-composer-window-configuration)
+            (message "ellm: draft saved for next user prompt"))
         (ellm--commit-composer-draft)
         (ellm-send)))))
 
@@ -6411,8 +6429,10 @@ While the request is still active, retain the draft for review when it ends."
       (with-current-buffer conversation
         (when (eq ellm--composer-buffer composer)
           (setq ellm--composer-buffer nil)
+          (ellm--restore-composer-window-configuration)
           (force-mode-line-update))))
-    (quit-window t)))
+    (when (buffer-live-p composer)
+      (kill-buffer composer))))
 
 ;;;; Sending
 
