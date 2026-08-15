@@ -2323,6 +2323,14 @@ the user can edit it without the glyph reappearing on every keystroke."
           (overlay-put ov-here 'evaporate nil)
           (setq ellm--revealed-separator-overlay ov-here))))))
 
+(defun ellm--remove-pretty-separators (beg end)
+  "Remove pretty-separator overlays between BEG and END."
+  (dolist (ov (overlays-in beg end))
+    (when (overlay-get ov 'ellm-pretty-separator)
+      (when (eq ov ellm--revealed-separator-overlay)
+        (setq ellm--revealed-separator-overlay nil))
+      (delete-overlay ov))))
+
 (defun ellm--refresh-pretty-separators-all-buffers (&rest _)
   "Refresh pretty-separator overlays in all `ellm-mode' buffers."
   (dolist (buf (buffer-list))
@@ -5568,8 +5576,9 @@ Headings inside fenced code blocks do not count."
           (ellm--continuation-header-p
            (match-string-no-properties 1))))))
 
-(defun ellm--show-visible-blank-separator-subtrees ()
-  "Show visible outline subtrees whose turn separator is intentionally blank."
+(defun ellm--show-visible-blank-separator-subtrees (&optional refresh)
+  "Show visible outline subtrees whose turn separator is intentionally blank.
+When REFRESH is non-nil, refresh pretty separators in each revealed subtree."
   (save-excursion
     (goto-char (point-min))
     (while (ellm--outline-search-function nil nil nil)
@@ -5577,7 +5586,9 @@ Headings inside fenced code blocks do not count."
       (let ((pos (point)))
         (when (and (not (invisible-p pos))
                    (ellm--blank-separator-heading-at-point-p))
-          (outline-show-subtree))
+          (outline-show-subtree)
+          (when refresh
+            (ellm--put-pretty-separators pos (ellm--subtree-end-at-point))))
         (goto-char pos)
         (forward-line 1)))))
 
@@ -5588,13 +5599,14 @@ turn reveals implementation-detail assistant children, except when point
 is on such a child itself so that it can still be cycled directly."
   (interactive (list last-nonmenu-event))
   (let* ((mouse-event (and (mouse-event-p event) event))
-         heading tag-end)
+         heading heading-pos tag-end)
     (save-excursion
       (when mouse-event
         (mouse-set-point mouse-event))
       (forward-line 0)
       (when (ellm--outline-search-function nil nil nil t)
-        (setq heading
+        (setq heading-pos (point)
+              heading
               (if (looking-at ellm-turn-regexp)
                   (if (ellm--blank-separator-p
                        (match-string-no-properties 2)
@@ -5618,14 +5630,21 @@ is on such a child itself so that it can still be cycled directly."
           (outline-cycle mouse-event))
       (outline-cycle mouse-event))
     (when (eq heading 'turn)
-      (ellm--show-visible-blank-separator-subtrees))))
+      (ellm--show-visible-blank-separator-subtrees t))
+    (when heading-pos
+      (save-excursion
+        (goto-char heading-pos)
+        (ellm--put-pretty-separators
+         heading-pos (ellm--subtree-end-at-point))))))
 
 (defun ellm-outline-cycle-buffer (&optional level)
   "Like `outline-cycle-buffer', but reveal implementation-detail assistant turns."
   (interactive (list (when current-prefix-arg
                        (prefix-numeric-value current-prefix-arg))))
   (outline-cycle-buffer level)
-  (ellm--show-visible-blank-separator-subtrees))
+  (ellm--show-visible-blank-separator-subtrees)
+  ;; Buffer cycling can reveal multiple unrelated subtrees, so refresh once.
+  (ellm--put-pretty-separators (point-min) (point-max)))
 
 (defun ellm-beginning-of-defun (&optional arg)
   "Move backward to the beginning of the ARG-th preceding heading.
@@ -5832,7 +5851,9 @@ Empty or whitespace-only bodies are not folded."
             ;; Start at the heading newline so child headings stay hidden,
             ;; but leave the final newline visible.  Hiding that separator
             ;; newline can leave a one-character outline ellipsis overlay
-            ;; behind after unfolding.
+            ;; behind after unfolding.  Clear child separators first: an
+            ;; overlay display can otherwise make hidden text visible.
+            (ellm--remove-pretty-separators heading-end subtree-end)
             (outline-flag-region heading-end subtree-end t)
             t))))))
 
