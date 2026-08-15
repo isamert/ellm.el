@@ -346,7 +346,7 @@ their nested `tool-param' turns but omitted from the title."
   :type 'natnum
   :group 'ellm)
 
-(defcustom ellm-header-line-template "%l%>%q%r"
+(defcustom ellm-header-line-template "%l%>%q%d%r"
   "Template for the `ellm-mode' header line.
 
 The following placeholders are expanded:
@@ -356,12 +356,22 @@ The following placeholders are expanded:
   %u  context usage
   %c  request cost
   %q  pending user-prompt status
+  %d  draft for the next user prompt
   %l  title and TODO progress, joined with \" — \", when both exist
   %r  context usage and cost, joined with a space, when both exist
   %>  align all following text against the right edge
 
 Use %% for a literal percent sign.  Empty fields expand to an empty string."
   :type 'string
+  :group 'ellm)
+
+(defcustom ellm-compose-display-action nil
+  "Action passed to `pop-to-buffer' when displaying a next-prompt draft.
+
+A nil value uses the user's normal `display-buffer' rules.  Set this to a
+`display-buffer' action alist to choose a particular composer layout without
+making ellm manage window splits or side windows."
+  :type 'sexp
   :group 'ellm)
 
 (defcustom ellm-mcp-servers nil
@@ -4172,6 +4182,12 @@ explicitly marked `:retryable' and the core retry budget remains.")
 (defvar-local ellm--active-request nil
   "Core `ellm-request' currently owning this buffer, or nil.")
 
+(defvar-local ellm--composer-buffer nil
+  "Draft buffer for the next user prompt while this conversation is active.")
+
+(defvar-local ellm--composer-conversation nil
+  "Conversation buffer owned by the current `ellm-compose-mode' buffer.")
+
 (defvar-local ellm--request-generation 0
   "Monotonic identity of the current request lifecycle.")
 
@@ -4768,6 +4784,7 @@ MESSAGE-TEXT is reported after cleanup when non-nil."
             (ellm--cancel-pending-user-prompt)
             (ellm--set-active-request nil)
             (ellm--ensure-next-user-turn)
+            (ellm--commit-composer-draft)
             (ellm--persistence-checkpoint)
             (ellm--notify-request-finished
              request
@@ -6069,17 +6086,25 @@ directory without selecting that buffer.  With prefix argument NEW, create a
 new target conversation outside an ellm buffer."
   (interactive "P")
   (let* ((in-ellm (derived-mode-p 'ellm-mode))
+         (in-compose (derived-mode-p 'ellm-compose-mode))
          (start (if (use-region-p) (region-beginning) (line-beginning-position)))
          (end (if (use-region-p) (region-end) (line-end-position)))
          (text (buffer-substring-no-properties start end))
-         (root (unless in-ellm (ellm--current-project-root-or-directory)))
-         (snippet (unless in-ellm (ellm--snippet root start end)))
+         (root (unless (or in-ellm in-compose)
+                 (ellm--current-project-root-or-directory)))
+         (snippet (unless (or in-ellm in-compose)
+                    (ellm--snippet root start end)))
          (comment (read-string "Comment: "))
-         (entry (ellm--comment-entry text comment snippet)))
-    (if in-ellm
-        (ellm--append-snippet (current-buffer) entry)
-      (ellm--append-snippet
-       (ellm--select-or-create-project-buffer root new) entry))))
+         (entry (ellm--comment-entry text comment snippet))
+         (target (cond
+                  (in-ellm (current-buffer))
+                  (in-compose ellm--composer-conversation)
+                  (t (ellm--select-or-create-project-buffer root new)))))
+    (unless (buffer-live-p target)
+      (user-error "ellm: no conversation for this draft"))
+    (pcase (ellm--append-to-next-prompt target entry)
+      ('draft (message "ellm: added to draft for next user prompt"))
+      ('prompt (message "ellm: added to next user prompt")))))
 
 (defun ellm--append-snippet (buffer snippet)
   "Append SNIPPET to BUFFER at the end of the conversation."
@@ -6239,6 +6264,155 @@ one, then narrows to its outline subtree."
   (interactive)
   (unless (ignore-errors (ellm-narrow-to-header))
     (ellm-narrow-to-turn)))
+
+;;;; Next-prompt drafting
+
+(defvar ellm-compose-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "C-c C-c") #'ellm-compose-send)
+    (define-key map (kbd "C-c C-k") #'ellm-compose-cancel)
+    map)
+  "Keymap for `ellm-compose-mode'.")
+
+(define-derived-mode ellm-compose-mode text-mode "eLLM Compose"
+  "Mode for drafting the next prompt while an ellm request is active."
+  (setq-local
+   header-line-format
+   (substitute-command-keys
+    "ellm-compose :: Draft for next user prompt.  \\[ellm-compose-send] to save, \\[ellm-compose-cancel] to discard")))
+
+(defun ellm--composer-live-p ()
+  "Return non-nil when the current conversation has a live composer buffer."
+  (buffer-live-p ellm--composer-buffer))
+
+(defun ellm--composer-text ()
+  "Return the current conversation's composer text, or nil when empty."
+  (when (ellm--composer-live-p)
+    (with-current-buffer ellm--composer-buffer
+      (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+        (unless (string-blank-p text) text)))))
+
+(defun ellm--composer-draft-p ()
+  "Return non-nil when the current conversation has a nonempty draft."
+  (and (ellm--composer-text) t))
+
+(defun ellm--ensure-composer ()
+  "Return the current conversation's composer buffer, creating it if needed."
+  (unless (ellm--composer-live-p)
+    (let ((conversation (current-buffer)))
+      (setq ellm--composer-buffer
+            (generate-new-buffer
+             (format " *ellm compose: %s*" (buffer-name conversation))))
+      (with-current-buffer ellm--composer-buffer
+        (ellm-compose-mode)
+        (setq-local ellm--composer-conversation conversation))))
+  ellm--composer-buffer)
+
+(defun ellm--append-to-next-prompt (buffer text)
+  "Append TEXT to BUFFER's logical next user prompt.
+
+While BUFFER has an active request, append to its hidden composer.  Otherwise
+append to its trailing user turn.  Buffers without turns retain the historical
+append-at-end behavior.  Return `draft' or `prompt' for the selected target."
+  (with-current-buffer buffer
+    (if ellm--active-request
+        (let ((composer (ellm--ensure-composer)))
+          (with-current-buffer composer
+            (goto-char (point-max))
+            (unless (or (bobp) (bolp)) (insert "\n"))
+            (unless (or (bobp)
+                        (save-excursion
+                          (forward-line -1)
+                          (looking-at-p "[[:space:]]*$")))
+              (insert "\n"))
+            (insert text))
+          (force-mode-line-update)
+          'draft)
+      (if (ellm--parse-turns)
+          (ellm--ensure-next-user-turn)
+        nil)
+      (ellm--append-snippet buffer text)
+      'prompt)))
+
+(defun ellm--kill-composer ()
+  "Discard the current conversation's composer buffer during cleanup."
+  (when-let* ((composer ellm--composer-buffer)
+              ((buffer-live-p composer)))
+    (kill-buffer composer))
+  (setq ellm--composer-buffer nil))
+
+(defun ellm--commit-composer-draft ()
+  "Move this conversation's draft into its trailing user turn.
+
+Any windows displaying the composer are switched to the conversation so the
+user can continue editing the now-real prompt.  Empty composers are discarded
+when the request ends as well."
+  (when-let* ((composer ellm--composer-buffer)
+              ((buffer-live-p composer)))
+    (let ((text (ellm--composer-text)))
+      (when text
+        (with-current-buffer composer
+          (erase-buffer))
+        (ellm--append-to-next-prompt (current-buffer) text))
+      (dolist (window (get-buffer-window-list composer nil t))
+        (set-window-buffer window (current-buffer))
+        (set-window-point window (point-max)))
+      (kill-buffer composer)
+      (setq ellm--composer-buffer nil)
+      (force-mode-line-update)
+      text)))
+
+;;;###autoload
+(defun ellm-compose ()
+  "Edit the next user prompt.
+
+During an active request, display its separate draft buffer.  Otherwise move
+point to the real trailing user turn in the current conversation."
+  (interactive)
+  (cond
+   ((derived-mode-p 'ellm-compose-mode)
+    (goto-char (point-max)))
+   ((not (derived-mode-p 'ellm-mode))
+    (user-error "ellm: not in an ellm conversation"))
+   (ellm--active-request
+    (pop-to-buffer (ellm--ensure-composer) ellm-compose-display-action)
+    (goto-char (point-max)))
+   (t
+    (ellm--ensure-next-user-turn)
+    (goto-char (point-max)))))
+
+(defun ellm-compose-send ()
+  "Send the next-prompt draft when its conversation is ready.
+
+While the request is still active, retain the draft for review when it ends."
+  (interactive)
+  (unless (derived-mode-p 'ellm-compose-mode)
+    (user-error "ellm: not in a next-prompt draft"))
+  (let ((conversation ellm--composer-conversation))
+    (unless (buffer-live-p conversation)
+      (user-error "ellm: draft's conversation no longer exists"))
+    (with-current-buffer conversation
+      (if ellm--active-request
+          (message "ellm: draft saved for next user prompt")
+        (ellm--commit-composer-draft)
+        (ellm-send)))))
+
+(defun ellm-compose-cancel ()
+  "Discard the current next-prompt draft without cancelling its request."
+  (interactive)
+  (unless (derived-mode-p 'ellm-compose-mode)
+    (user-error "ellm: not in a next-prompt draft"))
+  (when (and (not (string-blank-p (buffer-string)))
+             (not (yes-or-no-p "Discard next-prompt draft? ")))
+    (user-error "ellm: draft kept"))
+  (let ((conversation ellm--composer-conversation)
+        (composer (current-buffer)))
+    (when (buffer-live-p conversation)
+      (with-current-buffer conversation
+        (when (eq ellm--composer-buffer composer)
+          (setq ellm--composer-buffer nil)
+          (force-mode-line-update))))
+    (quit-window t)))
 
 ;;;; Sending
 
@@ -7102,6 +7276,13 @@ the resulting normalized list."
     (ellm--escape-header-line-text
      (replace-regexp-in-string "[\n\r\t]+" " " title))))
 
+(defun ellm--composer-header-status ()
+  "Return header-line status for a nonempty next-prompt draft."
+  (when (ellm--composer-draft-p)
+    (propertize "Next draft "
+                'face 'font-lock-constant-face
+                'help-echo "Use M-x ellm-compose to edit the next prompt.")))
+
 (defun ellm--user-prompt-header-status ()
   "Return the clickable header-line status for queued user prompts."
   (when ellm--user-prompt-queue
@@ -7136,13 +7317,15 @@ the resulting normalized list."
                      (ellm-buffer-state-cost-amount ellm-buffer-state)
                      (ellm-buffer-state-cost-currency ellm-buffer-state)))
          (cost (and cost-text (ellm--escape-header-line-text cost-text)))
-         (prompt-status (ellm--user-prompt-header-status)))
+         (prompt-status (ellm--user-prompt-header-status))
+         (draft-status (ellm--composer-header-status)))
     `((?t . ,title)
       (?a . ,active)
       (?p . ,progress)
       (?u . ,usage)
       (?c . ,cost)
       (?q . ,prompt-status)
+      (?d . ,draft-status)
       (?l . ,(string-join (delq nil (list title todos)) " — "))
       (?r . ,(string-join (delq nil (list usage cost)) " ")))))
 
@@ -7153,7 +7336,7 @@ Return a cons of the left and right portions, split at `%>'."
         (right nil)
         (right-aligned nil)
         (start 0))
-    (while (string-match "%[%%tapulrcq>]" template start)
+    (while (string-match "%[%%tapulrcqd>]" template start)
       (let ((literal (substring template start (match-beginning 0)))
             (placeholder (aref template (1+ (match-beginning 0)))))
         (push (ellm--escape-header-line-text literal)
@@ -7195,6 +7378,7 @@ Return a cons of the left and right portions, split at `%>'."
                              ((ellm--opening-tag-at-point-p) #'ellm-toggle-tag)))))
     (define-key map (kbd "<backtab>") #'ellm-outline-cycle-buffer)
     (define-key map (kbd "C-c C-c")   #'ellm-send)
+    (define-key map (kbd "C-c C-e")   #'ellm-compose)
     (define-key map (kbd "C-c C-k")   #'ellm-cancel)
     (define-key map (kbd "C-c C-a")   #'ellm-answer-prompt)
     (define-key map (kbd "C-c C-s")   #'ellm-start-session)
@@ -7220,6 +7404,7 @@ Return a cons of the left and right portions, split at `%>'."
   (setq-local header-line-format '((:eval (ellm--header-line-status))))
   (add-hook 'before-change-functions #'ellm--before-change-function nil t)
   (add-hook 'after-change-functions #'ellm--after-change-function nil t)
+  (add-hook 'kill-buffer-hook #'ellm--kill-composer nil t)
   (ellm--configure-turn-rules t)
   (add-hook 'post-command-hook #'ellm--reveal-separator-at-point nil t)
   (add-hook 'post-command-hook #'ellm--maybe-activate-user-prompt nil t)
