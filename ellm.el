@@ -5697,6 +5697,54 @@ end of buffer.  Serves as `end-of-defun-function'."
         (forward-line 0)
       (goto-char (point-max)))))
 
+;;;; Tool-pair navigation
+
+(defun ellm--tool-turn-at-point ()
+  "Return the tool call or result containing point, or nil.
+
+Turn delimiter lines belong to their following turn."
+  (let ((position (point)))
+    (cl-find-if
+     (lambda (turn)
+       (and (member (ellm-turn-role turn) '("tool-call" "tool-result"))
+            (<= (ellm--turn-delimiter-beg turn) position)
+            (or (< position (ellm-turn-end turn))
+                (and (= (ellm-turn-end turn) (point-max))
+                     (= position (point-max))))))
+     (ellm--parse-turns))))
+
+(defun ellm-jump-to-tool-pair ()
+  "Jump between a tool call and its result at point.
+
+The tool call and result must have matching `id' attributes."
+  (interactive)
+  (unless (derived-mode-p 'ellm-mode)
+    (user-error "ellm: this command requires an ellm buffer"))
+  (let* ((turn (ellm--tool-turn-at-point))
+         (role (and turn (ellm-turn-role turn)))
+         (id (and turn (alist-get "id" (ellm-turn-attrs turn)
+                                  nil nil #'equal))))
+    (unless (member role '("tool-call" "tool-result"))
+      (user-error "ellm: point is not in a tool call or result"))
+    (unless (and id (not (string-empty-p id)))
+      (user-error "ellm: this tool %s has no ID" role))
+    (let ((target
+           (cl-find-if
+            (lambda (candidate)
+              (and (equal (ellm-turn-role candidate)
+                          (if (equal role "tool-call")
+                              "tool-result"
+                            "tool-call"))
+                   (equal (alist-get "id" (ellm-turn-attrs candidate)
+                                     nil nil #'equal)
+                          id)))
+            (ellm--parse-turns))))
+      (unless target
+        (user-error "ellm: no matching tool %s for %s"
+                    (if (equal role "tool-call") "result" "call") id))
+      (goto-char (ellm--turn-delimiter-beg target))
+      (outline-show-entry))))
+
 ;;;; Tag navigation and folding
 
 (defun ellm--opening-tag-at-point-p ()
