@@ -684,13 +684,13 @@ Group 1: the leading hash characters indicating the heading level.")
 ;;;;; Roles & role predicates
 
 (defconst ellm--roles
-  '((user        :face ellm-role-user      :glyph "❯ USER")
-    (assistant   :face ellm-role-assistant :glyph "❮ ASSISTANT")
-    (system      :face ellm-role-system    :glyph "❯ SYSTEM")
-    (tool-call   :face ellm-role-tool      :glyph "❮❮ CALL"     :tool t :shade ellm-block     :markdown nil)
-    (tool-result :face ellm-role-tool      :glyph "❯❯ RESULT"   :tool t :shade ellm-block     :markdown nil)
-    (tool-param  :face ellm-role-tool      :glyph "  ↳ PARAM"   :tool t :shade ellm-block     :markdown nil)
-    (reasoning   :face ellm-role-reasoning :glyph "❮❮ REASONING"        :shade ellm-reasoning :markdown nil))
+  '((user        :face ellm-role-user        :glyph "❯ USER")
+    (assistant   :face ellm-role-assistant   :glyph "❮ ASSISTANT")
+    (system      :face ellm-role-system      :glyph "❯ SYSTEM")
+    (tool-call   :face ellm-role-tool-call   :glyph "❮❮ CALL"   :tool t :shade ellm-block     :markdown nil)
+    (tool-result :face ellm-role-tool-result :glyph "❯❯ RESULT" :tool t :shade ellm-block     :markdown nil)
+    (tool-param  :face ellm-role-tool-param  :glyph "  ↳ PARAM" :tool t :shade ellm-block     :markdown nil)
+    (reasoning   :face ellm-role-reasoning   :glyph "❮❮ REASONING"      :shade ellm-reasoning :markdown nil))
   "Single source of truth for role metadata.
 Each entry is `(ROLE-SYM . PLIST)' where PLIST may include:
   :face   FACE-SYMBOL  Face used for the role's keyword on the delimiter line.
@@ -897,6 +897,7 @@ can update request-locked buffers."
            (set-marker (nth 2 state) nil))))))
 
 ;;;; Faces
+
 ;;;;; Utilities
 
 (defun ellm--alt-bg ()
@@ -918,8 +919,8 @@ and `set-face-attribute' calls safe in non-graphical contexts."
 ;;;;; Faces
 
 (defface ellm-turn-delimiter
-  '((t :inherit font-lock-keyword-face :weight bold))
-  "Face for turn delimiter lines."
+  '((t :inherit font-lock-punctuation-face :weight bold))
+  "Face for turn delimiters."
   :group 'ellm)
 
 (defface ellm-turn-heading-1
@@ -938,28 +939,38 @@ and `set-face-attribute' calls safe in non-graphical contexts."
   :group 'ellm)
 
 (defface ellm-role-user
-  '((t :inherit font-lock-function-name-face :weight bold))
-  "Face for user role."
+  '((t :inherit font-lock-string-face :weight bold))
+  "Face for user-authored input."
   :group 'ellm)
 
 (defface ellm-role-assistant
-  '((t :inherit font-lock-type-face :weight bold))
-  "Face for assistant role."
-  :group 'ellm)
-
-(defface ellm-role-reasoning
-  '((t :inherit font-lock-regexp-face :weight bold :height 0.85))
-  "Face for assistant role."
+  '((t :inherit font-lock-function-name-face :weight bold))
+  "Face for assistant responses."
   :group 'ellm)
 
 (defface ellm-role-system
-  '((t :inherit font-lock-warning-face :weight bold))
-  "Face for system role."
+  '((t :inherit font-lock-preprocessor-face :weight bold))
+  "Face for system-provided conversation context."
   :group 'ellm)
 
-(defface ellm-role-tool
+(defface ellm-role-tool-call
+  '((t :inherit font-lock-builtin-face :weight bold :height 0.85))
+  "Face for tool invocations."
+  :group 'ellm)
+
+(defface ellm-role-tool-result
   '((t :inherit font-lock-constant-face :weight bold :height 0.85))
-  "Face for tool-call and tool-result roles."
+  "Face for tool results."
+  :group 'ellm)
+
+(defface ellm-role-tool-param
+  '((t :inherit font-lock-variable-name-face :weight bold :height 0.85))
+  "Face for tool parameters."
+  :group 'ellm)
+
+(defface ellm-role-reasoning
+  '((t :inherit font-lock-comment-face :weight bold :height 0.85))
+  "Face for the assistant's private reasoning."
   :group 'ellm)
 
 (defface ellm-turn-rule
@@ -968,18 +979,18 @@ and `set-face-attribute' calls safe in non-graphical contexts."
   :group 'ellm)
 
 (defface ellm-frontmatter
-  `((t :inherit shadow :background ,(ellm--alt-bg) :extend t))
-  "Face for YAML frontmatter `---' delimiter lines."
+  `((t :inherit font-lock-comment-face :background ,(ellm--alt-bg) :extend t))
+  "Face for YAML frontmatter."
   :group 'ellm)
 
 (defface ellm-tag
-  '((t :inherit font-lock-type-face))
+  '((t :inherit font-lock-doc-markup-face))
   "Face for prompt tags."
-  :group 'ellm-faces)
+  :group 'ellm)
 
 (defface ellm-code-block-delimiter
-  `((t :inherit shadow :background ,(ellm--alt-bg) :extend t))
-  "Face for ``` lines."
+  `((t :inherit font-lock-comment-delimiter-face :background ,(ellm--alt-bg) :extend t))
+  "Face for fenced-code delimiters."
   :group 'ellm)
 
 (defface ellm-bold
@@ -1033,14 +1044,13 @@ and `set-face-attribute' calls safe in non-graphical contexts."
   :group 'ellm)
 
 (defface ellm-list-marker
-  '((t :inherit font-lock-builtin-face))
+  '((t :inherit font-lock-punctuation-face))
   "Face for list markers (-, *, numbered)."
   :group 'ellm)
 
-(defface ellm-block `((t :inherit fixed-pitch
-                         :background ,(ellm--alt-bg)
-                         :extend t))
-  "Face used for text inside various blocks."
+(defface ellm-block
+  `((t :inherit fixed-pitch :background ,(ellm--alt-bg) :extend t))
+  "Face used for raw text inside tool turns."
   :group 'ellm)
 
 (defface ellm-reasoning
@@ -1051,14 +1061,11 @@ and `set-face-attribute' calls safe in non-graphical contexts."
 ;;;;; Keep faces in sync with theme
 
 (defun ellm--update-faces (&rest _)
-  "Update face colors that requires recalculation after theme change.
-Used in {load,enable,disable}-theme hooks."
-  ;; FIXME: If changed by user, don't change?
-  (let* ((alt-bg (ellm--alt-bg)))
-    (set-face-attribute 'ellm-block nil :background alt-bg)
-    (set-face-attribute 'ellm-inline-code nil :background alt-bg)
-    (set-face-attribute 'ellm-frontmatter nil :background alt-bg)
-    (set-face-attribute 'ellm-code-block-delimiter nil :background alt-bg))
+  "Update calculated face backgrounds after a theme change."
+  (let ((alt-bg (ellm--alt-bg)))
+    (dolist (face '(ellm-block ellm-inline-code ellm-frontmatter
+                    ellm-code-block-delimiter))
+      (set-face-attribute face nil :background alt-bg)))
   (ellm--apply-heading-rescale ellm-heading-rescale))
 
 (dolist (hook '(load-theme enable-theme disable-theme))
