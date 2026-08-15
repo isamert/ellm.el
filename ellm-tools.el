@@ -1424,13 +1424,13 @@ whose documentation contains all QUERY words are included as well."
      "\n</elisp_eval>")))
 
 (defun ellm-tools--elisp-child-form
-    (body load-path-value exec-path-value directory prefer-newer)
+    (body load-path-value exec-path-value directory)
   "Return a child Emacs form evaluating BODY with captured environment."
   `(lambda ()
      (setq load-path ',load-path-value
            exec-path ',exec-path-value
            default-directory ,directory
-           load-prefer-newer ,prefer-newer)
+           load-prefer-newer t)
      ,body))
 
 (defun ellm-tools--cancel-elisp-process (process)
@@ -1451,7 +1451,7 @@ whose documentation contains all QUERY words are included as well."
           (async-start
            (ellm-tools--elisp-child-form
             `(funcall ',ellm-tools--elisp-evaluator ,code ',features)
-            load-path exec-path directory load-prefer-newer)
+            load-path exec-path directory)
            (lambda (result)
              (unless (async-message-p result)
                (setq completed t)
@@ -1613,7 +1613,7 @@ whose documentation contains all QUERY words are included as well."
                    (funcall evaluator
                             (plist-get request :code)
                             (plist-get request :features))))))))
-       load-path exec-path directory load-prefer-newer)
+       load-path exec-path directory)
       (lambda (result)
         (ellm-tools--handle-elisp-session-result
          owner name process result))))
@@ -2859,7 +2859,7 @@ The return value is a cons of body and whether it was truncated."
                 (ellm-tools--webfetch
                  ,url ,limit ,ellm-tools-webfetch-user-agent
                  ,ellm-tools-webfetch-response-byte-limit)))
-            load-path exec-path default-directory load-prefer-newer)
+            load-path exec-path default-directory)
            (lambda (result)
              (unless (async-message-p result)
                (setq completed t)
@@ -2940,7 +2940,7 @@ The return value is a cons of body and whether it was truncated."
                  (error
                   (format "DuckDuckGo search failed: %s"
                           (error-message-string err)))))
-            load-path exec-path default-directory load-prefer-newer)
+            load-path exec-path default-directory)
            (lambda (result)
              (unless (async-message-p result)
                (setq completed t)
