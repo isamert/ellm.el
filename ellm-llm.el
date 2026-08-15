@@ -100,7 +100,10 @@ only while debugging.  Log buffers grow without bound."
                  :documentation "Non-nil once title generation has been attempted.")
   (log-buffer nil
               :type (or null buffer)
-              :documentation "Per-conversation diagnostic log buffer."))
+              :documentation "Per-conversation diagnostic log buffer.")
+  (tool-activity-timers nil
+                        :type list
+                        :documentation "Heartbeat timers for running llm.el tools."))
 
 (defconst ellm-llm--turn-usage-attrs
   '((:input-tokens . "input-tokens")
@@ -215,6 +218,7 @@ lookups are not cached so a later completion attempt can retry."
 (cl-defmethod ellm-backend-cancel ((driver ellm-llm-driver))
   "Cancel DRIVER's active `llm.el' transport."
   (cl-incf (ellm-llm-driver-serial driver))
+  (ellm-llm--cancel-tool-activity-timers driver)
   (when-let* ((raw (ellm-llm-driver-raw driver)))
     (llm-cancel-request raw)
     (setf (ellm-llm-driver-raw driver) nil)))
@@ -236,6 +240,7 @@ lookups are not cached so a later completion attempt can retry."
 (cl-defmethod ellm-backend-finish ((driver ellm-llm-driver) _outcome)
   "Release DRIVER's timers and transport reference."
   (cl-incf (ellm-llm-driver-serial driver))
+  (ellm-llm--cancel-tool-activity-timers driver)
   (setf (ellm-llm-driver-raw driver) nil
         (ellm-llm-driver-emit driver) nil))
 
@@ -504,6 +509,67 @@ reconstructed from the conversation buffer later."
 (defun ellm-llm--resolve-tools (frontmatter)
   "Return FRONTMATTER selected tools converted to `llm-tool' objects."
   (mapcar #'ellm-llm--make-llm-tool (ellm--resolve-tools frontmatter)))
+
+(defun ellm-llm--cancel-tool-activity-timers (driver)
+  "Cancel heartbeat timers owned by DRIVER."
+  (dolist (timer (ellm-llm-driver-tool-activity-timers driver))
+    (cancel-timer timer))
+  (setf (ellm-llm-driver-tool-activity-timers driver) nil))
+
+(defun ellm-llm--tool-activity-start (driver)
+  "Start emitting activity while an llm.el tool for DRIVER runs.
+Return a function that stops the heartbeat."
+  (let ((timeout (with-current-buffer (ellm-llm-driver-buffer driver)
+                   ellm-request-timeout))
+        (serial (ellm-llm-driver-serial driver))
+        timer)
+    (when timeout
+      ;; llm.el invokes tools without reporting them until their callbacks
+      ;; complete.  Keep the core's provider-idle watchdog alive meanwhile;
+      ;; ellm-tools retains responsibility for the tool's own deadline.
+      (ellm-llm--emit driver '(:type activity))
+      (let ((interval (max 0.01 (/ (float timeout) 2))))
+        (setq timer
+              (run-at-time
+               interval interval
+               (lambda ()
+                 (if (ellm-llm--driver-live-p driver serial)
+                     (ellm-llm--emit driver '(:type activity))
+                   (cancel-timer timer)
+                   (setf (ellm-llm-driver-tool-activity-timers driver)
+                         (delq timer
+                               (ellm-llm-driver-tool-activity-timers driver)))))))
+        (push timer (ellm-llm-driver-tool-activity-timers driver))))
+    (lambda ()
+      (when timer
+        (cancel-timer timer)
+        (setf (ellm-llm-driver-tool-activity-timers driver)
+              (delq timer (ellm-llm-driver-tool-activity-timers driver)))))))
+
+(defun ellm-llm--instrument-tool-activity (driver)
+  "Make DRIVER's llm.el tools emit activity until they complete."
+  (dolist (tool (llm-chat-prompt-tools (ellm-llm-driver-prompt driver)))
+    (let ((function (llm-tool-function tool)))
+      (setf
+       (llm-tool-function tool)
+       (if (llm-tool-async tool)
+           (lambda (callback &rest args)
+             (let ((stop (ellm-llm--tool-activity-start driver)))
+               (condition-case err
+                   (apply function
+                          (lambda (&rest values)
+                            (unwind-protect
+                                (apply callback values)
+                              (funcall stop)))
+                          args)
+                 (error
+                  (funcall stop)
+                  (signal (car err) (cdr err))))))
+         (lambda (&rest args)
+           (let ((stop (ellm-llm--tool-activity-start driver)))
+             (unwind-protect
+                 (apply function args)
+               (funcall stop)))))))))
 
 (defun ellm-llm--collect-tool-call-args (tool-call-turn following-turns base-prompt)
   "Return (ARGS . TURNS-CONSUMED) for TOOL-CALL-TURN."
@@ -1075,11 +1141,14 @@ could not be executed: %s. Retry it using an advertised tool and valid arguments
            (first-user (and (= (length users) 1)
                             (not assistants)
                             (llm-chat-prompt-interaction-content (car users)))))
-      (ellm-llm--make-driver
-       :provider provider :buffer buffer :prompt prompt
-       :title-prompt (and (stringp first-user)
-                          (not (alist-get 'title frontmatter))
-                          first-user)))))
+      (let ((driver
+             (ellm-llm--make-driver
+              :provider provider :buffer buffer :prompt prompt
+              :title-prompt (and (stringp first-user)
+                                 (not (alist-get 'title frontmatter))
+                                 first-user))))
+        (ellm-llm--instrument-tool-activity driver)
+        driver))))
 
 ;;;; Footer
 
