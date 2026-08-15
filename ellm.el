@@ -2219,12 +2219,12 @@ CONTINUATION is non-nil when the delimiter line uses
 `ellm-turn-header-2' (i.e. the turn is a continuation of the preceding
 top-level turn).  TITLE is the optional pipe-delimited turn title.
 
-For continuation `assistant' lines, the overlay blanks the line text by
-displaying the empty string, but leaves the trailing newline intact so
-the delimiter line still occupies one (blank) row.  The user can move
-point onto that row to trigger `ellm-reveal-separator-at-point' and edit
-it.  For other roles, the overlay covers just the line text and displays
-the role's glyph followed by TITLE when present."
+For continuation `assistant' lines, the overlay replaces the line text
+with a single blank space, leaving the trailing newline intact.  The space
+keeps the delimiter line a scrollable visual row.  The user can move point
+onto that row to trigger `ellm-reveal-separator-at-point' and edit it.  For
+other roles, the overlay covers just the line text and displays the role's
+glyph followed by TITLE when present."
   (let ((line-beg (save-excursion
                     (goto-char (overlay-start ov))
                     (line-beginning-position)))
@@ -2237,7 +2237,9 @@ the role's glyph followed by TITLE when present."
     (overlay-put ov 'evaporate t)
     (move-overlay ov line-beg line-end)
     (if (ellm--blank-separator-p role continuation)
-        (overlay-put ov 'display "")
+        ;; An empty replacement has zero visual height, which prevents
+        ;; `scroll-up' from advancing past this otherwise blank row.
+        (overlay-put ov 'display " ")
       (let* ((glyph (ellm--role-glyph role))
              (face (ellm--role-face role))
              (label (if title (concat glyph " | " title) glyph)))
