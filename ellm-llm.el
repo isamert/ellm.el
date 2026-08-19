@@ -5,7 +5,7 @@
 ;; Author: Isa Mert Gurbuz <isamertgurbuz@gmail.com>
 ;; URL: https://github.com/isamert/ellm.el
 ;; Version: 0.0.1
-;; Package-Requires: ((emacs "29.1") (llm "0.31.1"))
+;; Package-Requires: ((emacs "29.1") (llm "0.32.0"))
 ;; Keywords: llm
 
 ;; This file is not part of GNU Emacs.
@@ -380,6 +380,29 @@ interactions while preparing a request."
                    (cl-every #'llm-provider-utils-tool-use-p content))
           (setq result (append result content)))))
     result))
+
+(defun ellm-llm--new-prompt-tool-results (prompt previous-interaction)
+  "Return tool results appended to PROMPT after PREVIOUS-INTERACTION."
+  (let (results)
+    (dolist (interaction
+             (ellm-llm--interactions-after prompt previous-interaction))
+      (setq results
+            (append results
+                    (llm-chat-prompt-interaction-tool-results interaction))))
+    results))
+
+(defun ellm-llm--prompt-tool-result-pairs (tool-results)
+  "Return TOOL-RESULTS as (TOOL-NAME . RESULT) pairs without reordering.
+
+llm.el returns only successful entries in `:tool-results' when a tool batch
+partially fails.  Its mutable prompt contains the complete set, including
+model-facing failures.  Retaining that prompt order also makes persisted
+transcripts replay identically to the immediate next request."
+  (mapcar
+   (lambda (result)
+     (cons (llm-chat-prompt-tool-result-tool-name result)
+           (llm-chat-prompt-tool-result-result result)))
+   tool-results))
 
 (defun ellm-llm--canonical-text (text)
   "Return TEXT with buffer-only boundary whitespace removed."
@@ -935,27 +958,45 @@ Call one of the advertised tools and include its exact name."))
 Return (TOOL-USES TOOL-RESULTS IDS), or nil when no call was recoverable."
   (when-let* ((uses (ellm-llm--new-prompt-tool-uses
                      prompt previous-interaction)))
-    (let (rendered-uses rendered-results prompt-results ids)
-      (dolist (use uses)
-        (let* ((id (or (llm-provider-utils-tool-use-id use)
-                       (ellm-llm--gen-call-id)))
-               (name (llm-provider-utils-tool-use-name use))
-               (result (ellm-llm--tool-call-error-message
-                        type message use)))
-          (setf (llm-provider-utils-tool-use-id use) id)
-          (push id ids)
-          (push (list :id id :name name
-                      :args (llm-provider-utils-tool-use-args use))
-                rendered-uses)
-          (push (cons name result) rendered-results)
-          (push (make-llm-chat-prompt-tool-result
-                 :call-id id :tool-name name :result result)
-                prompt-results)))
-      (llm-provider-append-to-prompt
-       provider prompt nil (nreverse prompt-results))
-      (list (nreverse rendered-uses)
-            (nreverse rendered-results)
-            (cons (nreverse ids) (nreverse ids))))))
+    (let* ((call-ids (ellm-llm--new-prompt-tool-call-ids
+                      prompt previous-interaction))
+           (existing-results (ellm-llm--new-prompt-tool-results
+                              prompt previous-interaction)))
+      ;; llm.el 0.32.0 records an error result for every failed tool call
+      ;; before invoking the error callback.  Reuse those results: appending
+      ;; replacements here would duplicate their provider call IDs.
+      (if existing-results
+          (list
+           (mapcar (lambda (use)
+                     (list :id (llm-provider-utils-tool-use-id use)
+                           :name (llm-provider-utils-tool-use-name use)
+                           :args (llm-provider-utils-tool-use-args use)))
+                   uses)
+           (ellm-llm--prompt-tool-result-pairs existing-results)
+           call-ids)
+        ;; Keep a defensive fallback for providers that report malformed
+        ;; calls without first adding their tool results to the prompt.
+        (let (rendered-uses rendered-results prompt-results ids)
+          (dolist (use uses)
+            (let* ((id (or (llm-provider-utils-tool-use-id use)
+                           (ellm-llm--gen-call-id)))
+                   (name (llm-provider-utils-tool-use-name use))
+                   (result (ellm-llm--tool-call-error-message
+                            type message use)))
+              (setf (llm-provider-utils-tool-use-id use) id)
+              (push id ids)
+              (push (list :id id :name name
+                          :args (llm-provider-utils-tool-use-args use))
+                    rendered-uses)
+              (push (cons name result) rendered-results)
+              (push (make-llm-chat-prompt-tool-result
+                     :call-id id :tool-name name :result result)
+                    prompt-results)))
+          (llm-provider-append-to-prompt
+           provider prompt nil (nreverse prompt-results))
+          (list (nreverse rendered-uses)
+                (nreverse rendered-results)
+                (cons (nreverse ids) (nreverse ids))))))))
 
 (defun ellm-llm--stream-event (driver result reasoning-state-id)
   "Return a normalized snapshot event for DRIVER RESULT."
@@ -1069,11 +1110,21 @@ chat token limit supplies the corresponding context size when available."
                     (ellm-llm--emit driver
                                     (ellm-llm--usage-event provider leg-usage)))
                   (if-let* ((tool-uses (plist-get result :tool-uses))
-                            (tool-results (plist-get result :tool-results)))
+                            (call-ids (ellm-llm--new-prompt-tool-call-ids
+                                       prompt previous-interaction)))
                       (continue-with-tools
-                       tool-uses tool-results
-                       (ellm-llm--new-prompt-tool-call-ids
-                        prompt previous-interaction))
+                       tool-uses
+                       (let ((prompt-results
+                              (ellm-llm--new-prompt-tool-results
+                               prompt previous-interaction)))
+                         ;; llm.el 0.32.0 omits failed calls from RESULT's
+                         ;; `:tool-results', but always records them in the
+                         ;; prompt.  Rendering the complete prompt results
+                         ;; preserves the one-result-per-call invariant.
+                         (if prompt-results
+                             (ellm-llm--prompt-tool-result-pairs prompt-results)
+                           (plist-get result :tool-results)))
+                       call-ids)
                     (progn
                       (cl-incf (ellm-llm-driver-serial driver))
                       (ellm-llm--emit driver '(:type complete))))))
