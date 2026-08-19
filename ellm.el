@@ -4917,20 +4917,41 @@ MESSAGE-TEXT is reported after cleanup when non-nil."
 ;;;; Notifications
 
 (declare-function notifications-notify "notifications" (&rest params))
+(declare-function dbus-list-known-names "dbus" (bus))
 (declare-function alert "alert" (message &rest args))
+
+(defvar ellm--native-notifications-available 'unknown
+  "Whether native desktop notifications are available this Emacs session.")
+
+(defun ellm--native-notifications-available-p ()
+  "Return non-nil when Emacs can use the desktop notification service.
+The availability probe is performed at most once per Emacs session."
+  (if (eq ellm--native-notifications-available 'unknown)
+      (setq ellm--native-notifications-available
+            (and (require 'notifications nil t)
+                 ;; `notifications.el' can load without the dbusbind module,
+                 ;; but its functions signal `dbus-error' when Emacs was
+                 ;; built without D-Bus.
+                 (featurep 'dbusbind)
+                 (condition-case nil
+                     (member "org.freedesktop.Notifications"
+                             (dbus-list-known-names :session))
+                   (error nil))))
+    ellm--native-notifications-available))
 
 (defun ellm-notify-native (notification)
   "Present NOTIFICATION using Emacs's native notification support.
 Return non-nil when delivery succeeds."
-  (condition-case nil
-      (when (require 'notifications nil t)
-        (notifications-notify
-         :app-name "ellm"
-         :title (plist-get notification :title)
-         :body (plist-get notification :body)
-         :urgency (plist-get notification :urgency))
-        t)
-    (error nil)))
+  (when (ellm--native-notifications-available-p)
+    (condition-case nil
+        (progn
+          (notifications-notify
+           :app-name "ellm"
+           :title (plist-get notification :title)
+           :body (plist-get notification :body)
+           :urgency (plist-get notification :urgency))
+          t)
+      (error nil))))
 
 (defun ellm-notify-alert (notification)
   "Present NOTIFICATION through the optional `alert' package.
