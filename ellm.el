@@ -328,7 +328,8 @@ a whole category with `tools: [\"@shell\"]'."
 Each function is called with TOOL, ARGS, ERROR and RESULT, and must return
 the next RESULT value.  Custom tools use this for returned results; ACP
 and backend renderers also use it for tool params/results before writing
-them into conversation buffers."
+them into conversation buffers.  A transformer error becomes a safe error
+result and skips the rest of the configured pipeline."
   :type 'hook
   :group 'ellm)
 
@@ -1273,11 +1274,28 @@ it."
 (defun ellm-tools--transform-tool-result (tool args error? raw)
   "Return RAW after running tool result transformer functions.
 TOOL is a tool identifier, ARGS are the tool arguments when known, and
-ERROR is non-nil when RAW represents an error result."
-  (let ((result raw))
-    (dolist (fn ellm-tools-transform-tool-result-functions)
-      (setq result (funcall fn tool args error? result)))
-    result))
+ERROR is non-nil when RAW represents an error result.  Transformer errors
+become safe error results instead of escaping the tool callback."
+  (let ((result raw)
+        transformer)
+    (condition-case err
+        (progn
+          (dolist (fn ellm-tools-transform-tool-result-functions)
+            (setq transformer fn
+                  result (funcall fn tool args error? result)))
+          result)
+      (error
+       ;; In particular, an asynchronous tool may call this after its initial
+       ;; invocation stack has unwound.  Letting the error escape there would
+       ;; leave llm.el waiting forever for a result.  Bypass the configurable
+       ;; pipeline for this diagnostic so a broken transformer cannot fail it
+       ;; again, while retaining the mandatory transcript escaping.
+       (ellm-tools--escape-tool-result-turn-delimiters
+        tool args t
+        (ellm-tools--coerce-tool-result-to-string
+         tool args t
+         (format "Error while processing the tool result with `%s': %s"
+                 transformer (error-message-string err))))))))
 
 (defun ellm-tools--coerce-tool-result-to-string (_tool _args _error? raw)
   "Return RAW as a string suitable for serialized tool text.

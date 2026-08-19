@@ -492,6 +492,12 @@ reconstructed from the conversation buffer later."
                (not (equal "unset" chat-model)))
       chat-model)))
 
+(defun ellm-llm--tool-error-result (name error)
+  "Return a model-facing result for tool NAME and ERROR."
+  (format "Tool `%s' failed: %s"
+          name
+          (if (stringp error) error (error-message-string error))))
+
 (defun ellm-llm--make-llm-tool (tool)
   "Convert backend-neutral ellm TOOL to an `llm-tool'."
   (let ((name (ellm-tool-name tool))
@@ -506,28 +512,37 @@ reconstructed from the conversation buffer later."
      (if async
          (lambda (callback &rest args)
            (let ((callback-called nil))
-             (condition-case err
-                 (apply
-                  function
-                  (lambda (&rest values)
-                    (setq callback-called t)
-                    (apply callback values))
-                  args)
-               (error
-                ;; Errors raised downstream by the result callback are not
-                ;; failures of the tool and must not invoke it twice.
-                (if callback-called
-                    (signal (car err) (cdr err))
-                  (funcall callback
-                           (format "Tool `%s' failed: %s"
-                                   name (error-message-string err)))
-                  nil)))))
+             (cl-labels
+                 ((finish (result)
+                          ;; Misbehaving asynchronous tools must not append
+                          ;; duplicate results or start multiple continuation
+                          ;; legs by invoking their callback more than once.
+                          (unless callback-called
+                            (setq callback-called t)
+                            (funcall callback result)))
+                  (tool-callback (&rest values)
+                                 (finish
+                                  (if (= (length values) 1)
+                                      (car values)
+                                    (ellm-llm--tool-error-result
+                                     name
+                                     (format
+                                      "callback returned %d values; expected one"
+                                      (length values)))))))
+               (condition-case err
+                   (apply function #'tool-callback args)
+                 (error
+                  ;; Errors raised downstream by the result callback are not
+                  ;; failures of the tool and must not invoke it twice.
+                  (if callback-called
+                      (signal (car err) (cdr err))
+                    (finish (ellm-llm--tool-error-result name err))
+                    nil))))))
        (lambda (&rest args)
          (condition-case err
              (apply function args)
            (error
-            (format "Tool `%s' failed: %s"
-                    name (error-message-string err)))))))))
+            (ellm-llm--tool-error-result name err))))))))
 
 (defun ellm-llm--resolve-tools (frontmatter)
   "Return FRONTMATTER selected tools converted to `llm-tool' objects."
