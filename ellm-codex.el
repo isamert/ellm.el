@@ -813,6 +813,13 @@ STREAMING non-nil requests an event stream."
                      (or (plist-get incomplete :reason) "unknown reason")))
         "Codex request failed")))
 
+(defun ellm-codex--transient-service-error-p (message)
+  "Return non-nil when MESSAGE is Codex's temporary service error."
+  (and (stringp message)
+       (string-match-p
+        "An error occurred while processing your request"
+        message)))
+
 (cl-defmethod llm-provider-streaming-media-handler
   ((_provider ellm-codex-provider) receiver err-receiver)
   "Return a Codex Responses SSE handler.
@@ -1159,7 +1166,11 @@ response, and ERROR-CALLBACK receives failures.  MULTI-OUTPUT has its standard
                  (setq stream-failed t)
                  (unless (ellm-codex-request-cancelled request)
                    (llm-provider-utils-callback-in-buffer
-                    buffer error-callback 'error message))))
+                    buffer error-callback
+                    (if (ellm-codex--transient-service-error-p message)
+                        'llm-request-error
+                      'error)
+                    message))))
               :on-success
               (lambda (_data)
                 (unless (or stream-failed
