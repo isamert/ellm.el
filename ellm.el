@@ -5050,9 +5050,11 @@ Return non-nil when delivery succeeds."
      :desc "Provider-supported reasoning effort."
      :type enum :editable t
      :values ellm--capf-reasoning-candidates)
-    ("tools"       :ann "list"
-     :desc "Tools enabled for this buffer; names from `ellm-tools-list' or `@CATEGORY'."
+    ("tools"       :ann "list|true"
+     :desc "Tools enabled for this buffer; names from `ellm-tools-list', `@CATEGORY', or true for all tools."
      :type list :editable t
+     :values (("true" :value t
+               :desc "Enable every tool in `ellm-tools-list'."))
      :items ellm--capf-tool-candidates)
     ("tools+"      :ann "list"
      :desc "Add tools to the inherited `tools:' selection."
@@ -5064,8 +5066,11 @@ Return non-nil when delivery succeeds."
      :desc "MCP servers enabled for this buffer; true means all, names come from `ellm-mcp-servers', and `@CATEGORY' expands categories."
      :type mcp :editable t
      :values (("true" :value t
-               :desc "Enable every MCP server in `ellm-mcp-servers'."))
-     :items ellm--capf-mcp-candidates)
+               :desc "Enable every MCP server in `ellm-mcp-servers'.")
+              ("false" :value :false
+               :desc "Disable all MCP servers, including inherited selections."))
+     :items ellm--capf-mcp-candidates
+     :item-children ellm--capf-mcp-server-entries)
     ("mcp+"        :ann "list"
      :desc "Add MCP servers to the inherited `mcp:' selection."
      :items ellm--capf-mcp-candidates)
@@ -5082,7 +5087,8 @@ Return non-nil when delivery succeeds."
     ("profiles"    :ann "map"
      :desc "Local profile definitions that overlay global `ellm-profiles' by name."
      :children (("NAME" :ann "map"
-                 :desc "Profile settings and optional discovery-only `description'.")))
+                 :desc "Profile settings and optional discovery-only `description'."
+                 :children ellm--capf-profile-setting-entries)))
     ("ellm"        :ann "metadata"
      :desc "Persistence metadata maintained by ellm."
      :children (("session-id" :ann "string"
@@ -5166,21 +5172,56 @@ surprise prompts from automatic completion UIs."
                 (error-message-string err))
        nil))))
 
+(defun ellm--capf-cached-frontmatter ()
+  "Return the current cached frontmatter value without parsing YAML."
+  (when-let* ((bounds (ellm--frontmatter-bounds))
+              (body (nth 4 bounds))
+              ((and ellm--frontmatter-cache-valid
+                    (equal body ellm--frontmatter-cache-body))))
+    (copy-tree ellm--frontmatter-cache-value)))
+
+(defun ellm--capf-frontmatter-profile-name ()
+  "Return top-level `profile:' using a cheap frontmatter line scan."
+  (when-let* ((bounds (ellm--frontmatter-bounds)))
+    (pcase-let ((`(_ _ ,contents-beg ,contents-end _) bounds))
+      (save-excursion
+        (goto-char contents-beg)
+        (when (re-search-forward
+               "^[ \\t]*profile:[ \\t]*\\([^#\\n]+\\)" contents-end t)
+          (string-trim (match-string-no-properties 1)
+                       "[ \\t\\\"']+" "[ \\t\\\"']+"))))))
+
+(defun ellm--capf-provider-resolution ()
+  "Return (ENTRY PROVIDER FRONTMATTER) for completion without parsing YAML."
+  (let* ((direct (ellm--capf-frontmatter-provider-name))
+         (profile (and (not direct) (ellm--capf-frontmatter-profile-name)))
+         (cached (or (ellm--capf-cached-frontmatter)
+                     (and profile (ignore-errors (ellm--parse-frontmatter t)))))
+         (effective (and cached
+                         (ignore-errors (ellm--effective-frontmatter cached))))
+         (named
+          (or direct
+              (alist-get 'provider effective)
+              (and profile
+                   (ignore-errors
+                     (alist-get 'provider
+                                (ellm--profile-map
+                                 (ellm--effective-profiles nil) profile))))))
+         (sym (and named (if (stringp named) (intern named) named)))
+         (entry (and sym (alist-get sym ellm-provider-alist)))
+         (provider (or (and entry (ellm--provider-entry-provider entry))
+                       (and (not named) ellm-provider))))
+    (list entry provider (or effective cached))))
+
 (defun ellm--capf-model-candidates ()
   "Return (MODELS . SOURCE) for `model:' frontmatter completion.
 MODELS is a list of model name strings.  SOURCE is one of:
   `explicit'    - taken from the alist entry's `:models' list,
   `small-model' - taken from the alist entry's `:small-model',
   `provider'    - supplied by the resolved provider backend."
-  (let* ((fm (ignore-errors (ellm--parse-frontmatter t)))
-         (named (or (alist-get 'provider fm)
-                    (ellm--capf-frontmatter-provider-name)))
-         (sym (and named (if (stringp named) (intern named) named)))
-         (entry (and sym (alist-get sym ellm-provider-alist)))
-         (provider (or (and entry (ellm--provider-entry-provider entry))
-                       (and (not named) ellm-provider)))
-         (candidates (ellm--provider-model-candidates
-                      entry provider (current-buffer))))
+  (pcase-let* ((`(,entry ,provider ,fm) (ellm--capf-provider-resolution))
+               (candidates (ellm--provider-model-candidates
+                            entry provider (current-buffer))))
     (cond
      ((car candidates) candidates)
      ((and provider
@@ -5190,13 +5231,51 @@ MODELS is a list of model name strings.  SOURCE is one of:
 
 (defun ellm--capf-reasoning-candidates ()
   "Return reasoning candidates for the current provider and model."
-  (let* ((frontmatter (ignore-errors (ellm--parse-frontmatter t)))
-         (provider (ellm--capf-current-provider))
-         (model (and frontmatter (alist-get 'model frontmatter))))
+  (pcase-let ((`(_ ,provider ,frontmatter) (ellm--capf-provider-resolution)))
     (or (and provider
              (ellm-provider-reasoning-candidates
-              provider (and model (format "%s" model)) (current-buffer)))
+              provider (and-let* ((model (alist-get 'model frontmatter)))
+                         (format "%s" model))
+              (current-buffer)))
         ellm--default-reasoning-candidates)))
+
+(defun ellm--capf-profile-setting-entries ()
+  "Return frontmatter entries permitted inside a local profile definition."
+  (append
+   '(("description" :ann "string"
+      :desc "Profile metadata shown when selecting this profile."
+      :type string :editable t))
+   (seq-remove (lambda (entry)
+                 (member (car entry) '("profile" "profiles" "ellm")))
+               ellm--frontmatter-keys)))
+
+(defun ellm--capf-mcp-server-entries ()
+  "Return structural frontmatter entries for an inline MCP server."
+  '(("name" :ann "string"
+     :desc "Name of this inline MCP server."
+     :type string :editable t)
+    ("command" :ann "program"
+     :desc "Command used to start a stdio MCP server."
+     :type string :editable t)
+    ("args" :ann "list"
+     :desc "Arguments passed to `command'."
+     :type list :editable t)
+    ("env" :ann "map"
+     :desc "Environment variables passed to a stdio MCP server."
+     :children (("NAME" :ann "string"
+                 :desc "Environment variable value.")))
+    ("url" :ann "URL"
+     :desc "URL for a remote MCP server."
+     :type string :editable t)
+    ("type" :ann "transport"
+     :desc "Remote MCP transport; defaults to http."
+     :type enum :editable t
+     :values (("http" :desc "Streamable HTTP transport.")
+              ("sse" :desc "Server-Sent Events transport.")))
+    ("headers" :ann "map"
+     :desc "HTTP headers sent to a remote MCP server."
+     :children (("NAME" :ann "string"
+                 :desc "HTTP header value.")))))
 
 (defun ellm--capf-profile-documentation (name profile)
   "Return completion documentation for profile NAME with settings PROFILE."
@@ -5249,19 +5328,13 @@ invalid, such as when completing a new key before typing `:'."
       (save-excursion
         (goto-char contents-beg)
         (when (re-search-forward
-               "^[ \t]*provider:[ \t]*\\([^#\n]+\\)" contents-end t)
+               "^provider:[ \t]*\\([^#\n]+\\)" contents-end t)
           (string-trim (match-string-no-properties 1)
                        "[ \t\"']+" "[ \t\"']+"))))))
 
 (defun ellm--capf-current-provider ()
-  "Return the current frontmatter provider for completion, or nil."
-  (let ((named (ellm--capf-frontmatter-provider-name)))
-    (cond
-     (named
-      (let* ((sym (if (stringp named) (intern named) named))
-             (entry (alist-get sym ellm-provider-alist)))
-        (and entry (ellm--provider-entry-provider entry))))
-     (ellm-provider ellm-provider))))
+  "Return the current effective provider for completion, or nil."
+  (nth 1 (ellm--capf-provider-resolution)))
 
 (defun ellm--capf-provider-frontmatter-entries (path)
   "Return provider-supplied frontmatter key entries under PATH."
@@ -5336,8 +5409,8 @@ appended to the fallback annotation."
               (ellm--capf-provider-frontmatter-entries nil)))))
 
 (defun ellm--frontmatter-capf--lookup-key (key entries)
-  "Return the spec for KEY in ENTRIES."
-  (cdr (assoc key entries)))
+  "Return the spec for KEY in ENTRIES, including a `NAME' wildcard."
+  (cdr (or (assoc key entries) (assoc "NAME" entries))))
 
 (defun ellm--frontmatter-capf--parent-spec (indent)
   "Return the nearest known parent key spec for a line at INDENT."
@@ -5347,7 +5420,8 @@ appended to the fallback annotation."
     (save-excursion
       (goto-char contents-beg)
       (while (< (point) current-bol)
-        (when (looking-at "^\\([ \t]*\\)\\([a-zA-Z0-9_-]+\\):")
+        (cond
+         ((looking-at "^\\([ \t]*\\)\\([a-zA-Z0-9_-]+\\):")
           (let* ((line-indent (length (match-string-no-properties 1)))
                  (key (match-string-no-properties 2)))
             (while (and stack (>= (caar stack) line-indent))
@@ -5355,6 +5429,16 @@ appended to the fallback annotation."
             (when-let* ((spec (ellm--frontmatter-capf--lookup-key
                                key (ellm--frontmatter-capf--key-entries (cdar stack)))))
               (push (cons line-indent spec) stack))))
+         ((looking-at "^\\([ \t]*\\)-[ \t]+\\([a-zA-Z0-9_-]+\\):")
+          (let ((line-indent (length (match-string-no-properties 1))))
+            (while (and stack (>= (caar stack) line-indent))
+              (pop stack))
+            (when-let* ((children (plist-get (cdar stack) :item-children)))
+              (push (cons line-indent
+                          (list :children (if (functionp children)
+                                              (funcall children)
+                                            children)))
+                    stack)))))
         (forward-line 1)))
     (while (and stack (>= (caar stack) indent))
       (pop stack))
@@ -5457,6 +5541,76 @@ Returns nil when POS is outside the value region or not on a token."
     (and (< (point) value-end)
          (eq (char-after) ?\[))))
 
+(defun ellm--frontmatter-capf--directory-spec-p (spec)
+  "Return non-nil when SPEC accepts one or more directory names."
+  (memq (plist-get spec :type) '(directory directories)))
+
+(defun ellm--frontmatter-capf--file-name-result (beg end)
+  "Return a file-name completion result spanning BEG through END."
+  (list beg end #'completion-file-name-table :exclusive 'no))
+
+(defun ellm--frontmatter-capf--mcp-map-result-at-point (pos)
+  "Return completion at POS for an inline MCP server map item."
+  (when (looking-at
+         "^\\([ \t]*\\)-[ \t]*\\([a-zA-Z0-9_-]*\\)\\(?::[ \t]*\\(.*?\\)[ \t]*\\)?$")
+    (let* ((indent (length (match-string-no-properties 1)))
+           (key (match-string-no-properties 2))
+           (key-beg (match-beginning 2))
+           (key-end (match-end 2))
+           (value-beg (match-beginning 3))
+           (value-end (match-end 3))
+           (parent (ellm--frontmatter-capf--parent-spec indent))
+           (children (let ((entries (and parent (plist-get parent :item-children))))
+                       (if (functionp entries) (funcall entries) entries))))
+      (when children
+        (if value-beg
+            (when-let* ((spec (ellm--frontmatter-capf--lookup-key key children))
+                        (values (plist-get spec :values))
+                        ((>= pos value-beg))
+                        ((<= pos value-end)))
+              (let* ((token (ellm--frontmatter-capf--inline-token-at
+                             pos value-beg value-end))
+                     (beg (or (car token) pos))
+                     (end (or (cdr token) pos)))
+                (pcase-let ((`(,candidates . ,source)
+                             (ellm--capf-resolve-values values)))
+                  (ellm--frontmatter-capf--make-result
+                   beg end candidates key source))))
+          (when (and (>= pos key-beg) (<= pos key-end))
+            (let ((result (ellm--frontmatter-capf--make-result
+                           key-beg key-end children "MCP setting")))
+              (append result
+                      (list :exit-function
+                            (lambda (string status)
+                              (when (and (memq status '(finished sole exact))
+                                         (assoc string children)
+                                         (not (looking-at-p ":")))
+                                (insert ": "))))))))))))
+
+(defun ellm--frontmatter-capf--directory-result-at-point (pos)
+  "Return file-name completion at POS for a directory-valued YAML field."
+  (if (looking-at "^\\([ \t]*\\)\\([a-zA-Z0-9_-]+\\):[ \t]*\\(.*?\\)[ \t]*$")
+      (let* ((indent (length (match-string-no-properties 1)))
+             (key (match-string-no-properties 2))
+             (beg (match-beginning 3))
+             (end (match-end 3))
+             (spec (ellm--frontmatter-capf--key-spec key indent)))
+        (when (and (ellm--frontmatter-capf--directory-spec-p spec)
+                   (>= pos beg) (<= pos end))
+          (let ((token (ellm--frontmatter-capf--inline-token-at pos beg end)))
+            (ellm--frontmatter-capf--file-name-result
+             (or (car token) pos) (or (cdr token) pos)))))
+    (when (looking-at "^\\([ \t]*\\)-[ \t]*\\(.*\\)$")
+      (let* ((indent (length (match-string-no-properties 1)))
+             (beg (match-beginning 2))
+             (end (match-end 2))
+             (spec (ellm--frontmatter-capf--parent-spec indent)))
+        (when (and (ellm--frontmatter-capf--directory-spec-p spec)
+                   (>= pos beg) (<= pos end))
+          (let ((token (ellm--frontmatter-capf--token-bounds-at pos)))
+            (ellm--frontmatter-capf--file-name-result
+             (or (car token) pos) (or (cdr token) pos))))))))
+
 (defun ellm--frontmatter-capf ()
   "Completion-at-point function for ellm YAML frontmatter.
 Completes:
@@ -5468,7 +5622,9 @@ Completes:
     (let ((orig (point)))
       (save-excursion
         (beginning-of-line)
-        (cond
+        (or (ellm--frontmatter-capf--mcp-map-result-at-point orig)
+            (ellm--frontmatter-capf--directory-result-at-point orig)
+            (cond
          ((looking-at "^\\([ \t]*\\)-[ \t]*\\(.*\\)$") ; - <something>
           (let* ((indent (length (match-string-no-properties 1)))
                  (item-beg (match-beginning 2))
@@ -5531,7 +5687,7 @@ Completes:
                     (lambda (_string status)
                       (when (and (memq status '(finished sole exact))
                                  (not (looking-at-p ":")))
-                        (insert ": "))))))))))))
+                        (insert ": ")))))))))))))
 
 (defun ellm--turn-at-point ()
   "Return parsed turn containing point, or nil."
@@ -6827,6 +6983,7 @@ When REMOVAL is non-nil, return only settings currently present in frontmatter."
                         prompt (append values items) default nil)))
          (cond
           ((equal selected '(t)) t)
+          ((equal selected '(:false)) :false)
           ((memq t selected)
            (user-error "ellm: `mcp: true' cannot be combined with server names"))
           (t selected))))
