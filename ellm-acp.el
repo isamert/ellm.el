@@ -1854,6 +1854,19 @@ When SELECT is non-nil, choose a session from `session/list'."
 
 ;;;; Rendering
 
+(defmacro ellm-acp--with-session-update-position (connection &rest body)
+  "Run BODY, preserving positions only for ACP-direct rendering.
+
+Core request events preserve positions in `ellm--request-handle-event'.
+Avoid wrapping those events here as well; direct ACP rendering still needs
+position preservation for session replay and updates outside a live request."
+  (declare (indent 1) (debug t))
+  `(let ((request (ellm-acp--connection-current-request ,connection)))
+     (if (and request (ellm-acp--request-live-p request))
+         (progn ,@body)
+       (ellm--preserve-user-position
+         ,@body))))
+
 (defun ellm-acp--tool-event-name (connection update)
   "Return the best available display name for ACP tool UPDATE."
   (or (plist-get update :title)
@@ -1866,7 +1879,7 @@ When SELECT is non-nil, choose a session from `session/list'."
   (when-let* ((buffer (ellm-acp--connection-buffer connection)))
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
-        (ellm--preserve-user-position
+        (ellm-acp--with-session-update-position connection
           (let ((update (plist-get params :update)))
             (unless (eq (ellm-acp--run-extension-session-update
                          connection update 'pre-render)
