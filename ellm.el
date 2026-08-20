@@ -4145,6 +4145,9 @@ keep protocol-specific mutable state there, but lifecycle state lives here."
   (generation 0
               :type integer
               :documentation "Buffer request generation used to reject stale events.")
+  (tool-session-permissions nil
+                            :type list
+                            :documentation "Local tool names approved for this request's session.")
   (attempt 0
            :type integer
            :documentation "Monotonic backend-start attempt identifier.")
@@ -4178,6 +4181,71 @@ keep protocol-specific mutable state there, but lifecycle state lives here."
   (end nil
        :type marker
        :documentation "Insertion-type marker at the end of the rendered stream."))
+
+(defun ellm--tool-permission-policy (frontmatter tool)
+  "Return the permission policy for TOOL in FRONTMATTER.
+The `tool-permissions' map accepts `allow', `ask', and `deny' values under
+`default', exact tool names, or `@CATEGORY' selectors.  Exact tool names take
+precedence over category selectors, which take precedence over `default'."
+  (let* ((rules (alist-get 'tool-permissions frontmatter))
+         (name (ellm-tool-name tool))
+         (category (concat "@" (or (ellm-tool-category tool) "")))
+         (entry (and rules
+                     (or (cl-find name rules :key (lambda (rule)
+                                                    (format "%s" (car rule)))
+                                  :test #'equal)
+                         (cl-find category rules :key (lambda (rule)
+                                                        (format "%s" (car rule)))
+                                  :test #'equal)
+                         (cl-find "default" rules :key (lambda (rule)
+                                                          (format "%s" (car rule)))
+                                  :test #'equal))))
+         (value (if entry (format "%s" (cdr entry)) "allow")))
+    (unless (or (null rules) (and (listp rules) (cl-every #'consp rules)))
+      (user-error "ellm: tool-permissions must be a map"))
+    (pcase value
+      ("allow" 'allow)
+      ("ask" 'ask)
+      ("deny" 'deny)
+      (_ (user-error "ellm: invalid tool permission policy for `%s': %s"
+                     (if entry (car entry) "default") value)))))
+
+(defun ellm--authorize-tool-call (request tool args respond)
+  "Authorize local TOOL called with ARGS for REQUEST, then call RESPOND.
+RESPOND receives `allow' or `deny'.  An `ask' policy presents run-once,
+allow-for-session, and deny choices through the core permission UI."
+  (let ((policy (if request
+                    (ellm--tool-permission-policy (ellm-request-frontmatter request)
+                                                   tool)
+                  'allow))
+        (name (ellm-tool-name tool)))
+    (cond
+     ((eq policy 'deny) (funcall respond 'deny))
+     ((or (eq policy 'allow)
+          (member name (ellm-request-tool-session-permissions request)))
+      (funcall respond 'allow))
+     (t
+      (with-current-buffer (ellm-request-buffer request)
+        (ellm--request-permission
+         request
+         (list :backend 'ellm
+               :tool-call
+               (list :title (format "Run %s?" name)
+                     :description
+                     (format "Allow local tool `%s` to run with arguments:\n%s"
+                             name (prin1-to-string args)))
+               :options '((:id "allow-once" :name "Run once")
+                          (:id "allow-session" :name "Allow for session")
+                          (:id "deny" :name "Deny")))
+         (lambda (decision)
+           (when (equal decision "allow-session")
+             (setf (ellm-request-tool-session-permissions request)
+                   (cons name (delete name
+                                      (ellm-request-tool-session-permissions request)))))
+           (funcall respond (if (member decision '("allow-once" "allow-session"))
+                                'allow
+                              'deny)))))))))
+
 
 (defconst ellm--request-terminal-states '(completed failed cancelled)
   "Terminal values of `ellm-request-state'.")
@@ -5062,6 +5130,9 @@ Return non-nil when delivery succeeds."
     ("tools-"      :ann "list"
      :desc "Exclude tools from the inherited `tools:' selection."
      :items ellm--capf-tool-candidates)
+    ("tool-permissions" :ann "map"
+     :desc "Local tool permission policies by default, tool name, or @CATEGORY."
+     :children ellm--capf-tool-permission-entries)
     ("mcp"         :ann "list|true"
      :desc "MCP servers enabled for this buffer; true means all, names come from `ellm-mcp-servers', and `@CATEGORY' expands categories."
      :type mcp :editable t
@@ -5319,6 +5390,26 @@ distinct `category' slot of `ellm-tool' entries."
            (delete-dups
             (delq nil (mapcar #'ellm-tool-category ellm-tools-list))))))
 
+(defun ellm--capf-tool-permission-entries ()
+  "Return frontmatter key entries accepted by `tool-permissions:'."
+  (append
+   '(("default" :ann "allow|ask|deny"
+      :desc "Fallback policy for enabled local tools."
+      :values ("allow" "ask" "deny")))
+   (mapcar (lambda (tool)
+             (list (ellm-tool-name tool) :ann "allow|ask|deny"
+                   :desc (ellm-tool-description tool)
+                   :values '("allow" "ask" "deny")))
+           ellm-tools-list)
+   (mapcar (lambda (category)
+             ;; YAML requires @-prefixed mapping keys to be quoted.
+             (list (format "\"@%s\"" category) :ann "allow|ask|deny"
+                   :desc (format "Permission policy for the @%s tool category."
+                                 category)
+                   :values '("allow" "ask" "deny")))
+           (delete-dups
+            (delq nil (mapcar #'ellm-tool-category ellm-tools-list))))))
+
 (defun ellm--capf-frontmatter-provider-name ()
   "Return `provider:' from frontmatter using a cheap line scan.
 This is used only for completion while the YAML body may be temporarily
@@ -5421,7 +5512,7 @@ appended to the fallback annotation."
       (goto-char contents-beg)
       (while (< (point) current-bol)
         (cond
-         ((looking-at "^\\([ \t]*\\)\\([a-zA-Z0-9_-]+\\):")
+         ((looking-at "^\\([ \t]*\\)\\(\"[^\"]+\"\\|[a-zA-Z0-9_-]+\\):")
           (let* ((line-indent (length (match-string-no-properties 1)))
                  (key (match-string-no-properties 2)))
             (while (and stack (>= (caar stack) line-indent))
@@ -5429,7 +5520,7 @@ appended to the fallback annotation."
             (when-let* ((spec (ellm--frontmatter-capf--lookup-key
                                key (ellm--frontmatter-capf--key-entries (cdar stack)))))
               (push (cons line-indent spec) stack))))
-         ((looking-at "^\\([ \t]*\\)-[ \t]+\\([a-zA-Z0-9_-]+\\):")
+         ((looking-at "^\\([ \t]*\\)-[ \t]+\\(\"[^\"]+\"\\|[a-zA-Z0-9_-]+\\):")
           (let ((line-indent (length (match-string-no-properties 1))))
             (while (and stack (>= (caar stack) line-indent))
               (pop stack))
@@ -5589,7 +5680,7 @@ Returns nil when POS is outside the value region or not on a token."
 
 (defun ellm--frontmatter-capf--directory-result-at-point (pos)
   "Return file-name completion at POS for a directory-valued YAML field."
-  (if (looking-at "^\\([ \t]*\\)\\([a-zA-Z0-9_-]+\\):[ \t]*\\(.*?\\)[ \t]*$")
+  (if (looking-at "^\\([ \t]*\\)\\(\"[^\"]+\"\\|[a-zA-Z0-9_-]+\\):[ \t]*\\(.*?\\)[ \t]*$")
       (let* ((indent (length (match-string-no-properties 1)))
              (key (match-string-no-properties 2))
              (beg (match-beginning 3))
@@ -5643,7 +5734,7 @@ Completes:
                    tbeg tend cands "item" source))))))
          ;; KEY: VALUE (inline) — value-side completion.
          ;; Handles both bare values and inline arrays like ["a", "b"].
-         ((looking-at "^\\([ \t]*\\)\\([a-zA-Z0-9_-]+\\):[ \t]*\\(.*?\\)[ \t]*$")
+         ((looking-at "^\\([ \t]*\\)\\(\"[^\"]+\"\\|[a-zA-Z0-9_-]+\\):[ \t]*\\(.*?\\)[ \t]*$")
           (let* ((indent (length (match-string-no-properties 1)))
                  (key (match-string-no-properties 2))
                  (vbeg (match-beginning 3))
@@ -5663,7 +5754,7 @@ Completes:
                     (ellm--frontmatter-capf--make-result
                      tbeg tend cands key source)))))))
          ;; No `:' yet — key-side completion.
-         ((looking-at "^\\([ \t]*\\)\\([a-zA-Z0-9_-]*\\)[ \t]*$")
+         ((looking-at "^\\([ \t]*\\)\\(\"?[a-zA-Z0-9_@-]*\"?\\)[ \t]*$")
           (let* ((indent (length (match-string-no-properties 1)))
                  (kbeg (match-beginning 2))
                  (kend (match-end 2))

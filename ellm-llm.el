@@ -498,55 +498,59 @@ reconstructed from the conversation buffer later."
           name
           (if (stringp error) error (error-message-string error))))
 
-(defun ellm-llm--make-llm-tool (tool)
-  "Convert backend-neutral ellm TOOL to an `llm-tool'."
+(defun ellm-llm--make-llm-tool (tool &optional request)
+  "Convert backend-neutral ellm TOOL to a permission-aware `llm-tool'."
   (let ((name (ellm-tool-name tool))
         (function (ellm-tool-function tool))
         (async (ellm-tool-async tool)))
+    ;; Every local tool is exposed asynchronously so an `ask' policy can wait
+    ;; for a user decision without blocking Emacs.
     (llm-make-tool
      :name name
      :description (ellm-tool-description tool)
      :args (ellm-tool-args tool)
-     :async async
+     :async t
      :function
-     (if async
-         (lambda (callback &rest args)
-           (let ((callback-called nil))
-             (cl-labels
-                 ((finish (result)
-                          ;; Misbehaving asynchronous tools must not append
-                          ;; duplicate results or start multiple continuation
-                          ;; legs by invoking their callback more than once.
-                          (unless callback-called
-                            (setq callback-called t)
-                            (funcall callback result)))
-                  (tool-callback (&rest values)
-                                 (finish
-                                  (if (= (length values) 1)
-                                      (car values)
-                                    (ellm-llm--tool-error-result
-                                     name
-                                     (format
-                                      "callback returned %d values; expected one"
-                                      (length values)))))))
-               (condition-case err
-                   (apply function #'tool-callback args)
-                 (error
-                  ;; Errors raised downstream by the result callback are not
-                  ;; failures of the tool and must not invoke it twice.
-                  (if callback-called
-                      (signal (car err) (cdr err))
-                    (finish (ellm-llm--tool-error-result name err))
-                    nil))))))
-       (lambda (&rest args)
-         (condition-case err
-             (apply function args)
-           (error
-            (ellm-llm--tool-error-result name err))))))))
+     (lambda (callback &rest args)
+       (let ((callback-called nil))
+         (cl-labels
+             ((finish (result)
+                      ;; Misbehaving asynchronous tools must not append
+                      ;; duplicate results or start multiple continuation
+                      ;; legs by invoking their callback more than once.
+                      (unless callback-called
+                        (setq callback-called t)
+                        (funcall callback result)))
+              (tool-callback (&rest values)
+                             (finish
+                              (if (= (length values) 1)
+                                  (car values)
+                                (ellm-llm--tool-error-result
+                                 name
+                                 (format "callback returned %d values; expected one"
+                                         (length values))))))
+              (run ()
+                   (condition-case err
+                       (if async
+                           (apply function #'tool-callback args)
+                         (finish (apply function args)))
+                     (error
+                      ;; Errors raised downstream by the result callback are not
+                      ;; failures of the tool and must not invoke it twice.
+                      (if callback-called
+                          (signal (car err) (cdr err))
+                        (finish (ellm-llm--tool-error-result name err)))))))
+           (ellm--authorize-tool-call
+            request tool args
+            (lambda (decision)
+              (if (eq decision 'allow)
+                  (run)
+                (finish (format "Tool `%s` was denied by the user." name)))))))))))
 
-(defun ellm-llm--resolve-tools (frontmatter)
+(defun ellm-llm--resolve-tools (frontmatter request)
   "Return FRONTMATTER selected tools converted to `llm-tool' objects."
-  (mapcar #'ellm-llm--make-llm-tool (ellm--resolve-tools frontmatter)))
+  (mapcar (lambda (tool) (ellm-llm--make-llm-tool tool request))
+          (ellm--resolve-tools frontmatter)))
 
 (defun ellm-llm--cancel-tool-activity-timers (driver)
   "Cancel heartbeat timers owned by DRIVER."
@@ -914,7 +918,7 @@ FRONTMATTER, when supplied, is the already parsed YAML frontmatter alist."
          (system      (ellm-llm--canonical-text
                        (plist-get system-state :initial)))
          (reasoning   (alist-get 'reasoning fm))
-         (tools       (ellm-llm--resolve-tools fm))
+         (tools       (ellm-llm--resolve-tools fm ellm--active-request))
          (prompt      (make-llm-chat-prompt
                        ;; `llm.el' models system instructions as prompt
                        ;; context.  A literal system interaction is outside

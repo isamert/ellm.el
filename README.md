@@ -262,6 +262,30 @@ Enable built-in local tools:
 (require 'ellm-tools)
 ```
 
+#### Local tool permissions
+
+`tool-permissions:` controls whether enabled local tools run automatically.
+It is separate from `tools:`, which controls which tools are advertised to the
+model.  Rules may name `default`, an exact tool, or an `@CATEGORY`; exact tool
+rules take precedence over category rules, then `default`.
+
+```yaml
+---
+tools: ["@files", "@shell"]
+tool-permissions:
+  default: allow
+  "@shell": ask
+  file_edit: ask
+  read_file_lines: allow
+---
+```
+
+The policies are `allow`, `ask`, and `deny`.  `ask` prompts before every tool
+invocation, with **Run once**, **Allow for session**, and **Deny** choices.
+A session approval lasts only for the active logical request; it is never
+written to frontmatter.  This policy applies to ellm local tools.  ACP agents
+continue to supply their own permission requests and choices.
+
 ### Profiles and subagents
 
 `ellm-profiles` defines reusable global conversation defaults.  A buffer can
