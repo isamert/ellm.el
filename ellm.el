@@ -5077,7 +5077,8 @@ Return non-nil when delivery succeeds."
      :type directory :editable t)
     ("profile"     :ann "name"
      :desc "Active profile name from `ellm-profiles' or local `profiles:'."
-     :type string :editable t)
+     :type string :editable t
+     :values ellm--capf-profile-candidates)
     ("profiles"    :ann "map"
      :desc "Local profile definitions that overlay global `ellm-profiles' by name."
      :children (("NAME" :ann "map"
@@ -5196,6 +5197,38 @@ MODELS is a list of model name strings.  SOURCE is one of:
              (ellm-provider-reasoning-candidates
               provider (and model (format "%s" model)) (current-buffer)))
         ellm--default-reasoning-candidates)))
+
+(defun ellm--capf-profile-documentation (name profile)
+  "Return completion documentation for profile NAME with settings PROFILE."
+  (let ((description (alist-get 'description profile))
+        (provider (alist-get 'provider profile))
+        (model (alist-get 'model profile))
+        (system (alist-get 'system profile))
+        (tools (alist-get 'tools profile))
+        (mcp (alist-get 'mcp profile)))
+    (string-join
+     (delq nil
+           (list (format "Profile: %s" name)
+                 (and description (format "Description:\n%s" description))
+                 (and provider (format "Provider: %s" provider))
+                 (and model (format "Model: %s" model))
+                 (and tools
+                      (format "Enabled tools: %s"
+                              (if (listp tools)
+                                  (string-join (mapcar (lambda (tool) (format "%s" tool)) tools) ", ")
+                                tools)))
+                 (and mcp (format "Enabled MCP servers: %s" mcp))
+                 (and system (format "System prompt:\n%s" system))))
+     "\n\n")))
+
+(defun ellm--capf-profile-candidates ()
+  "Return documented effective profile candidates for `profile:' completion."
+  (mapcar (lambda (entry)
+            (let ((name (ellm--profile-name (car entry)))
+                  (profile (cdr entry)))
+              (list name :desc (ellm--capf-profile-documentation name profile))))
+          (ellm--effective-profiles
+           (or (ignore-errors (ellm--parse-frontmatter t)) nil))))
 
 (defun ellm--capf-tool-candidates ()
   "Return list of completion strings for `tools:' frontmatter.
