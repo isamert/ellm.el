@@ -4268,6 +4268,17 @@ explicitly marked `:retryable' and the core retry budget remains.")
 (defvar-local ellm--active-request nil
   "Core `ellm-request' currently owning this buffer, or nil.")
 
+(defvar-local ellm--last-activity-time nil
+  "Time of the most recent meaningful activity in this conversation.")
+
+(defun ellm--touch-activity ()
+  "Record activity in the current conversation and refresh its listing."
+  (setq ellm--last-activity-time (float-time))
+  ;; Keep the optional session list current without coupling request lifecycle
+  ;; code to the list implementation.
+  (when (fboundp 'ellm-list--schedule-refresh)
+    (ellm-list--schedule-refresh (current-buffer))))
+
 (defvar-local ellm--composer-buffer nil
   "Draft buffer for the next user prompt while this conversation is active.")
 
@@ -4471,6 +4482,7 @@ When SUPPRESS-NEXT is non-nil, do not activate the next queued prompt."
 
 (defun ellm--request-user-prompt (request prompt respond)
   "Append normalized PROMPT for REQUEST and call RESPOND with its outcome."
+  (ellm--touch-activity)
   (let ((pending (apply #'ellm--make-user-prompt
                         :request request :respond respond prompt))
         (empty (null ellm--user-prompt-queue)))
@@ -4532,6 +4544,7 @@ Non-nil REQUEST makes the buffer read-only so user edits cannot race with
 streaming backend insertions.  Nil REQUEST restores the previous
 `buffer-read-only' value."
   (setq ellm--active-request request)
+  (ellm--touch-activity)
   (if request
       (progn
         (unless ellm--request-read-only-state-saved-p
@@ -4926,6 +4939,7 @@ MESSAGE-TEXT is reported after cleanup when non-nil."
 (defun ellm--request-handle-event (request attempt event)
   "Reduce backend EVENT for REQUEST ATTEMPT."
   (when (ellm--request-event-current-p request attempt)
+    (ellm--touch-activity)
     (ellm--request-reset-idle-timer request attempt)
     (with-current-buffer (ellm-request-buffer request)
       (condition-case err
@@ -7751,6 +7765,485 @@ Return a cons of the left and right portions, split at `%>'."
      ((not (string-empty-p left)) left)
      ((not (string-empty-p right))
       (ellm--header-line-right-status right)))))
+
+;;;; Session list
+
+(defgroup ellm-list nil
+  "Browse active ellm conversations."
+  :group 'ellm)
+
+(defvar ellm-list-column-format-functions nil
+  "Alist mapping session-list column names to formatting functions.
+Each function receives one session record plist and returns a string.")
+
+(defvar ellm-list-column-properties nil
+  "Alist mapping session-list column names to their display properties.")
+
+(defmacro ellm-list-define-column (name properties &rest body)
+  "Define a configurable session-list column NAME.
+
+PROPERTIES is a plist accepting `:width' and `:title'.  BODY is evaluated
+with `record' bound to the session record plist.  Add NAME to
+`ellm-list-columns' to display the column."
+  (declare (indent defun))
+  `(progn
+     (defun ,(intern (format "ellm-list-column-%s" name)) (record)
+       ,(format "Format the `%s' session-list column from RECORD." name)
+       ,@body)
+     (setf (alist-get ',name ellm-list-column-format-functions)
+           #',(intern (format "ellm-list-column-%s" name))
+           (alist-get ',name ellm-list-column-properties)
+           ',properties)))
+
+(ellm-list-define-column status (:width 12 :title "Status")
+  (plist-get record :status))
+
+(ellm-list-define-column model (:width 22 :title "Model")
+  (or (plist-get record :model) ""))
+
+(ellm-list-define-column context (:width 18 :title "Context")
+  ;; `ellm--format-context-usage' escapes percent signs for header lines;
+  ;; tabulated lists render literal text instead.
+  (replace-regexp-in-string "%%" "%" (or (plist-get record :context) "")))
+
+(ellm-list-define-column todos (:width 9 :title "Todos")
+  (or (plist-get record :todos) ""))
+
+(ellm-list-define-column title (:width 0 :title "Conversation")
+  (plist-get record :title))
+
+(defcustom ellm-list-columns '(status model context todos title)
+  "Columns shown by `ellm-list'.
+Use `ellm-list-define-column' to register additional columns.  Columns are
+rendered from session records, keeping presentation separate from collection
+and grouping."
+  :type '(repeat symbol)
+  :group 'ellm-list)
+
+(defvar ellm-list--refresh-timer nil
+  "Timer coalescing automatic refreshes of the ellm session list.")
+
+(defvar ellm-list--pending-refreshes nil
+  "Conversation buffers whose displayed rows need refreshing.")
+
+(defun ellm-list--schedule-refresh (conversation)
+  "Refresh CONVERSATION's row shortly, coalescing bursty backend events."
+  (when (get-buffer "*ellm sessions*")
+    (cl-pushnew conversation ellm-list--pending-refreshes)
+    (unless (timerp ellm-list--refresh-timer)
+      (setq ellm-list--refresh-timer
+            (run-at-time
+             0.2 nil
+             (lambda ()
+               (setq ellm-list--refresh-timer nil)
+               (let ((pending ellm-list--pending-refreshes))
+                 (setq ellm-list--pending-refreshes nil)
+                 (when-let* ((buffer (get-buffer "*ellm sessions*"))
+                             ((buffer-live-p buffer)))
+                   (with-current-buffer buffer
+                     (when (derived-mode-p 'ellm-list-mode)
+                       (dolist (conversation pending)
+                         (unless (ellm-list-refresh-buffer conversation)
+                           ;; New buffers and structural changes require a
+                           ;; rebuild, but ordinary stream updates do not.
+                           (ellm-list-refresh)))))))))))))
+
+(defun ellm-list--status (buffer)
+  "Return BUFFER's concise session-list status and sorting rank."
+  (with-current-buffer buffer
+    (cond
+     (ellm--user-prompt-queue '("Input required" . 1))
+     ((not ellm--active-request) '("Ready" . 3))
+     (t
+      (pcase (ellm-request-state ellm--active-request)
+        ('streaming '("Streaming" . 0))
+        ('tool-loop '("Using tools" . 2))
+        ('retry-wait '("Retrying" . 2))
+        ('cancelling '("Cancelling" . 2))
+        (_ '("Working" . 2)))))))
+
+(defun ellm-list--model (buffer)
+  "Return BUFFER's configured model, if one is available without resolution."
+  (with-current-buffer buffer
+    ;; Parsing frontmatter rather than resolving a provider keeps listing safe
+    ;; for half-configured sessions and avoids provider/network side effects.
+    (ignore-errors
+      (let ((frontmatter (ellm--effective-frontmatter)))
+        (when-let* ((model (alist-get 'model frontmatter)))
+          (format "%s" model))))))
+
+(defun ellm-list--group (buffer)
+  "Return grouping metadata for BUFFER.
+Projects take precedence; sessions outside a project are grouped by base
+directory so an explicit `cwd:' does not unexpectedly move a conversation."
+  (with-current-buffer buffer
+    (let ((root (ellm--project-root-in-buffer buffer)))
+      (if root
+          (list :key (concat "project:" root)
+                :label (format "Project: %s"
+                               (file-name-nondirectory (directory-file-name root))))
+        (let ((directory (file-name-as-directory
+                          (expand-file-name (or ellm--base-default-directory
+                                                default-directory)))))
+          (list :key (concat "directory:" directory)
+                :label (format "Directory: %s" (abbreviate-file-name directory))))))))
+
+(defun ellm-list--record (buffer)
+  "Collect the session-list record for ellm conversation BUFFER."
+  (with-current-buffer buffer
+    (pcase-let* ((`(,status . ,rank) (ellm-list--status buffer))
+                 (group (ellm-list--group buffer))
+                 (state ellm-buffer-state))
+      (append
+       (list :buffer buffer :status status :rank rank
+             :activity (or ellm--last-activity-time 0)
+             :model (ellm-list--model buffer)
+             :context (ellm--format-context-usage
+                       (ellm-buffer-state-context-usage state)
+                       (ellm-buffer-state-context-size state))
+             :todos (ellm--format-todo-completion
+                     (ellm-buffer-state-todos state))
+             :title (or ellm--session-title (buffer-name buffer)))
+       group))))
+
+(defun ellm-list--record-less-p (left right)
+  "Return non-nil when LEFT should precede RIGHT in the session list."
+  (or (< (plist-get left :rank) (plist-get right :rank))
+      (and (= (plist-get left :rank) (plist-get right :rank))
+           (> (plist-get left :activity) (plist-get right :activity)))))
+
+(defun ellm-list--records ()
+  "Return all live ellm conversation records, most active first."
+  (sort
+   (delq nil
+         (mapcar (lambda (buffer)
+                   (when (with-current-buffer buffer (derived-mode-p 'ellm-mode))
+                     (ellm-list--record buffer)))
+                 (buffer-list)))
+   #'ellm-list--record-less-p))
+
+(defun ellm-list--subagent-tree (records)
+  "Attach subagent RECORDS to their live parent records.
+Subagents whose parent cannot be found remain top-level records."
+  (let ((by-buffer (make-hash-table :test #'eq)))
+    (dolist (record records)
+      (puthash (plist-get record :buffer) record by-buffer))
+    (dolist (record records)
+      (when-let* ((parent-name
+                   (with-current-buffer (plist-get record :buffer)
+                     (bound-and-true-p ellm-subagent-parent-buffer)))
+                  (parent (get-buffer parent-name))
+                  (parent-record (gethash parent by-buffer)))
+        (plist-put record :parent parent-record)
+        (plist-put parent-record :children
+                   (cons record (plist-get parent-record :children)))))
+    (cl-labels ((sort-children (record)
+                  (when-let* ((children (plist-get record :children)))
+                    (plist-put record :children (sort children #'ellm-list--record-less-p))
+                    (mapc #'sort-children children))))
+      (mapc #'sort-children records))
+    (cl-remove-if (lambda (record) (plist-get record :parent)) records)))
+
+(defvar-local ellm-list--folded-groups nil
+  "Group keys currently folded in this session-list buffer.")
+
+(defvar-local ellm-list--folded-subagents nil
+  "Parent buffers whose subagent rows are folded in this session-list buffer.")
+
+(defun ellm-list--column-value (record column)
+  "Return COLUMN's formatted value for session RECORD."
+  (let ((function (alist-get column ellm-list-column-format-functions)))
+    (unless function
+      (user-error "ellm: unknown session-list column: %S" column))
+    (funcall function record)))
+
+(defun ellm-list--format-column (value column)
+  "Format VALUE according to COLUMN's display properties."
+  (let ((width (plist-get (alist-get column ellm-list-column-properties) :width)))
+    (unless width
+      (user-error "ellm: unknown session-list column: %S" column))
+    (if (zerop width)
+        value
+      (format (format "%%-%ds" width)
+              (truncate-string-to-width value width nil nil "…")))))
+
+(defun ellm-list--format-row (record)
+  "Return one aligned display row for session RECORD."
+  (string-join
+   (mapcar (lambda (column)
+             (ellm-list--format-column (ellm-list--column-value record column)
+                                       column))
+           ellm-list-columns)
+   "  "))
+
+(defun ellm-list--groups ()
+  "Return top-level session records grouped and ordered for rendering."
+  (let ((groups (make-hash-table :test #'equal)))
+    (dolist (record (ellm-list--subagent-tree (ellm-list--records)))
+      (push record (gethash (plist-get record :key) groups)))
+    (sort
+     (let (result)
+       (maphash
+        (lambda (key records)
+          (setq records (sort records #'ellm-list--record-less-p))
+          (push (list :key key :label (plist-get (car records) :label)
+                      :records records)
+                result))
+        groups)
+       result)
+     (lambda (left right)
+       (ellm-list--record-less-p (car (plist-get left :records))
+                                 (car (plist-get right :records)))))))
+
+(defun ellm-list--group-at-point ()
+  "Return the group key at point, including from one of its session rows."
+  (save-excursion
+    (beginning-of-line)
+    (let (group)
+      (while (and (not (setq group (get-text-property (point) 'ellm-list-group)))
+                  (not (bobp)))
+        (forward-line -1))
+      group)))
+
+(defun ellm-list--buffer-at-point (&optional noerror)
+  "Return the conversation buffer at point.
+When NOERROR is non-nil, return nil on a group heading or unrelated line."
+  (or (get-text-property (point) 'ellm-list-buffer)
+      (unless noerror
+        (user-error "ellm: no conversation at point"))))
+
+(defun ellm-list--goto-buffer (buffer)
+  "Move point to BUFFER's row and return non-nil when it is present."
+  (when buffer
+    (goto-char (point-min))
+    (let ((position (text-property-search-forward 'ellm-list-buffer buffer #'eq)))
+      (when position
+        (goto-char (prop-match-beginning position))
+        t))))
+
+(defun ellm-list--goto-group (group)
+  "Move point to GROUP's heading and return non-nil when it is present."
+  (when group
+    (goto-char (point-min))
+    (let ((position (text-property-search-forward 'ellm-list-group group #'equal)))
+      (when position
+        (goto-char (prop-match-beginning position))
+        t))))
+
+(defun ellm-list--insert-record (record indent)
+  "Insert RECORD and its expanded subagents at INDENT."
+  (let* ((buffer (plist-get record :buffer))
+         (children (plist-get record :children))
+         (folded (member buffer ellm-list--folded-subagents))
+         (start (point))
+         (prefix (if children (if folded "▸ " "▾ ") "  ")))
+    (insert (make-string indent ? ) prefix (ellm-list--format-row record) "\n")
+    (add-text-properties
+     start (point)
+     `(ellm-list-buffer ,buffer
+                        ellm-list-subagent-children ,children
+                        ellm-list-depth ,indent
+                        mouse-face highlight))
+    (unless folded
+      (dolist (child children)
+        (ellm-list--insert-record child (+ indent 2))))))
+
+(defun ellm-list--record-at (buffer)
+  "Return BUFFER's current session record, or nil when it is no longer ellm."
+  (when (and (buffer-live-p buffer)
+             (with-current-buffer buffer (derived-mode-p 'ellm-mode)))
+    (ellm-list--record buffer)))
+
+(defun ellm-list-refresh-buffer (buffer)
+  "Refresh BUFFER's displayed row without rebuilding the session list.
+Return non-nil when BUFFER has a row in the current list."
+  (let ((selected-position (point)))
+    (save-excursion
+      (goto-char (point-min))
+    (when-let* ((record (ellm-list--record-at buffer))
+                (match (text-property-search-forward 'ellm-list-buffer buffer #'eq)))
+      (let* ((start (prop-match-beginning match))
+           (end (save-excursion (goto-char start) (line-beginning-position 2)))
+           (indent (save-excursion (goto-char start) (current-indentation)))
+           (children (get-text-property start 'ellm-list-subagent-children))
+           (folded (member buffer ellm-list--folded-subagents))
+           (prefix (if children (if folded "▸ " "▾ ") "  "))
+           (column (and (<= start selected-position) (< selected-position end)
+                        (- selected-position start)))
+           (inhibit-read-only t))
+      (goto-char start)
+      (delete-region start end)
+      (insert (make-string indent ? ) prefix (ellm-list--format-row record) "\n")
+      (add-text-properties
+       start (point)
+       `(ellm-list-buffer ,buffer
+                          ellm-list-subagent-children ,children
+                          ellm-list-depth ,indent
+                          mouse-face highlight))
+      (when column
+        (goto-char (+ start (min column (- (point) start 1)))))
+      t)))))
+
+(defun ellm-list-refresh ()
+  "Refresh the ellm session list while retaining point on its current row."
+  (interactive)
+  (let ((buffer (ellm-list--buffer-at-point t))
+        (group (ellm-list--group-at-point))
+        (column (current-column))
+        (inhibit-read-only t))
+    (erase-buffer)
+    (dolist (group-data (ellm-list--groups))
+      (let* ((key (plist-get group-data :key))
+             (folded (member key ellm-list--folded-groups))
+             (heading-start (point)))
+        (insert (format "%s %s\n" (if folded "▸" "▾")
+                        (plist-get group-data :label)))
+        (add-text-properties heading-start (point)
+                             `(ellm-list-group ,key face bold mouse-face highlight))
+        (unless folded
+          (dolist (record (plist-get group-data :records))
+            (ellm-list--insert-record record 0)))))
+    (goto-char (point-min))
+    (unless (or (ellm-list--goto-buffer buffer)
+                (ellm-list--goto-group group))
+      (goto-char (point-min)))
+    (move-to-column column)))
+
+(defun ellm-list-toggle-subagents ()
+  "Toggle subagent rows below the parent conversation at point."
+  (interactive)
+  (let* ((start (line-beginning-position))
+         (buffer (ellm-list--buffer-at-point))
+         (children (get-text-property start 'ellm-list-subagent-children))
+         (depth (get-text-property start 'ellm-list-depth)))
+    (unless children
+      (user-error "ellm: no subagents below this conversation"))
+    (if (member buffer ellm-list--folded-subagents)
+        (setq ellm-list--folded-subagents
+              (delete buffer ellm-list--folded-subagents))
+      (push buffer ellm-list--folded-subagents))
+    (let ((inhibit-read-only t)
+          (children-start (save-excursion (goto-char start) (line-beginning-position 2)))
+          children-end)
+      (setq children-end
+            (save-excursion
+              (goto-char children-start)
+              (while (and (get-text-property (point) 'ellm-list-buffer)
+                          (> (or (get-text-property (point) 'ellm-list-depth) 0)
+                             depth))
+                (forward-line 1))
+              (point)))
+      (delete-region children-start children-end)
+      (unless (member buffer ellm-list--folded-subagents)
+        (goto-char children-start)
+        (dolist (child children)
+          (ellm-list--insert-record child (+ depth 2))))
+      (goto-char start)
+      (ellm-list-refresh-buffer buffer))))
+
+(defun ellm-list-toggle-at-point ()
+  "Toggle subagents for a parent row, otherwise toggle its containing group."
+  (interactive)
+  (if (get-text-property (point) 'ellm-list-subagent-children)
+      (ellm-list-toggle-subagents)
+    (ellm-list-toggle-group)))
+
+(defun ellm-list-toggle-group ()
+  "Toggle visibility of the project or directory group at point."
+  (interactive)
+  (let ((group (ellm-list--group-at-point)))
+    (unless group
+      (user-error "ellm: no project or directory group at point"))
+    (if (member group ellm-list--folded-groups)
+        (setq ellm-list--folded-groups (delete group ellm-list--folded-groups))
+      (push group ellm-list--folded-groups))
+    (ellm-list-refresh)
+    (ellm-list--goto-group group)))
+
+(defun ellm-list-cycle-groups ()
+  "Fold every expanded group, or unfold every group when all are folded."
+  (interactive)
+  (let ((groups (mapcar (lambda (group) (plist-get group :key))
+                        (ellm-list--groups))))
+    (setq ellm-list--folded-groups
+          (if (cl-every (lambda (group) (member group ellm-list--folded-groups)) groups)
+              nil
+            groups))
+  (ellm-list-refresh)))
+
+(defun ellm-list-visit ()
+  "Visit the conversation at point without changing its cursor position."
+  (interactive)
+  (pop-to-buffer (ellm-list--buffer-at-point)))
+
+(defun ellm-list-cancel ()
+  "Cancel the active request for the conversation at point, retaining point."
+  (interactive)
+  (let ((buffer (ellm-list--buffer-at-point)))
+    (with-current-buffer buffer
+      (ellm-cancel))
+    (ellm-list-refresh-buffer buffer)))
+
+(defun ellm-list-answer-prompt ()
+  "Answer the pending prompt for the conversation at point."
+  (interactive)
+  (let ((buffer (ellm-list--buffer-at-point)))
+    (pop-to-buffer buffer)
+    (ellm-answer-prompt)))
+
+(defun ellm-list-kill ()
+  "Kill the conversation at point, retaining point on the nearest row."
+  (interactive)
+  (let* ((start (line-beginning-position))
+         (buffer (ellm-list--buffer-at-point))
+         (children (get-text-property start 'ellm-list-subagent-children))
+         (next (save-excursion
+                 (forward-line 1)
+                 (ellm-list--buffer-at-point t))))
+    (when (yes-or-no-p (format "Kill ellm conversation %s? " (buffer-name buffer)))
+      (kill-buffer buffer)
+      (if children
+          ;; Its children become orphaned and must be placed in their regular
+          ;; groups, which is an exceptional structural rebuild.
+          (ellm-list-refresh)
+        (let ((inhibit-read-only t))
+          (delete-region start (line-beginning-position 2))))
+      (when next
+        (ellm-list--goto-buffer next)))))
+
+(defvar ellm-list-mode-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map special-mode-map)
+    (define-key map (kbd "g") #'ellm-list-refresh)
+    (define-key map (kbd "TAB") #'ellm-list-toggle-at-point)
+    (define-key map (kbd "<backtab>") #'ellm-list-cycle-groups)
+    (define-key map (kbd "RET") #'ellm-list-visit)
+    (define-key map (kbd "c") #'ellm-list-cancel)
+    (define-key map (kbd "a") #'ellm-list-answer-prompt)
+    (define-key map (kbd "k") #'ellm-list-kill)
+    (define-key map (kbd "q") #'quit-window)
+    map)
+  "Keymap for `ellm-list-mode'.")
+
+(define-derived-mode ellm-list-mode special-mode "eLLM Sessions"
+  "Mode for browsing ellm conversations by project or directory.
+\\<ellm-list-mode-map>\\[ellm-list-toggle-at-point] toggles subagents or the group at point,
+\\[ellm-list-cycle-groups] cycles all groups, \\[ellm-list-visit] visits,
+\\[ellm-list-cancel] cancels, \\[ellm-list-answer-prompt] answers input,
+and \\[ellm-list-kill] kills the selected conversation."
+  (setq-local truncate-lines t)
+  (add-to-invisibility-spec '(ellm-list-group . t)))
+
+;;;###autoload
+(defun ellm-list ()
+  "Display all live ellm conversations grouped by project or directory."
+  (interactive)
+  (let ((buffer (get-buffer-create "*ellm sessions*")))
+    (with-current-buffer buffer
+      (unless (derived-mode-p 'ellm-list-mode)
+        (ellm-list-mode))
+      (ellm-list-refresh))
+    (pop-to-buffer buffer)))
 
 ;;;;; Major mode
 
