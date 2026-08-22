@@ -8218,19 +8218,36 @@ Return non-nil when BUFFER has a row in the current list."
       (when next
         (ellm-list--goto-buffer next)))))
 
+(defconst ellm-list--keybindings
+  '(("g" . ellm-list-refresh)
+    ("TAB" . ellm-list-toggle-at-point)
+    ("<backtab>" . ellm-list-cycle-groups)
+    ("RET" . ellm-list-visit)
+    ("c" . ellm-list-cancel)
+    ("a" . ellm-list-answer-prompt)
+    ("x" . ellm-list-kill)
+    ("q" . quit-window))
+  "Bindings shared by `ellm-list-mode' and its Evil normal state.")
+
+(defun ellm-list--define-keybindings (define-key)
+  "Call DEFINE-KEY for every `ellm-list--keybindings' entry."
+  (dolist (binding ellm-list--keybindings)
+    (funcall define-key (kbd (car binding)) (cdr binding))))
+
 (defvar ellm-list-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map special-mode-map)
-    (define-key map (kbd "g") #'ellm-list-refresh)
-    (define-key map (kbd "TAB") #'ellm-list-toggle-at-point)
-    (define-key map (kbd "<backtab>") #'ellm-list-cycle-groups)
-    (define-key map (kbd "RET") #'ellm-list-visit)
-    (define-key map (kbd "c") #'ellm-list-cancel)
-    (define-key map (kbd "a") #'ellm-list-answer-prompt)
-    (define-key map (kbd "k") #'ellm-list-kill)
-    (define-key map (kbd "q") #'quit-window)
+    (ellm-list--define-keybindings
+     (lambda (key command) (define-key map key command)))
     map)
   "Keymap for `ellm-list-mode'.")
+
+(declare-function evil-define-key* "evil-core" (state keymap key def &rest bindings))
+
+(with-eval-after-load 'evil
+  (ellm-list--define-keybindings
+   (lambda (key command)
+     (evil-define-key* 'normal ellm-list-mode-map key command))))
 
 (define-derived-mode ellm-list-mode special-mode "eLLM Sessions"
   "Mode for browsing ellm conversations by project or directory.
