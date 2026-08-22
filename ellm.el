@@ -7842,10 +7842,14 @@ and grouping."
                              ((buffer-live-p buffer)))
                    (with-current-buffer buffer
                      (when (derived-mode-p 'ellm-list-mode)
-                       (dolist (conversation pending)
-                         (unless (ellm-list-refresh-buffer conversation)
-                           ;; New buffers and structural changes require a
-                           ;; rebuild, but ordinary stream updates do not.
+                       (let (rebuild)
+                         (dolist (conversation pending)
+                           (unless (or (ellm-list-refresh-buffer conversation)
+                                       (ellm-list--buffer-hidden-p conversation))
+                             ;; New buffers and structural changes require a
+                             ;; rebuild, but ordinary stream updates do not.
+                             (setq rebuild t)))
+                         (when rebuild
                            (ellm-list-refresh)))))))))))))
 
 (defun ellm-list--status (buffer)
@@ -8048,6 +8052,53 @@ When NOERROR is non-nil, return nil on a group heading or unrelated line."
       (dolist (child children)
         (ellm-list--insert-record child (+ indent 2))))))
 
+(defun ellm-list--buffer-hidden-p (buffer)
+  "Return non-nil when BUFFER is intentionally hidden in this list.
+A folded group or ancestor keeps its rows absent without requiring a rebuild."
+  (when (buffer-live-p buffer)
+    (or (member (plist-get (ellm-list--record-at buffer) :key)
+                ellm-list--folded-groups)
+        (let ((parent buffer) hidden)
+          (while (and parent (not hidden))
+            (setq parent
+                  (with-current-buffer parent
+                    (when-let* ((parent-name
+                                 (bound-and-true-p ellm-subagent-parent-buffer)))
+                      (get-buffer parent-name))))
+            (setq hidden (member parent ellm-list--folded-subagents)))
+          hidden))))
+
+(defun ellm-list--point-location (position)
+  "Return the list row and column at POSITION, if any."
+  (save-excursion
+    (goto-char position)
+    (list (ellm-list--buffer-at-point t)
+          (ellm-list--group-at-point)
+          (current-column))))
+
+(defun ellm-list--restore-point-location (location)
+  "Move point to LOCATION in the current session-list buffer.
+Return non-nil when LOCATION's row is still present."
+  (pcase-let ((`(,buffer ,group ,column) location))
+    (when (or (ellm-list--goto-buffer buffer)
+              (ellm-list--goto-group group))
+      (move-to-column column)
+      t)))
+
+(defun ellm-list--window-locations ()
+  "Return displayed session-list windows and their logical point locations."
+  (mapcar (lambda (window)
+            (cons window (ellm-list--point-location (window-point window))))
+          (get-buffer-window-list (current-buffer) nil t)))
+
+(defun ellm-list--restore-window-locations (locations)
+  "Restore LOCATIONS after session-list text has been regenerated."
+  (dolist (entry locations)
+    (when (window-live-p (car entry))
+      (save-excursion
+        (when (ellm-list--restore-point-location (cdr entry))
+          (set-window-point (car entry) (point)))))))
+
 (defun ellm-list--record-at (buffer)
   "Return BUFFER's current session record, or nil when it is no longer ellm."
   (when (and (buffer-live-p buffer)
@@ -8062,7 +8113,9 @@ When NOERROR is non-nil, return nil on a group heading or unrelated line."
 (defun ellm-list-refresh-buffer (buffer)
   "Refresh BUFFER's displayed row without rebuilding the session list.
 Return non-nil when BUFFER has a row in the current list."
-  (let ((selected-position (point)))
+  (let ((point-location (ellm-list--point-location (point)))
+        (window-locations (ellm-list--window-locations))
+        updated)
     (save-excursion
       (goto-char (point-min))
       (when-let* ((record (ellm-list--record-at buffer))
@@ -8073,8 +8126,6 @@ Return non-nil when BUFFER has a row in the current list."
                (children (get-text-property start 'ellm-list-subagent-children))
                (folded (member buffer ellm-list--folded-subagents))
                (prefix (if children (if folded "▸ " "▾ ") "  "))
-               (column (and (<= start selected-position) (< selected-position end)
-                            (- selected-position start)))
                (inhibit-read-only t))
           (goto-char start)
           (delete-region start end)
@@ -8085,17 +8136,18 @@ Return non-nil when BUFFER has a row in the current list."
                               ellm-list-subagent-children ,children
                               ellm-list-depth ,indent
                               mouse-face highlight))
-          (when column
-            (goto-char (+ start (min column (- (point) start 1)))))
-          (ellm-list--redisplay buffer)
-          t)))))
+          (setq updated t))))
+    (when updated
+      (ellm-list--restore-point-location point-location)
+      (ellm-list--restore-window-locations window-locations)
+      (ellm-list--redisplay (current-buffer)))
+    updated))
 
 (defun ellm-list-refresh ()
   "Refresh the ellm session list while retaining point on its current row."
   (interactive)
-  (let ((buffer (ellm-list--buffer-at-point t))
-        (group (ellm-list--group-at-point))
-        (column (current-column))
+  (let ((point-location (ellm-list--point-location (point)))
+        (window-locations (ellm-list--window-locations))
         (inhibit-read-only t))
     (erase-buffer)
     (dolist (group-data (ellm-list--groups))
@@ -8108,12 +8160,11 @@ Return non-nil when BUFFER has a row in the current list."
                              `(ellm-list-group ,key face bold mouse-face highlight))
         (unless folded
           (dolist (record (plist-get group-data :records))
-            (ellm-list--insert-record record 0)))))
+            (ellm-list--insert-record record 1)))))
     (goto-char (point-min))
-    (unless (or (ellm-list--goto-buffer buffer)
-                (ellm-list--goto-group group))
+    (unless (ellm-list--restore-point-location point-location)
       (goto-char (point-min)))
-    (move-to-column column)
+    (ellm-list--restore-window-locations window-locations)
     (ellm-list--redisplay (current-buffer))))
 
 (defun ellm-list-toggle-subagents ()
@@ -8121,32 +8172,18 @@ Return non-nil when BUFFER has a row in the current list."
   (interactive)
   (let* ((start (line-beginning-position))
          (buffer (ellm-list--buffer-at-point))
-         (children (get-text-property start 'ellm-list-subagent-children))
-         (depth (get-text-property start 'ellm-list-depth)))
+         (children (get-text-property start 'ellm-list-subagent-children)))
     (unless children
       (user-error "ellm: no subagents below this conversation"))
     (if (member buffer ellm-list--folded-subagents)
         (setq ellm-list--folded-subagents
               (delete buffer ellm-list--folded-subagents))
       (push buffer ellm-list--folded-subagents))
-    (let ((inhibit-read-only t)
-          (children-start (save-excursion (goto-char start) (line-beginning-position 2)))
-          children-end)
-      (setq children-end
-            (save-excursion
-              (goto-char children-start)
-              (while (and (get-text-property (point) 'ellm-list-buffer)
-                          (> (or (get-text-property (point) 'ellm-list-depth) 0)
-                             depth))
-                (forward-line 1))
-              (point)))
-      (delete-region children-start children-end)
-      (unless (member buffer ellm-list--folded-subagents)
-        (goto-char children-start)
-        (dolist (child children)
-          (ellm-list--insert-record child (+ depth 2))))
-      (goto-char start)
-      (ellm-list-refresh-buffer buffer))))
+    ;; Rebuild from live records rather than reusing the child records stored
+    ;; in the old row.  A subagent may have launched descendants while this
+    ;; tree was folded or streaming.
+    (ellm-list-refresh)
+    (ellm-list--goto-buffer buffer)))
 
 (defun ellm-list-toggle-at-point ()
   "Toggle subagents for a parent row, otherwise toggle its containing group."
