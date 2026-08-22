@@ -179,7 +179,7 @@ into implementation work.")
 
 (defcustom ellm-profiles
   `((agent . ((description . "Autonomous coding agent with local tools and optional delegation.")
-              (tools . ("@files" "@shell" "@web" "@tasks" "@agents" "ask"))
+              (tools . ("@files" "@shell" "@web" "@tasks" "@agents" "@user"))
               (system . ,ellm--agent-system-prompt)))
     (explore . ((description . "Read-only codebase exploration, change analysis, and external research.")
                 (tools . ("glob" "grep" "read_file_lines" "websearch" "webfetch" "git"))
