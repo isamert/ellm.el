@@ -4939,9 +4939,9 @@ MESSAGE-TEXT is reported after cleanup when non-nil."
 (defun ellm--request-handle-event (request attempt event)
   "Reduce backend EVENT for REQUEST ATTEMPT."
   (when (ellm--request-event-current-p request attempt)
-    (ellm--touch-activity)
     (ellm--request-reset-idle-timer request attempt)
     (with-current-buffer (ellm-request-buffer request)
+      (ellm--touch-activity)
       (condition-case err
           (ellm--preserve-user-position
             (pcase (plist-get event :type)
@@ -8054,35 +8054,41 @@ When NOERROR is non-nil, return nil on a group heading or unrelated line."
              (with-current-buffer buffer (derived-mode-p 'ellm-mode)))
     (ellm-list--record buffer)))
 
+(defun ellm-list--redisplay (buffer)
+  "Request redisplay of windows showing the current session list buffer."
+  (when (get-buffer-window buffer 'visible)
+    (force-window-update buffer)))
+
 (defun ellm-list-refresh-buffer (buffer)
   "Refresh BUFFER's displayed row without rebuilding the session list.
 Return non-nil when BUFFER has a row in the current list."
   (let ((selected-position (point)))
     (save-excursion
       (goto-char (point-min))
-    (when-let* ((record (ellm-list--record-at buffer))
-                (match (text-property-search-forward 'ellm-list-buffer buffer #'eq)))
-      (let* ((start (prop-match-beginning match))
-           (end (save-excursion (goto-char start) (line-beginning-position 2)))
-           (indent (save-excursion (goto-char start) (current-indentation)))
-           (children (get-text-property start 'ellm-list-subagent-children))
-           (folded (member buffer ellm-list--folded-subagents))
-           (prefix (if children (if folded "▸ " "▾ ") "  "))
-           (column (and (<= start selected-position) (< selected-position end)
-                        (- selected-position start)))
-           (inhibit-read-only t))
-      (goto-char start)
-      (delete-region start end)
-      (insert (make-string indent ? ) prefix (ellm-list--format-row record) "\n")
-      (add-text-properties
-       start (point)
-       `(ellm-list-buffer ,buffer
-                          ellm-list-subagent-children ,children
-                          ellm-list-depth ,indent
-                          mouse-face highlight))
-      (when column
-        (goto-char (+ start (min column (- (point) start 1)))))
-      t)))))
+      (when-let* ((record (ellm-list--record-at buffer))
+                  (match (text-property-search-forward 'ellm-list-buffer buffer #'eq)))
+        (let* ((start (prop-match-beginning match))
+               (end (save-excursion (goto-char start) (line-beginning-position 2)))
+               (indent (get-text-property start 'ellm-list-depth))
+               (children (get-text-property start 'ellm-list-subagent-children))
+               (folded (member buffer ellm-list--folded-subagents))
+               (prefix (if children (if folded "▸ " "▾ ") "  "))
+               (column (and (<= start selected-position) (< selected-position end)
+                            (- selected-position start)))
+               (inhibit-read-only t))
+          (goto-char start)
+          (delete-region start end)
+          (insert (make-string indent ? ) prefix (ellm-list--format-row record) "\n")
+          (add-text-properties
+           start (point)
+           `(ellm-list-buffer ,buffer
+                              ellm-list-subagent-children ,children
+                              ellm-list-depth ,indent
+                              mouse-face highlight))
+          (when column
+            (goto-char (+ start (min column (- (point) start 1)))))
+          (ellm-list--redisplay buffer)
+          t)))))
 
 (defun ellm-list-refresh ()
   "Refresh the ellm session list while retaining point on its current row."
@@ -8107,7 +8113,8 @@ Return non-nil when BUFFER has a row in the current list."
     (unless (or (ellm-list--goto-buffer buffer)
                 (ellm-list--goto-group group))
       (goto-char (point-min)))
-    (move-to-column column)))
+    (move-to-column column)
+    (ellm-list--redisplay (current-buffer))))
 
 (defun ellm-list-toggle-subagents ()
   "Toggle subagent rows below the parent conversation at point."
@@ -8323,7 +8330,8 @@ and \\[ellm-list-kill] kills the selected conversation."
       (setq ellm--session-title title)
       (ellm-update-session-title title)))
   (ellm--persistence-recognize-buffer)
-  (ellm--persistence-checkpoint))
+  (ellm--persistence-checkpoint)
+  (ellm--touch-activity))
 
 ;;;###autoload
 (add-to-list 'auto-mode-alist '("\\.ellm\\'" . ellm-mode))
