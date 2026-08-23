@@ -4786,15 +4786,19 @@ Return non-nil when a live top-level assistant header was updated."
     (ellm--notify-request-finished ellm--active-request '(:state cancelled))))
 
 (defun ellm--notify-permission-request (request permission)
-  "Notify when REQUEST needs a permission decision for PERMISSION."
-  (let* ((buffer (ellm-request-buffer request))
-         (tool-call (plist-get permission :tool-call))
-         (tool-title (or (plist-get tool-call :title)
-                         "Agent action requires approval")))
-    (ellm--notify-user
-     request 'permission-requested "ellm: permission requested"
-     (format "%s: %s" (buffer-name buffer) tool-title)
-     :urgency 'critical :permission permission)))
+  "Notify when REQUEST needs a permission decision for PERMISSION.
+
+Only the first queued prompt sends a notification; further prompts are already
+represented by the pending-input indicator in the same conversation."
+  (when (null ellm--user-prompt-queue)
+    (let* ((buffer (ellm-request-buffer request))
+           (tool-call (plist-get permission :tool-call))
+           (tool-title (or (plist-get tool-call :title)
+                           "Agent action requires approval")))
+      (ellm--notify-user
+       request 'permission-requested "ellm: permission requested"
+       (format "%s: %s" (buffer-name buffer) tool-title)
+       :urgency 'critical :permission permission))))
 
 (defun ellm--notify-request-finished-user (request outcome)
   "Notify when REQUEST ends with an attention-worthy OUTCOME."
