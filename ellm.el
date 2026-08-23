@@ -163,7 +163,7 @@ Work autonomously when the request is clear:
 #{(ellm-prompt-read
    '(\"AGENTS.md\" \"CLAUDE.md\")
    :heading \"Follow these project instructions:\"
-   :tag \"project-instructions\")}")
+   :tag \"project_instructions\")}")
 
 (defconst ellm--explore-system-prompt
   "You are a read-only exploration agent. Investigate codebases, changes,
@@ -3306,6 +3306,119 @@ keeps its resolved prompt; clearing the cache only affects future requests."
 (defvar-local ellm--persistence-saving-p nil
   "Non-nil while ellm is assigning or saving this buffer's persistence file.")
 
+(defconst ellm--tool-output-id-regexp
+  "\\`tool-output-\\([[:digit:]]+\\)-[[:alnum:]-]+\\'"
+  "Regexp matching a retained tool output identifier.")
+
+(defun ellm--ensure-session-id ()
+  "Return this conversation's session id, creating it in frontmatter."
+  (or (ellm--frontmatter-value '(ellm session-id))
+      (let ((id (ellm--new-session-id)))
+        (ellm--set-frontmatter-value '(ellm session-id) id)
+        id)))
+
+(defun ellm--tool-output-ids ()
+  "Return retained output identifiers from the current frontmatter."
+  (let ((ids (ellm--frontmatter-value '(tool-outputs))))
+    (unless (or (null ids)
+                (and (listp ids) (cl-every #'stringp ids)))
+      (error "tool-outputs must be a list of output identifiers"))
+    ids))
+
+(defun ellm--tool-output-file-name (id)
+  "Return the persisted file name for retained tool output ID."
+  (concat id ".txt"))
+
+(defun ellm--tool-output-directory ()
+  "Return the directory containing this conversation's retained outputs."
+  (when (or buffer-file-name ellm--session-directory)
+    (when-let* ((file (or buffer-file-name
+                          (ellm--persistence-target-file
+                           (ellm--persistence-session-role)))))
+      (concat (file-name-sans-extension file) ".outputs/"))))
+
+(defun ellm--tool-output-path (id)
+  "Return the persisted path for retained tool output ID, or nil."
+  (when-let* ((directory (ellm--tool-output-directory)))
+    (expand-file-name (ellm--tool-output-file-name id) directory)))
+
+(defun ellm--tool-output-buffer-name (id)
+  "Return the display buffer name for retained tool output ID."
+  (format "*ellm tool output: %s: %s*"
+          (ellm--ensure-session-id) id))
+
+(defun ellm--tool-output-kind (kind)
+  "Return KIND normalized for a retained output identifier."
+  (let ((kind (downcase (replace-regexp-in-string
+                         "[^[:alnum:]]+" "-" (format "%s" kind)))))
+    (setq kind (string-trim kind "-" "-"))
+    (if (string-empty-p kind) "output" kind)))
+
+(defun ellm--tool-output-id (kind)
+  "Return a fresh retained tool output identifier for KIND."
+  (let ((maximum 0))
+    (dolist (id (ellm--tool-output-ids))
+      (when (string-match ellm--tool-output-id-regexp id)
+        (setq maximum (max maximum (string-to-number (match-string 1 id))))))
+    (format "tool-output-%d-%s" (1+ maximum) (ellm--tool-output-kind kind))))
+
+(defun ellm--kill-tool-output-buffers ()
+  "Kill retained output buffers referenced by the current conversation."
+  (dolist (id (ellm--tool-output-ids))
+    (when-let* ((buffer (get-buffer (ellm--tool-output-buffer-name id))))
+      (kill-buffer buffer))))
+
+(defun ellm-tool-output-store (kind content &optional buffer)
+  "Retain CONTENT of KIND and return its conversation-local identifier.
+When BUFFER is non-nil, it contains CONTENT and is adopted as the retained
+output buffer."
+  (unless (derived-mode-p 'ellm-mode)
+    (error "Retained tool output requires an ellm conversation buffer"))
+  (let* ((id (ellm--tool-output-id kind))
+         (name (ellm--tool-output-buffer-name id))
+         (output (or buffer (generate-new-buffer name))))
+    (unless (buffer-live-p output)
+      (error "Retained tool output buffer is not live"))
+    (with-current-buffer output
+      (rename-buffer name t)
+      (unless buffer
+        (insert content))
+      (setq-local buffer-read-only t)
+      (set-buffer-modified-p nil))
+    (ellm--set-frontmatter-value
+     'tool-outputs (append (ellm--tool-output-ids) (list id)))
+    (add-hook 'kill-buffer-hook #'ellm--kill-tool-output-buffers t t)
+    id))
+
+(defun ellm-tool-output-buffer (id)
+  "Return the current conversation's retained output buffer named by ID."
+  (unless (and (stringp id)
+               (string-match-p ellm--tool-output-id-regexp id)
+               (member id (ellm--tool-output-ids)))
+    (error "unknown tool output: %s" id))
+  (or (get-buffer (ellm--tool-output-buffer-name id))
+      (when-let* ((path (ellm--tool-output-path id))
+                  ((file-readable-p path)))
+        (let ((buffer (generate-new-buffer (ellm--tool-output-buffer-name id))))
+          (with-current-buffer buffer
+            (insert-file-contents path)
+            (setq-local buffer-read-only t)
+            (set-buffer-modified-p nil))
+          buffer))
+      (error "retained tool output is unavailable: %s" id)))
+
+(defun ellm--persist-tool-output-buffers ()
+  "Persist retained tool output buffers for the current conversation."
+  (dolist (id (ellm--tool-output-ids))
+    (when-let* ((buffer (get-buffer (ellm--tool-output-buffer-name id)))
+                (path (ellm--tool-output-path id)))
+      (make-directory (file-name-directory path) t)
+      (set-file-modes (file-name-directory path) #o700)
+      (with-current-buffer buffer
+        (let ((coding-system-for-write 'utf-8-unix))
+          (write-region (point-min) (point-max) path nil 'silent)))
+      (set-file-modes path #o600))))
+
 (defconst ellm--reasoning-state-id-regexp
   "\\`rs-[[:xdigit:]]\\{64\\}\\'"
   "Regexp matching a content-addressed reasoning state identifier.")
@@ -3488,8 +3601,7 @@ The current session store is preferred over the global cache."
              (not ellm--persistence-saving-p))
     (let* ((ellm--persistence-saving-p t)
            (role (ellm--persistence-session-role))
-           (session-id (or (ellm--frontmatter-value '(ellm session-id))
-                           (ellm--new-session-id))))
+           (session-id (ellm--ensure-session-id)))
       (unless ellm--session-directory
         (setq-local
          ellm--session-directory
@@ -3516,6 +3628,7 @@ The current session store is preferred over the global cache."
         (progn
           (ellm--persistence-setup-buffer)
           (ellm--localize-reasoning-state-files)
+          (ellm--persist-tool-output-buffers)
           (when buffer-file-name
             (let ((ellm--persistence-saving-p t)
                   (save-silently t)

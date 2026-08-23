@@ -325,6 +325,18 @@ children of children.  Without it, offer only direct children."
                          ellm-tools-maximum-timeout))
     value))
 
+;;;; Retained tool output
+
+(defun ellm-tools--truncation-marker (kind content &optional detail)
+  "Retain truncated CONTENT of KIND and return a concise marker.
+DETAIL describes the displayed preview when it is useful to the model."
+  (if (derived-mode-p 'ellm-mode)
+      (let ((id (ellm-tool-output-store kind content)))
+        (format "\n[... output truncated%s; full output available with output-id=%S ...]"
+                (if detail (concat ": " detail) "") id))
+    (format "\n[... output truncated%s ...]"
+            (if detail (concat ": " detail) ""))))
+
 ;;;; `ellm-deftool' macro
 
 (eval-and-compile
@@ -647,6 +659,8 @@ Standard output and standard error are combined.  The command runs with no
 standard input in the conversation working directory."
   (let* ((default-directory (ellm-tools--default-directory))
          (limit ellm-tools-bash-output-character-limit)
+         (full-buffer (generate-new-buffer " *ellm bash output*"))
+         (conversation (current-buffer))
          (head-limit (/ (+ limit 1) 2))
          (tail-limit (/ limit 2))
          (proc
@@ -657,6 +671,8 @@ standard input in the conversation working directory."
            :noquery t
            :filter
            (lambda (process chunk)
+             (with-current-buffer full-buffer
+               (insert chunk))
              (let* ((total (+ (or (process-get process 'ellm-total) 0)
                               (length chunk)))
                     (output (concat (or (process-get process 'ellm-output) "")
@@ -675,23 +691,30 @@ standard input in the conversation working directory."
                                 (substring output (- tail-limit)))))))
            :sentinel
            (lambda (process _event)
-             (when (memq (process-status process) '(exit signal))
+             (with-current-buffer conversation
+               (when (memq (process-status process) '(exit signal))
                (let* ((tail (or (process-get process 'ellm-output) ""))
                       (total (or (process-get process 'ellm-total) 0))
                       (output
                        (if (process-get process 'ellm-truncated)
-                           (concat
-                            (process-get process 'ellm-head)
-                            (format "\n[... %d characters omitted; showing beginning and end ...]\n"
-                                    (- total head-limit tail-limit))
-                            tail)
+                           (let ((marker
+                                  (ellm-tools--truncation-marker
+                                   "bash"
+                                   (with-current-buffer full-buffer (buffer-string))
+                                   (format "%d characters omitted; showing beginning and end"
+                                           (- total head-limit tail-limit)))))
+                             (kill-buffer full-buffer)
+                             (concat (process-get process 'ellm-head) marker "\n" tail))
+                         (kill-buffer full-buffer)
                          tail)))
                  (funcall callback
                           (format "Exit code: %d\n%s"
-                                  (process-exit-status process) output))))))))
+                                  (process-exit-status process) output)))))))))
     (lambda ()
       (when (process-live-p proc)
-        (kill-process proc)))))
+        (kill-process proc))
+      (when (buffer-live-p full-buffer)
+        (kill-buffer full-buffer)))))
 
 ;;;;; Git
 
@@ -790,7 +813,8 @@ standard input in the conversation working directory."
                (if (> total limit) " truncated=true" ""))
        (string-join shown "\n")
        (when (> total limit)
-         (format "\n[... truncated, showing first %d of %d lines ...]" limit total))
+         (ellm-tools--truncation-marker
+          "git" stdout (format "showing first %d of %d lines" limit total)))
        (unless (string-empty-p (string-trim stderr))
          (format "\n<warnings>\n%s\n</warnings>" (string-trim-right stderr)))
        "\n</git>"))))
@@ -932,89 +956,103 @@ Act directly on buffers if you know the name already, without listing."
      "\n")
     "\n</buffers>")))
 
-(ellm-deftool buffers/read-buffer-lines ()
-  ((buffer-name :string "Name of the buffer to read.")
-   (start-line :integer "Starting line number (1-indexed). Optional." &optional)
-   (end-line :integer "Ending line number (1-indexed). Optional." &optional))
-  "Return the contents of BUFFER-NAME, optionally limited to a line range."
-  (when (or (not (stringp buffer-name))
-            (string-empty-p buffer-name)
-            (not (get-buffer buffer-name))
-            (and start-line
-                 (or (not (integerp start-line)) (< start-line 1)))
-            (and end-line
-                 (or (not (integerp end-line)) (< end-line 1)))
+(defun ellm-tools--read-buffer-lines (buffer start-line end-line)
+  "Return BUFFER contents in the optional inclusive line range."
+  (unless (buffer-live-p buffer)
+    (ellm-tools--error "Operation failed: invalid input"))
+  (when (or (and start-line (or (not (integerp start-line)) (< start-line 1)))
+            (and end-line (or (not (integerp end-line)) (< end-line 1)))
             (and start-line end-line (< end-line start-line)))
-    (ellm-tools--error "Operation failed: invalid input" ))
-  (with-current-buffer buffer-name
+    (ellm-tools--error "Operation failed: invalid input"))
+  (with-current-buffer buffer
     (let* ((start-pos (if start-line
-                          (save-excursion
-                            (goto-char (point-min))
-                            (forward-line (1- start-line))
-                            (point))
+                          (save-excursion (goto-char (point-min))
+                                          (forward-line (1- start-line)) (point))
                         (point-min)))
            (end-pos (if end-line
-                        (save-excursion
-                          (goto-char (point-min))
-                          (forward-line end-line)
-                          (point))
+                        (save-excursion (goto-char (point-min))
+                                        (forward-line end-line) (point))
                       (point-max)))
            (content (buffer-substring-no-properties start-pos end-pos))
            (lines (split-string content "\n"))
            (limited-lines (seq-take lines 500))
            (truncated (> (length lines) 500)))
       (concat
-       (format "<buffer name=%S%s%s>\n"
-               buffer-name
+       (format "<buffer name=%S%s%s>\n" (buffer-name buffer)
                (if start-line (format " start-line=%d" start-line) "")
                (if end-line (format " end-line=%d" end-line) ""))
        (string-join limited-lines "\n")
-       (if truncated "\n[... truncated, showing first 500 lines ...]" "")
+       (if truncated
+           (ellm-tools--truncation-marker
+            "buffer" content (format "showing first 500 of %d lines" (length lines)))
+         "")
        "\n</buffer>"))))
+
+(ellm-deftool buffers/read-buffer-lines ()
+  ((buffer-name :string "Name of the buffer to read.")
+   (start-line :integer "Starting line number (1-indexed). Optional." &optional)
+   (end-line :integer "Ending line number (1-indexed). Optional." &optional))
+  "Return the contents of BUFFER-NAME, optionally limited to a line range."
+  (when (or (not (stringp buffer-name)) (string-empty-p buffer-name))
+    (ellm-tools--error "Operation failed: invalid input"))
+  (ellm-tools--read-buffer-lines (get-buffer buffer-name) start-line end-line))
+
+(ellm-deftool tool-outputs/read ()
+  ((output-id :string "Identifier named by a truncated tool result.")
+   (start-line :integer "Starting line number (1-indexed). Optional." &optional)
+   (end-line :integer "Ending line number (1-indexed). Optional." &optional))
+  "Read retained output from this conversation only."
+  (ellm-tools--read-buffer-lines
+   (ellm-tool-output-buffer output-id) start-line end-line))
+
+(defun ellm-tools--search-buffer (buffer pattern regexp case-sensitive)
+  "Return bounded matches for PATTERN in BUFFER."
+  (unless (buffer-live-p buffer)
+    (ellm-tools--error "invalid buffer"))
+  (when (s-blank? pattern)
+    (ellm-tools--error "search pattern is empty"))
+  (with-current-buffer buffer
+    (let ((case-fold-search (not case-sensitive))
+          (search-fn (if regexp #'re-search-forward #'search-forward))
+          (matches '()) (done nil) (max-matches 50))
+      (save-excursion
+        (goto-char (point-min))
+        (while (and (not done) (< (length matches) max-matches)
+                    (funcall search-fn pattern nil t))
+          (let* ((match-beg (match-beginning 0))
+                 (match-end (match-end 0))
+                 (line-num (line-number-at-pos match-beg))
+                 (line-content (buffer-substring-no-properties
+                                (line-beginning-position) (line-end-position))))
+            (push (format "%d: %s" line-num line-content) matches)
+            (when (= match-beg match-end)
+              (if (eobp) (setq done t) (forward-char 1))))))
+      (if matches
+          (concat
+           (format "<search_results buffer=%S pattern=%S matches=%d%s>\n"
+                   (buffer-name buffer) pattern (length matches)
+                   (if (= (length matches) max-matches) " truncated=true" ""))
+           (string-join (nreverse matches) "\n") "\n</search_results>")
+        (format "No matches found for %S in buffer %S." pattern (buffer-name buffer))))))
 
 (ellm-deftool buffers/search-buffer ()
   ((buffer-name :string "Name of the buffer to search in.")
    (pattern :string "The search pattern to look for.")
    (regexp :boolean "If true, treat pattern as a regular expression. Default is false." &optional)
    (case-sensitive :boolean "If true, search is case-sensitive. By default does a case-insensitive search." &optional))
-  "Search for PATTERN in BUFFER-NAME.
-Return matching lines with line numbers."
-  (when (or (not (stringp buffer-name))
-            (string-empty-p buffer-name)
-            (not (get-buffer buffer-name)))
+  "Return matching lines with line numbers."
+  (when (or (not (stringp buffer-name)) (string-empty-p buffer-name))
     (ellm-tools--error "invalid buffer name"))
-  (when (s-blank? pattern)
-    (ellm-tools--error "search pattern is empty"))
-  (with-current-buffer buffer-name
-    (let ((case-fold-search (not case-sensitive))
-          (search-fn (if regexp #'re-search-forward #'search-forward))
-          (matches '())
-          (done nil)
-          (max-matches 50))
-      (save-excursion
-        (goto-char (point-min))
-        (while (and (not done)
-                    (< (length matches) max-matches)
-                    (funcall search-fn pattern nil t))
-          (let* ((match-beg (match-beginning 0))
-                 (match-end (match-end 0))
-                 (line-num (line-number-at-pos match-beg))
-                 (line-content (buffer-substring-no-properties
-                                (line-beginning-position)
-                                (line-end-position))))
-            (push (format "%d: %s" line-num line-content) matches)
-            (when (= match-beg match-end)
-              (if (eobp)
-                  (setq done t)
-                (forward-char 1))))))
-      (if matches
-          (concat
-           (format "<search_results buffer=%S pattern=%S matches=%d%s>\n"
-                   buffer-name pattern (length matches)
-                   (if (= (length matches) max-matches) " truncated=true" ""))
-           (string-join (nreverse matches) "\n")
-           "\n</search_results>")
-        (format "No matches found for %S in buffer %S." pattern buffer-name)))))
+  (ellm-tools--search-buffer (get-buffer buffer-name) pattern regexp case-sensitive))
+
+(ellm-deftool tool-outputs/search ()
+  ((output-id :string "Identifier named by a truncated tool result.")
+   (pattern :string "The search pattern to look for.")
+   (regexp :boolean "If true, treat pattern as a regular expression. Default is false." &optional)
+   (case-sensitive :boolean "If true, search is case-sensitive. By default does a case-insensitive search." &optional))
+  "Search retained output from this conversation only."
+  (ellm-tools--search-buffer
+   (ellm-tool-output-buffer output-id) pattern regexp case-sensitive))
 
 (declare-function flymake-diagnostic-beg "flymake")
 (declare-function flymake-diagnostic-end "flymake")
@@ -1410,17 +1448,25 @@ whose documentation contains all QUERY words are included as well."
      (format "<elisp_eval session=%S status=%S>\n"
              session (if (plist-get result :ok) "ok" "error"))
      (if (plist-get result :ok)
-         (format "<value%s>\n%s\n</value>"
+         (format "<value%s>\n%s%s\n</value>"
                  (if (cdr value) " truncated=true" "")
-                 (car value))
+                 (car value)
+                 (if (cdr value)
+                     (ellm-tools--truncation-marker
+                      "elisp-value" (or (plist-get result :value) "nil"))
+                   ""))
        (format "<error type=%S>\n%s\n</error>"
                (plist-get result :error-symbol)
                (or (plist-get result :error-message)
                    "Unknown evaluation error")))
      (unless (string-empty-p (car output))
-       (format "\n<output%s>\n%s\n</output>"
+       (format "\n<output%s>\n%s%s\n</output>"
                (if (cdr output) " truncated=true" "")
-               (car output)))
+               (car output)
+               (if (cdr output)
+                   (ellm-tools--truncation-marker
+                    "elisp-output" (or (plist-get result :output) ""))
+                 "")))
      "\n</elisp_eval>")))
 
 (defun ellm-tools--elisp-child-form
@@ -1444,7 +1490,8 @@ whose documentation contains all QUERY words are included as well."
 (defun ellm-tools--start-temp-elisp-eval
     (code features directory callback)
   "Evaluate CODE with FEATURES in a temporary child rooted at DIRECTORY."
-  (let* ((async-process-noquery-on-exit t)
+  (let* ((owner (current-buffer))
+         (async-process-noquery-on-exit t)
          (completed nil)
          (cancelled nil)
          (process
@@ -1456,15 +1503,16 @@ whose documentation contains all QUERY words are included as well."
              (unless (async-message-p result)
                (setq completed t)
                (funcall callback
-                        (ellm-tools--format-elisp-eval-result
-                         "temp"
-                         (if (and (listp result)
-                                  (plist-member result :ok))
-                             result
-                           (list :ok nil
-                                 :error-symbol 'child-exit
-                                 :error-message
-                                 "Temporary Emacs exited without a result")))))))))
+                        (with-current-buffer owner
+                          (ellm-tools--format-elisp-eval-result
+                           "temp"
+                           (if (and (listp result)
+                                    (plist-member result :ok))
+                               result
+                             (list :ok nil
+                                   :error-symbol 'child-exit
+                                   :error-message
+                                   "Temporary Emacs exited without a result"))))))))))
     (let ((async-sentinel (process-sentinel process)))
       (set-process-sentinel
        process
@@ -1758,7 +1806,8 @@ is passed to CALLBACK.  Return a cancellation function."
   (dolist (arg args)
     (unless (stringp arg)
       (ellm-tools--error "command argument is not a string: %S" arg)))
-  (let* ((stdout-buffer (generate-new-buffer (format " *%s-stdout*" name)))
+  (let* ((conversation (current-buffer))
+         (stdout-buffer (generate-new-buffer (format " *%s-stdout*" name)))
          (stderr-buffer (generate-new-buffer (format " *%s-stderr*" name)))
          (finished nil)
          process)
@@ -1792,7 +1841,8 @@ is passed to CALLBACK.  Return a cancellation function."
                    (cleanup)
                    (condition-case err
                        (funcall callback
-                                (funcall formatter exit-code stdout stderr))
+                                (with-current-buffer conversation
+                                  (funcall formatter exit-code stdout stderr)))
                      (error
                       (funcall callback
                                (format "Error while processing command output: %s"
@@ -1845,7 +1895,7 @@ when non-nil, is treated as success if STDOUT is empty."
                  (if truncated " truncated=true" ""))
          (string-join shown "\n")
          (when truncated
-           (format "\n[... truncated, showing first %d of %d lines ...]"
+           (format "\n[... output truncated: showing first %d of %d lines ...]"
                    limit total))
          (unless (string-empty-p stderr)
            (concat "\n<warnings>\n" stderr "\n</warnings>"))
@@ -2733,6 +2783,8 @@ The return value is a cons of body and whether it was truncated."
 
 (defun ellm-tools--webfetch (url character-limit user-agent response-byte-limit)
   "Fetch and render URL for the `webfetch' tool."
+  ;; The parent applies CHARACTER-LIMIT so it can retain the complete rendering.
+  (ignore character-limit)
   (require 'url)
   (require 'url-parse)
   (condition-case err
@@ -2799,9 +2851,9 @@ The return value is a cons of body and whether it was truncated."
                             :title (plist-get rendered :title)
                             :readable (plist-get rendered :readable)
                             :truncated (or response-truncated output-truncated)
-                            :content (if output-truncated
-                                         (substring content 0 character-limit)
-                                       content)))))))
+                            :response-truncated response-truncated
+                            :output-truncated output-truncated
+                            :content content))))))
           (when (buffer-live-p buffer)
             (kill-buffer buffer))))
     (error
@@ -2838,14 +2890,26 @@ The return value is a cons of body and whether it was truncated."
      (when-let* ((title (plist-get result :title))
                  ((not (s-blank? title))))
        (format "Title: %s\n\n" title))
-     (plist-get result :content)
-     (when (plist-get result :truncated)
-       "\n\n[... content truncated ...]")
+     (let* ((content (plist-get result :content))
+            (output-truncated (plist-get result :output-truncated))
+            (response-truncated (plist-get result :response-truncated)))
+       (concat
+        (if output-truncated
+            (concat (substring content 0 (min (length content)
+                                             ellm-tools-webfetch-character-limit))
+                    (ellm-tools--truncation-marker
+                     "webfetch" content
+                     (format "showing first %d characters"
+                             ellm-tools-webfetch-character-limit)))
+          content)
+        (when response-truncated
+          "\n\n[... response truncated at the capture limit; omitted content is unavailable ...]")))
      "\n</webfetch>")))
 
 (defun ellm-tools--start-webfetch (url limit callback)
   "Fetch URL in a child Emacs and pass at most LIMIT characters to CALLBACK."
-  (let* ((async-process-noquery-on-exit t)
+  (let* ((conversation (current-buffer))
+         (async-process-noquery-on-exit t)
          ;; Arbitrary webpage text may match `tramp-password-prompt-regexp'.
          (async-prompt-for-password nil)
          (completed nil)
@@ -2866,8 +2930,9 @@ The return value is a cons of body and whether it was truncated."
                (funcall
                 callback
                 (condition-case err
-                    (ellm-tools--format-webfetch-result
-                     (ellm-tools--decode-webfetch-result result))
+                    (with-current-buffer conversation
+                      (ellm-tools--format-webfetch-result
+                       (ellm-tools--decode-webfetch-result result)))
                   (error
                    (format "Web fetch child failed: %s"
                            (error-message-string err))))))))))
