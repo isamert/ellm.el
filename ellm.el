@@ -7945,31 +7945,30 @@ and grouping."
 (defvar ellm-list--pending-refreshes nil
   "Conversation buffers whose displayed rows need refreshing.")
 
+(defconst ellm-list--refresh-delay 0.5
+  "Seconds to wait before refreshing coalesced session-list updates.")
+
 (defun ellm-list--schedule-refresh (conversation)
   "Refresh CONVERSATION's row shortly, coalescing bursty backend events."
-  (when (get-buffer "*ellm sessions*")
+  (when-let* ((buffer (get-buffer "*ellm sessions*"))
+              ((get-buffer-window buffer 'visible)))
     (cl-pushnew conversation ellm-list--pending-refreshes)
     (unless (timerp ellm-list--refresh-timer)
       (setq ellm-list--refresh-timer
             (run-at-time
-             0.2 nil
+             ellm-list--refresh-delay nil
              (lambda ()
                (setq ellm-list--refresh-timer nil)
                (let ((pending ellm-list--pending-refreshes))
                  (setq ellm-list--pending-refreshes nil)
                  (when-let* ((buffer (get-buffer "*ellm sessions*"))
-                             ((buffer-live-p buffer)))
+                             ((get-buffer-window buffer 'visible)))
                    (with-current-buffer buffer
                      (when (derived-mode-p 'ellm-list-mode)
-                       (let (rebuild)
-                         (dolist (conversation pending)
-                           (unless (or (ellm-list-refresh-buffer conversation)
-                                       (ellm-list--buffer-hidden-p conversation))
-                             ;; New buffers and structural changes require a
-                             ;; rebuild, but ordinary stream updates do not.
-                             (setq rebuild t)))
-                         (when rebuild
-                           (ellm-list-refresh)))))))))))))
+                       (when (ellm-list--refresh-buffers pending)
+                         ;; New buffers and structural changes require a
+                         ;; rebuild, but ordinary stream updates do not.
+                         (ellm-list-refresh))))))))))))
 
 (defun ellm-list--status (buffer)
   "Return BUFFER's concise session-list status and sorting rank."
@@ -8226,33 +8225,56 @@ Return non-nil when LOCATION's row is still present."
   (when (get-buffer-window buffer 'visible)
     (force-window-update buffer)))
 
+(defun ellm-list--refresh-buffer-row (buffer)
+  "Refresh BUFFER's displayed row without preserving point or redisplaying.
+Return non-nil when BUFFER has a row in the current list."
+  (save-excursion
+    (goto-char (point-min))
+    (when-let* ((record (ellm-list--record-at buffer))
+                (match (text-property-search-forward 'ellm-list-buffer buffer #'eq)))
+      (let* ((start (prop-match-beginning match))
+             (end (save-excursion (goto-char start) (line-beginning-position 2)))
+             (indent (get-text-property start 'ellm-list-depth))
+             (children (get-text-property start 'ellm-list-subagent-children))
+             (folded (member buffer ellm-list--folded-subagents))
+             (prefix (if children (if folded "▸ " "▾ ") "  "))
+             (inhibit-read-only t))
+        (goto-char start)
+        (delete-region start end)
+        (insert (make-string indent ? ) prefix (ellm-list--format-row record) "\n")
+        (add-text-properties
+         start (point)
+         `(ellm-list-buffer ,buffer
+                            ellm-list-subagent-children ,children
+                            ellm-list-depth ,indent
+                            mouse-face highlight))
+        t))))
+
+(defun ellm-list--refresh-buffers (buffers)
+  "Refresh displayed rows for BUFFERS in one UI transaction.
+Return non-nil when a visible row needs a full list rebuild."
+  (let ((point-location (ellm-list--point-location (point)))
+        (window-locations (ellm-list--window-locations))
+        updated
+        rebuild)
+    (dolist (buffer buffers)
+      (cond
+       ((ellm-list--refresh-buffer-row buffer)
+        (setq updated t))
+       ((not (ellm-list--buffer-hidden-p buffer))
+        (setq rebuild t))))
+    (when updated
+      (ellm-list--restore-point-location point-location)
+      (ellm-list--restore-window-locations window-locations)
+      (ellm-list--redisplay (current-buffer)))
+    rebuild))
+
 (defun ellm-list-refresh-buffer (buffer)
   "Refresh BUFFER's displayed row without rebuilding the session list.
 Return non-nil when BUFFER has a row in the current list."
   (let ((point-location (ellm-list--point-location (point)))
         (window-locations (ellm-list--window-locations))
-        updated)
-    (save-excursion
-      (goto-char (point-min))
-      (when-let* ((record (ellm-list--record-at buffer))
-                  (match (text-property-search-forward 'ellm-list-buffer buffer #'eq)))
-        (let* ((start (prop-match-beginning match))
-               (end (save-excursion (goto-char start) (line-beginning-position 2)))
-               (indent (get-text-property start 'ellm-list-depth))
-               (children (get-text-property start 'ellm-list-subagent-children))
-               (folded (member buffer ellm-list--folded-subagents))
-               (prefix (if children (if folded "▸ " "▾ ") "  "))
-               (inhibit-read-only t))
-          (goto-char start)
-          (delete-region start end)
-          (insert (make-string indent ? ) prefix (ellm-list--format-row record) "\n")
-          (add-text-properties
-           start (point)
-           `(ellm-list-buffer ,buffer
-                              ellm-list-subagent-children ,children
-                              ellm-list-depth ,indent
-                              mouse-face highlight))
-          (setq updated t))))
+        (updated (ellm-list--refresh-buffer-row buffer)))
     (when updated
       (ellm-list--restore-point-location point-location)
       (ellm-list--restore-window-locations window-locations)
