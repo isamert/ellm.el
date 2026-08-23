@@ -588,30 +588,63 @@ Return a function that stops the heartbeat."
         (setf (ellm-llm-driver-tool-activity-timers driver)
               (delq timer (ellm-llm-driver-tool-activity-timers driver)))))))
 
+(defun ellm-llm--emit-tool-observation (driver observation)
+  "Emit OBSERVATION as a non-rendering tool update for DRIVER."
+  (ellm-llm--emit driver `(:type tool-update :observations (,observation))))
+
 (defun ellm-llm--instrument-tool-activity (driver)
-  "Make DRIVER's llm.el tools emit activity until they complete."
+  "Make DRIVER's llm.el tools report their actual execution lifetime."
   (dolist (tool (llm-chat-prompt-tools (ellm-llm-driver-prompt driver)))
-    (let ((function (llm-tool-function tool)))
-      (setf
-       (llm-tool-function tool)
-       (if (llm-tool-async tool)
-           (lambda (callback &rest args)
-             (let ((stop (ellm-llm--tool-activity-start driver)))
-               (condition-case err
-                   (apply function
-                          (lambda (&rest values)
-                            (unwind-protect
-                                (apply callback values)
-                              (funcall stop)))
-                          args)
-                 (error
-                  (funcall stop)
-                  (signal (car err) (cdr err))))))
-         (lambda (&rest args)
-           (let ((stop (ellm-llm--tool-activity-start driver)))
-             (unwind-protect
-                 (apply function args)
-               (funcall stop)))))))))
+    (let ((function (llm-tool-function tool))
+          (name (llm-tool-name tool)))
+      (setf (llm-tool-function tool)
+            (if (llm-tool-async tool)
+                (lambda (callback &rest args)
+                  (let ((stop (ellm-llm--tool-activity-start driver))
+                        (finished nil))
+                    (ellm-llm--emit-tool-observation
+                     driver `(:type tool-call :name ,name :arguments ,args
+                              :backend llm))
+                    (cl-labels ((finish (outcome &optional result)
+                                       (unless finished
+                                         (setq finished t)
+                                         (ellm-llm--emit-tool-observation
+                                          driver
+                                          `(:type tool-finished :name ,name
+                                            :outcome ,outcome :result ,result
+                                            :backend llm)))))
+                      (condition-case err
+                          (apply function
+                                 (lambda (&rest values)
+                                   (finish 'completed (car values))
+                                   (unwind-protect
+                                       (apply callback values)
+                                     (funcall stop)))
+                                 args)
+                        (error
+                         (finish 'failed (error-message-string err))
+                         (funcall stop)
+                         (signal (car err) (cdr err)))))))
+              (lambda (&rest args)
+                (let ((stop (ellm-llm--tool-activity-start driver)))
+                  (ellm-llm--emit-tool-observation
+                   driver `(:type tool-call :name ,name :arguments ,args
+                            :backend llm))
+                  (unwind-protect
+                      (condition-case err
+                          (let ((result (apply function args)))
+                            (ellm-llm--emit-tool-observation
+                             driver `(:type tool-finished :name ,name
+                                      :outcome completed :result ,result
+                                      :backend llm))
+                            result)
+                        (error
+                         (ellm-llm--emit-tool-observation
+                          driver `(:type tool-finished :name ,name
+                                   :outcome failed :result ,(error-message-string err)
+                                   :backend llm))
+                         (signal (car err) (cdr err))))
+                    (funcall stop)))))))))
 
 (defun ellm-llm--collect-tool-call-args (tool-call-turn following-turns base-prompt)
   "Return (ARGS . TURNS-CONSUMED) for TOOL-CALL-TURN."
@@ -1042,27 +1075,6 @@ chat token limit supplies the corresponding context size when available."
      (and (numberp context-size) (> context-size 0)
           (list :context-size context-size)))))
 
-(defun ellm-llm--tool-observations (tool-uses tool-results ids)
-  "Return normalized lifecycle observations for llm.el tool batches using IDS."
-  (append
-   (cl-loop for tool-use in tool-uses
-            for id in ids
-            collect (list :type 'tool-call
-                          :id id
-                          :name (plist-get tool-use :name)
-                          :arguments (plist-get tool-use :args)
-                          :backend 'llm :backend-data tool-use))
-   (cl-loop for result in tool-results
-            for index from 0
-            for tool-use = (nth index tool-uses)
-            for id = (nth index ids)
-            collect (list :type 'tool-finished
-                          :id id
-                          :name (or (plist-get tool-use :name) (car-safe result))
-                          :result (cdr-safe result)
-                          :outcome 'completed
-                          :backend 'llm :backend-data result))))
-
 (cl-defmethod ellm-backend-start ((driver ellm-llm-driver) emit)
   "Start or resume one llm.el leg and emit normalized events."
   (setf (ellm-llm-driver-emit driver) emit)
@@ -1110,10 +1122,7 @@ chat token limit supplies the corresponding context size when available."
                                  driver
                                  `(:type tool-call :kind tool-batch
                                    :tool-uses ,tool-uses :tool-results ,tool-results
-                                   :call-ids ,call-ids :tool-call-ids ,tool-call-ids
-                                   :observations
-                                   ,(ellm-llm--tool-observations
-                                     tool-uses tool-results tool-call-ids))))
+                                   :call-ids ,call-ids :tool-call-ids ,tool-call-ids)))
                               (ellm-llm--canonicalize-new-interactions
                                prompt previous-interaction)
                               (cl-incf (ellm-llm-driver-leg driver))
