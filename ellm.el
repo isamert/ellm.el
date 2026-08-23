@@ -7997,30 +7997,38 @@ and grouping."
 (defvar ellm-list--pending-refreshes nil
   "Conversation buffers whose displayed rows need refreshing.")
 
+(defvar ellm-list--hidden-dirty nil
+  "Whether updates were skipped while the session list was hidden.")
+
 (defconst ellm-list--refresh-delay 0.5
   "Seconds to wait before refreshing coalesced session-list updates.")
 
 (defun ellm-list--schedule-refresh (conversation)
   "Refresh CONVERSATION's row shortly, coalescing bursty backend events."
-  (when-let* ((buffer (get-buffer "*ellm sessions*"))
-              ((get-buffer-window buffer 'visible)))
-    (cl-pushnew conversation ellm-list--pending-refreshes)
-    (unless (timerp ellm-list--refresh-timer)
-      (setq ellm-list--refresh-timer
-            (run-at-time
-             ellm-list--refresh-delay nil
-             (lambda ()
-               (setq ellm-list--refresh-timer nil)
-               (let ((pending ellm-list--pending-refreshes))
-                 (setq ellm-list--pending-refreshes nil)
-                 (when-let* ((buffer (get-buffer "*ellm sessions*"))
-                             ((get-buffer-window buffer 'visible)))
-                   (with-current-buffer buffer
-                     (when (derived-mode-p 'ellm-list-mode)
-                       (when (ellm-list--refresh-buffers pending)
-                         ;; New buffers and structural changes require a
-                         ;; rebuild, but ordinary stream updates do not.
-                         (ellm-list-refresh))))))))))))
+  (when-let* ((buffer (get-buffer "*ellm sessions*")))
+    (if (get-buffer-window buffer 'visible)
+        (progn
+          (cl-pushnew conversation ellm-list--pending-refreshes)
+          (unless (timerp ellm-list--refresh-timer)
+            (setq ellm-list--refresh-timer
+                  (run-at-time
+                   ellm-list--refresh-delay nil
+                   (lambda ()
+                     (setq ellm-list--refresh-timer nil)
+                     (let ((pending ellm-list--pending-refreshes))
+                       (setq ellm-list--pending-refreshes nil)
+                       (when-let* ((buffer (get-buffer "*ellm sessions*")))
+                         (if (get-buffer-window buffer 'visible)
+                             (with-current-buffer buffer
+                               (when (derived-mode-p 'ellm-list-mode)
+                                 (when (ellm-list--refresh-buffers pending)
+                                   ;; New buffers and structural changes require a
+                                   ;; rebuild, but ordinary stream updates do not.
+                                   (ellm-list-refresh))))
+                           ;; The list disappeared before the coalesced update
+                           ;; ran, so replay it as a full refresh on display.
+                           (setq ellm-list--hidden-dirty t)))))))))
+      (setq ellm-list--hidden-dirty t))))
 
 (defun ellm-list--status (buffer)
   "Return BUFFER's concise session-list status and sorting rank."
@@ -8355,7 +8363,8 @@ Return non-nil when BUFFER has a row in the current list."
     (unless (ellm-list--restore-point-location point-location)
       (goto-char (point-min)))
     (ellm-list--restore-window-locations window-locations)
-    (ellm-list--redisplay (current-buffer))))
+    (ellm-list--redisplay (current-buffer))
+    (setq ellm-list--hidden-dirty nil)))
 
 (defun ellm-list-toggle-subagents ()
   "Toggle subagent rows below the parent conversation at point."
@@ -8476,6 +8485,14 @@ Return non-nil when BUFFER has a row in the current list."
    (lambda (key command)
      (evil-define-key* 'normal ellm-list-mode-map key command))))
 
+(defun ellm-list--refresh-on-display (window)
+  "Refresh this session list after it is displayed in WINDOW.
+Automatic updates are skipped while the list is hidden, so rebuild from live
+conversation state only when such updates were skipped."
+  (with-current-buffer (window-buffer window)
+    (when ellm-list--hidden-dirty
+      (ellm-list-refresh))))
+
 (define-derived-mode ellm-list-mode special-mode "eLLM Sessions"
   "Mode for browsing ellm conversations by project or directory.
 \\<ellm-list-mode-map>\\[ellm-list-toggle-at-point] toggles subagents or the group at point,
@@ -8483,7 +8500,9 @@ Return non-nil when BUFFER has a row in the current list."
 \\[ellm-list-cancel] cancels, \\[ellm-list-answer-prompt] answers input,
 and \\[ellm-list-kill] kills the selected conversation."
   (setq-local truncate-lines t)
-  (add-to-invisibility-spec '(ellm-list-group . t)))
+  (add-to-invisibility-spec '(ellm-list-group . t))
+  (add-hook 'window-buffer-change-functions
+            #'ellm-list--refresh-on-display nil t))
 
 ;;;###autoload
 (defun ellm-list ()
