@@ -3468,6 +3468,17 @@ output buffer."
           buffer))
       (error "retained tool output is unavailable: %s" id)))
 
+;;;###autoload
+(defun ellm-switch-to-tool-output-buffer ()
+  "Switch to a retained tool-output buffer from the current conversation."
+  (interactive nil ellm-mode)
+  (let ((ids (ellm--tool-output-ids)))
+    (unless ids
+      (user-error "No retained tool outputs found"))
+    (switch-to-buffer
+     (ellm-tool-output-buffer
+      (completing-read "Switch to tool output: " ids nil t)))))
+
 (defun ellm--persist-tool-output-buffers ()
   "Persist retained tool output buffers for the current conversation."
   (dolist (id (ellm--tool-output-ids))
