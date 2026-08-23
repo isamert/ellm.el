@@ -1077,13 +1077,58 @@ and `set-face-attribute' calls safe in non-graphical contexts."
   "Face used for text inside reasoning turn bodies."
   :group 'ellm)
 
+(defface ellm-list-status-input
+  '((t :inherit warning :weight bold))
+  "Face for sessions awaiting user input."
+  :group 'ellm)
+
+(defface ellm-list-status-active
+  '((t :inherit font-lock-keyword-face :weight bold))
+  "Face for sessions with an active request."
+  :group 'ellm)
+
+(defface ellm-list-status-working
+  '((t :inherit font-lock-constant-face :weight bold))
+  "Face for sessions performing background work."
+  :group 'ellm)
+
+(defface ellm-list-status-ready
+  '((t :inherit success))
+  "Face for idle sessions."
+  :group 'ellm)
+
+(defface ellm-list-secondary
+  '((t :inherit shadow))
+  "Face for secondary session-list columns."
+  :group 'ellm)
+
+(defface ellm-list-title
+  '((t :inherit default :weight bold))
+  "Face for session-list conversation titles."
+  :group 'ellm)
+
+(defface ellm-list-group-heading
+  `((t :inherit bold :background ,(ellm--alt-bg) :extend t))
+  "Face for session-list group headings."
+  :group 'ellm)
+
+(defface ellm-list-pulse-success
+  '((t :inherit (pulse-highlight-start-face success)))
+  "Pulse face for sessions that have just finished."
+  :group 'ellm)
+
+(defface ellm-list-pulse-warning
+  '((t :inherit (pulse-highlight-start-face warning)))
+  "Pulse face for sessions that now require attention."
+  :group 'ellm)
+
 ;;;;; Keep faces in sync with theme
 
 (defun ellm--update-faces (&rest _)
   "Update calculated face backgrounds after a theme change."
   (let ((alt-bg (ellm--alt-bg)))
     (dolist (face '(ellm-block ellm-inline-code ellm-frontmatter
-                    ellm-code-block-delimiter))
+                    ellm-code-block-delimiter ellm-list-group-heading))
       (set-face-attribute face nil :background alt-bg)))
   (ellm--apply-heading-rescale ellm-heading-rescale))
 
@@ -7981,13 +8026,13 @@ with `record' bound to the session record plist.  Add NAME to
   ;; tabulated lists render literal text instead.
   (replace-regexp-in-string "%%" "%" (or (plist-get record :context) "")))
 
-(ellm-list-define-column todos (:width 9 :title "Todos")
+(ellm-list-define-column todos (:width 5 :title "Todos")
   (or (plist-get record :todos) ""))
 
-(ellm-list-define-column title (:width 0 :title "Conversation")
+(ellm-list-define-column title (:width 50 :title "Conversation")
   (plist-get record :title))
 
-(defcustom ellm-list-columns '(status model context todos title)
+(defcustom ellm-list-columns '(status todos title context model)
   "Columns shown by `ellm-list'.
 Use `ellm-list-define-column' to register additional columns.  Columns are
 rendered from session records, keeping presentation separate from collection
@@ -8150,14 +8195,48 @@ Subagents whose parent cannot be found remain top-level records."
       (format (format "%%-%ds" width)
               (truncate-string-to-width value width nil nil "…")))))
 
+(defun ellm-list--status-face (status)
+  "Return the face for session-list STATUS."
+  (pcase status
+    ("Input required" 'ellm-list-status-input)
+    ("Streaming" 'ellm-list-status-active)
+    ((or "Using tools" "Retrying" "Cancelling" "Working")
+     'ellm-list-status-working)
+    ("Ready" 'ellm-list-status-ready)))
+
+(defun ellm-list--column-face (column record)
+  "Return the display face for COLUMN in session RECORD."
+  (pcase column
+    ('status (ellm-list--status-face (plist-get record :status)))
+    ((or 'model 'context 'todos) 'ellm-list-secondary)
+    ('title 'ellm-list-title)))
+
 (defun ellm-list--format-row (record)
   "Return one aligned display row for session RECORD."
   (string-join
    (mapcar (lambda (column)
-             (ellm-list--format-column (ellm-list--column-value record column)
-                                       column))
+             (let ((value (ellm-list--format-column
+                           (ellm-list--column-value record column) column)))
+               (if-let* ((face (ellm-list--column-face column record)))
+                   (propertize value 'face face)
+                 value)))
            ellm-list-columns)
    "  "))
+
+(defun ellm-list--transition-pulse-face (previous current)
+  "Return a pulse face for the status transition from PREVIOUS to CURRENT."
+  (cond
+   ((and (equal current "Input required")
+         (not (equal previous current)))
+    'ellm-list-pulse-warning)
+   ((and (equal current "Ready")
+         (member previous '("Streaming" "Using tools" "Retrying" "Working")))
+    'ellm-list-pulse-success)))
+
+(defun ellm-list--pulse-row (start end previous status)
+  "Pulse the row from START to END for a terminal status transition."
+  (when-let* ((face (ellm-list--transition-pulse-face previous status)))
+    (pulse-momentary-highlight-region start end face)))
 
 (defun ellm-list--groups ()
   "Return top-level session records grouped and ordered for rendering."
@@ -8224,6 +8303,7 @@ When NOERROR is non-nil, return nil on a group heading or unrelated line."
     (add-text-properties
      start (point)
      `(ellm-list-buffer ,buffer
+                        ellm-list-status ,(plist-get record :status)
                         ellm-list-subagent-children ,children
                         ellm-list-depth ,indent
                         mouse-face highlight))
@@ -8299,6 +8379,7 @@ Return non-nil when BUFFER has a row in the current list."
       (let* ((start (prop-match-beginning match))
              (end (save-excursion (goto-char start) (line-beginning-position 2)))
              (indent (get-text-property start 'ellm-list-depth))
+             (previous-status (get-text-property start 'ellm-list-status))
              (children (get-text-property start 'ellm-list-subagent-children))
              (folded (member buffer ellm-list--folded-subagents))
              (prefix (if children (if folded "▸ " "▾ ") "  "))
@@ -8309,9 +8390,12 @@ Return non-nil when BUFFER has a row in the current list."
         (add-text-properties
          start (point)
          `(ellm-list-buffer ,buffer
+                            ellm-list-status ,(plist-get record :status)
                             ellm-list-subagent-children ,children
                             ellm-list-depth ,indent
                             mouse-face highlight))
+        (ellm-list--pulse-row start (point) previous-status
+                              (plist-get record :status))
         t))))
 
 (defun ellm-list--refresh-buffers (buffers)
@@ -8359,7 +8443,7 @@ Return non-nil when BUFFER has a row in the current list."
         (insert (format "%s %s\n" (if folded "▸" "▾")
                         (plist-get group-data :label)))
         (add-text-properties heading-start (point)
-                             `(ellm-list-group ,key face bold mouse-face highlight))
+                             `(ellm-list-group ,key face ellm-list-group-heading mouse-face highlight))
         (unless folded
           (dolist (record (plist-get group-data :records))
             (ellm-list--insert-record record 1)))))
@@ -8504,6 +8588,7 @@ conversation state only when such updates were skipped."
 \\[ellm-list-cancel] cancels, \\[ellm-list-answer-prompt] answers input,
 and \\[ellm-list-kill] kills the selected conversation."
   (setq-local truncate-lines t)
+  (hl-line-mode 1)
   (add-to-invisibility-spec '(ellm-list-group . t))
   (add-hook 'window-buffer-change-functions
             #'ellm-list--refresh-on-display nil t))
