@@ -566,6 +566,14 @@ mean that the local tool succeeded."
   :type 'hook
   :group 'ellm)
 
+(defcustom ellm-tool-permission-argument-limit 500
+  "Maximum number of argument characters shown in a local tool permission prompt.
+
+Longer argument displays are truncated with an omission count.  Whitespace is
+collapsed so a multiline argument cannot make the prompt fill the screen."
+  :type 'natnum
+  :group 'ellm)
+
 (defcustom ellm-before-permission-hook nil
   "Hook run before ellm queues a normalized permission prompt.
 Each function receives REQUEST and normalized PERMISSION data."
@@ -4338,6 +4346,16 @@ precedence over category selectors, which take precedence over `default'."
       (_ (user-error "ellm: invalid tool permission policy for `%s': %s"
                      (if entry (car entry) "default") value)))))
 
+(defun ellm--format-tool-permission-arguments (args)
+  "Return a bounded single-line representation of local tool ARGS."
+  (let* ((text (replace-regexp-in-string "[[:space:]]+" " "
+                                        (prin1-to-string args)))
+         (limit ellm-tool-permission-argument-limit))
+    (if (> (length text) limit)
+        (format "%s… (%d characters omitted)"
+                (substring text 0 limit) (- (length text) limit))
+      text)))
+
 (defun ellm--authorize-tool-call (request tool args respond)
   "Authorize local TOOL called with ARGS for REQUEST, then call RESPOND.
 RESPOND receives `allow' or `deny'.  An `ask' policy presents run-once,
@@ -4361,7 +4379,7 @@ allow-for-session, and deny choices through the core permission UI."
                (list :title (format "Run %s?" name)
                      :description
                      (format "Allow local tool `%s` to run with arguments:\n%s"
-                             name (prin1-to-string args)))
+                             name (ellm--format-tool-permission-arguments args)))
                :options '((:id "allow-once" :name "Run once")
                           (:id "allow-session" :name "Allow for session")
                           (:id "deny" :name "Deny"))
