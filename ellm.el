@@ -3303,7 +3303,7 @@ Templates are memoized by exact text across frontmatter and system turns."
   "Clear memoized system prompts in the current conversation buffer.
 When QUIET is non-nil, do not report the change.  An already-created request
 keeps its resolved prompt; clearing the cache only affects future requests."
-  (interactive)
+  (interactive nil ellm-mode)
   (unless (derived-mode-p 'ellm-mode)
     (user-error "ellm: not in an ellm buffer"))
   (ellm--clear-system-prompt-cache)
@@ -3312,7 +3312,7 @@ keeps its resolved prompt; clearing the cache only affects future requests."
 
 (defun ellm-show-effective-system-prompts ()
   "Show cached effective system prompts without evaluating templates."
-  (interactive)
+  (interactive nil ellm-mode)
   (unless (derived-mode-p 'ellm-mode)
     (user-error "ellm: not in an ellm buffer"))
   (let* ((frontmatter (ellm--parse-frontmatter))
@@ -4663,7 +4663,7 @@ When SUPPRESS-NEXT is non-nil, do not activate the next queued prompt."
 
 (defun ellm-answer-prompt ()
   "Answer the active agent prompt in the current ellm buffer."
-  (interactive)
+  (interactive nil ellm-mode)
   (if ellm--active-user-prompt
       (ellm--activate-user-prompt ellm--active-user-prompt)
     (user-error "ellm: no input is pending")))
@@ -6257,7 +6257,7 @@ Turn delimiter lines belong to their following turn."
   "Jump between a tool call and its result at point.
 
 The tool call and result must have matching `id' attributes."
-  (interactive)
+  (interactive nil ellm-mode)
   (unless (derived-mode-p 'ellm-mode)
     (user-error "ellm: this command requires an ellm buffer"))
   (let* ((turn (ellm--tool-turn-at-point))
@@ -6322,7 +6322,7 @@ The result is (BODY-BEG . BODY-END), and never crosses the current turn."
 
 (defun ellm-toggle-tag ()
   "Toggle folding of the prompt tag beginning on the current line."
-  (interactive)
+  (interactive nil ellm-mode)
   (if-let* ((bounds (ellm--tag-fold-bounds-at-point)))
       (outline-flag-region (car bounds) (cdr bounds)
                            (not (invisible-p (car bounds))))
@@ -6353,13 +6353,13 @@ The result is (BODY-BEG . BODY-END), and never crosses the current turn."
 
 (defun ellm-fold-all-tags ()
   "Fold all complete prompt tags in the current buffer."
-  (interactive)
+  (interactive nil ellm-mode)
   (pcase-dolist (`(,beg . ,end) (ellm--tag-fold-regions))
     (outline-flag-region beg end t)))
 
 (defun ellm-unfold-all-tags ()
   "Unfold all complete prompt tags in the current buffer."
-  (interactive)
+  (interactive nil ellm-mode)
   (pcase-dolist (`(,beg . ,end) (ellm--tag-fold-regions))
     (outline-flag-region beg end nil)))
 
@@ -6512,20 +6512,20 @@ Nested turns are folded as part of their nearest matching ancestor."
   "Fold all tool call and tool result blocks in the current buffer.
 This command ignores `ellm-fold-tool-calls', which only controls
 automatic folding."
-  (interactive)
+  (interactive nil ellm-mode)
   (ellm--fold-turns-with-roles '("tool-call" "tool-result")))
 
 (defun ellm-fold-all-reasoning-blocks ()
   "Fold all reasoning blocks in the current buffer.
 This command ignores `ellm-fold-reasoning-blocks', which only controls
 automatic folding."
-  (interactive)
+  (interactive nil ellm-mode)
   (ellm--fold-turns-with-roles '("reasoning")))
 
 (defun ellm-fold-all-blocks ()
   "Fold all tool and reasoning blocks in the current buffer.
 This command ignores the automatic folding customization values."
-  (interactive)
+  (interactive nil ellm-mode)
   (ellm--fold-turns-with-roles '("tool-call" "tool-result" "reasoning")))
 
 (defun ellm--fold-configured-turns ()
@@ -6829,7 +6829,7 @@ selected, select it rather than hiding it."
 
 (defun ellm-narrow-to-turn ()
   "Narrow buffer to the outline subtree at point."
-  (interactive)
+  (interactive nil ellm-mode)
   (save-excursion
     (outline-back-to-heading t)
     (let ((start (point)))
@@ -6840,7 +6840,7 @@ selected, select it rather than hiding it."
   "Narrow buffer to the Markdown heading section at point.
 Searches backward for the nearest Markdown heading if point is not on
 one, then narrows to its outline subtree."
-  (interactive)
+  (interactive nil ellm-mode)
   (save-excursion
     (forward-line 0)
     ;; If not already on a markdown heading, search backward for one,
@@ -6861,7 +6861,7 @@ one, then narrows to its outline subtree."
 
 (defun ellm-narrow-dwim ()
   "Narrow to Markdown heading at point, or to turn subtree if not on a heading."
-  (interactive)
+  (interactive nil ellm-mode)
   (unless (ignore-errors (ellm-narrow-to-header))
     (ellm-narrow-to-turn)))
 
@@ -7002,7 +7002,7 @@ Otherwise move point to the real trailing user turn in the conversation."
   "Send the next-prompt draft when its conversation is ready.
 
 While the request is still active, retain the draft for review when it ends."
-  (interactive)
+  (interactive nil ellm-compose-mode)
   (unless (derived-mode-p 'ellm-compose-mode)
     (user-error "ellm: not in a next-prompt draft"))
   (let ((conversation ellm--composer-conversation))
@@ -7018,7 +7018,7 @@ While the request is still active, retain the draft for review when it ends."
 
 (defun ellm-compose-cancel ()
   "Discard the current next-prompt draft without cancelling its request."
-  (interactive)
+  (interactive nil ellm-compose-mode)
   (unless (derived-mode-p 'ellm-compose-mode)
     (user-error "ellm: not in a next-prompt draft"))
   (when (and (not (string-blank-p (buffer-string)))
@@ -7055,7 +7055,7 @@ Backend drivers emit events; the core request state machine owns all
 lifecycle transitions and buffer finalization.
 
 Errors during streaming are signalled normally."
-  (interactive)
+  (interactive nil ellm-mode)
   (let ((ellm--prompt-interpolation-confirm-allowed
          (called-interactively-p 'interactive)))
     (ellm--ensure-no-config-in-flight)
@@ -7117,7 +7117,7 @@ Errors during streaming are signalled normally."
 (defun ellm-cancel (&optional quiet)
   "Cancel the in-flight LLM request for this buffer, if any.
 If QUIET is non-nil, then do not print any messages."
-  (interactive)
+  (interactive nil ellm-mode)
   (if (not ellm--active-request)
       (unless quiet
         (message "ellm: no active request"))
@@ -7425,7 +7425,7 @@ With prefix argument REMOVE, remove the selected frontmatter setting instead."
 
 (defun ellm-start-session ()
   "Start/login the backend session without sending a prompt."
-  (interactive)
+  (interactive nil ellm-mode)
   (ellm--ensure-no-config-in-flight)
   (when ellm--active-request
     (user-error "ellm: a request is already in flight; M-x ellm-cancel"))
@@ -8431,7 +8431,7 @@ Return non-nil when BUFFER has a row in the current list."
 
 (defun ellm-list-refresh ()
   "Refresh the ellm session list while retaining point on its current row."
-  (interactive)
+  (interactive nil ellm-list-mode)
   (let ((point-location (ellm-list--point-location (point)))
         (window-locations (ellm-list--window-locations))
         (inhibit-read-only t))
@@ -8456,7 +8456,7 @@ Return non-nil when BUFFER has a row in the current list."
 
 (defun ellm-list-toggle-subagents ()
   "Toggle subagent rows below the parent conversation at point."
-  (interactive)
+  (interactive nil ellm-list-mode)
   (let* ((start (line-beginning-position))
          (buffer (ellm-list--buffer-at-point))
          (children (get-text-property start 'ellm-list-subagent-children)))
@@ -8474,14 +8474,14 @@ Return non-nil when BUFFER has a row in the current list."
 
 (defun ellm-list-toggle-at-point ()
   "Toggle subagents for a parent row, otherwise toggle its containing group."
-  (interactive)
+  (interactive nil ellm-list-mode)
   (if (get-text-property (point) 'ellm-list-subagent-children)
       (ellm-list-toggle-subagents)
     (ellm-list-toggle-group)))
 
 (defun ellm-list-toggle-group ()
   "Toggle visibility of the project or directory group at point."
-  (interactive)
+  (interactive nil ellm-list-mode)
   (let ((group (ellm-list--group-at-point)))
     (unless group
       (user-error "ellm: no project or directory group at point"))
@@ -8493,23 +8493,23 @@ Return non-nil when BUFFER has a row in the current list."
 
 (defun ellm-list-cycle-groups ()
   "Fold every expanded group, or unfold every group when all are folded."
-  (interactive)
+  (interactive nil ellm-list-mode)
   (let ((groups (mapcar (lambda (group) (plist-get group :key))
                         (ellm-list--groups))))
     (setq ellm-list--folded-groups
           (if (cl-every (lambda (group) (member group ellm-list--folded-groups)) groups)
               nil
             groups))
-  (ellm-list-refresh)))
+    (ellm-list-refresh)))
 
 (defun ellm-list-visit ()
   "Visit the conversation at point without changing its cursor position."
-  (interactive)
+  (interactive nil ellm-list-mode)
   (pop-to-buffer (ellm-list--buffer-at-point)))
 
 (defun ellm-list-cancel ()
   "Cancel the active request for the conversation at point, retaining point."
-  (interactive)
+  (interactive nil ellm-list-mode)
   (let ((buffer (ellm-list--buffer-at-point)))
     (with-current-buffer buffer
       (ellm-cancel))
@@ -8517,14 +8517,14 @@ Return non-nil when BUFFER has a row in the current list."
 
 (defun ellm-list-answer-prompt ()
   "Answer the pending prompt for the conversation at point."
-  (interactive)
+  (interactive nil ellm-list-mode)
   (let ((buffer (ellm-list--buffer-at-point)))
     (pop-to-buffer buffer)
     (ellm-answer-prompt)))
 
 (defun ellm-list-kill ()
   "Kill the conversation at point, retaining point on the nearest row."
-  (interactive)
+  (interactive nil ellm-list-mode)
   (let* ((start (line-beginning-position))
          (buffer (ellm-list--buffer-at-point))
          (children (get-text-property start 'ellm-list-subagent-children))
