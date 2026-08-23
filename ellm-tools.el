@@ -3226,6 +3226,13 @@ The return value is a cons of body and whether it was truncated."
 
 ;;;;;; Edit tool
 
+(defun ellm-tools--set-file-edit-buffer-mode (file-path)
+  "Select the syntax mode needed by checks for a temporary file-edit buffer."
+  (when (string-equal (downcase (or (file-name-extension file-path) ""))
+                      "el")
+    (delay-mode-hooks
+      (emacs-lisp-mode))))
+
 (defun ellm-tools-file-edit-check-elisp-parens (file-path buffer callback)
   "Report an unmatched delimiter in Emacs Lisp FILE-PATH, if any.
 BUFFER contains the edited contents.  CALLBACK receives nil when the contents
@@ -3443,6 +3450,7 @@ exactly one occurrence."
               (buffer (generate-new-buffer " *ellm-tools-edit*")))
           (with-current-buffer buffer
             (insert new-string)
+            (ellm-tools--set-file-edit-buffer-mode file-path)
             (set-buffer-modified-p nil))
           (finish result buffer t)))
        ((bufferp buffer-or-file)
@@ -3455,6 +3463,7 @@ exactly one occurrence."
           (condition-case err
               (with-current-buffer buffer
                 (insert-file-contents file-path)
+                (ellm-tools--set-file-edit-buffer-mode file-path)
                 (let ((result (ellm-tools--do-edit
                                old-string new-string replace-all name)))
                   (write-region (point-min) (point-max) file-path nil 'silent)
