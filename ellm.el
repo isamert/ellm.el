@@ -6506,6 +6506,18 @@ Without INCLUDE-SUBAGENTS, omit subagent buffers."
         (member (if (consp candidate) (car candidate) candidate)
                 names))))))
 
+(defun ellm--select-ellm-buffer (prompt buffers &optional prefer-visible)
+  "Select an ellm buffer from BUFFERS using PROMPT.
+Return the sole buffer without prompting.  When PREFER-VISIBLE is non-nil,
+return a visible buffer before prompting among multiple buffers."
+  (cond
+   ((null (cdr buffers)) (car buffers))
+   (prefer-visible
+    (or (cl-find-if (lambda (buffer) (get-buffer-window buffer 'visible)) buffers)
+        (ellm--read-project-buffer prompt buffers)))
+   (t
+    (ellm--read-project-buffer prompt buffers))))
+
 ;;;###autoload
 (defun ellm-switch-to-project-buffer (&optional include-subagents)
   "Switch to an ellm buffer belonging to the current project.
@@ -6624,10 +6636,8 @@ new target conversation outside an ellm buffer."
 When NEW is non-nil, always create a new buffer."
   (let ((buffers (and (not new) (ellm--project-buffers root))))
     (cond
-     ((and (not new) (= (length buffers) 1))
-      (car buffers))
-     ((and (not new) (> (length buffers) 1))
-      (ellm--read-project-buffer "Switch to ellm buffer: " buffers))
+     ((and (not new) buffers)
+      (ellm--select-ellm-buffer "Switch to ellm buffer: " buffers t))
      (t
       (let ((default-directory root))
         (save-window-excursion
@@ -6878,14 +6888,18 @@ when the request ends as well."
 (defun ellm-compose ()
   "Edit the next user prompt.
 
-During an active request, display its separate draft buffer.  Otherwise move
-point to the real trailing user turn in the current conversation."
+Outside an ellm buffer, select a conversation for the current project or
+directory.  During an active request, display its separate draft buffer.
+Otherwise move point to the real trailing user turn in the conversation."
   (interactive)
   (cond
    ((derived-mode-p 'ellm-compose-mode)
     (goto-char (point-max)))
    ((not (derived-mode-p 'ellm-mode))
-    (user-error "ellm: not in an ellm conversation"))
+    (switch-to-buffer
+     (ellm--select-or-create-project-buffer
+      (ellm--current-project-root-or-directory)))
+    (ellm-compose))
    (ellm--active-request
     (let ((conversation (current-buffer))
           (configuration (current-window-configuration)))
