@@ -2213,12 +2213,21 @@ When DEFER-REBUILD is non-nil, fontification will create the initial rules."
       (widen)
       (remove-overlays (point-min) (point-max) 'ellm-rule t))))
 
+(defmacro ellm--with-ellm-buffers (buffer &rest body)
+  "Evaluate BODY in each visible ellm buffer, binding BUFFER to it."
+  (declare (indent 1) (debug (symbolp body)))
+  (let ((current-buffer (make-symbol "buffer")))
+    `(dolist (,current-buffer (buffer-list))
+       (with-current-buffer ,current-buffer
+         (when (and (derived-mode-p 'ellm-mode)
+                    (not (string-prefix-p " " (buffer-name ,current-buffer))))
+           (let ((,buffer ,current-buffer))
+             ,@body))))))
+
 (defun ellm--refresh-turn-rules-all-buffers ()
   "Apply `ellm-turn-rules' to all existing ellm buffers."
-  (dolist (buffer (buffer-list))
-    (with-current-buffer buffer
-      (when (derived-mode-p 'ellm-mode)
-        (ellm--configure-turn-rules)))))
+  (ellm--with-ellm-buffers _
+    (ellm--configure-turn-rules)))
 
 ;;;;; Pretty separators
 
@@ -2363,10 +2372,8 @@ the user can edit it without the glyph reappearing on every keystroke."
 
 (defun ellm--refresh-pretty-separators-all-buffers (&rest _)
   "Refresh pretty-separator overlays in all `ellm-mode' buffers."
-  (dolist (buf (buffer-list))
-    (with-current-buffer buf
-      (when (derived-mode-p 'ellm-mode)
-        (ellm--put-pretty-separators (point-min) (point-max))))))
+  (ellm--with-ellm-buffers _
+    (ellm--put-pretty-separators (point-min) (point-max))))
 
 ;;;; Buffer parsing
 
@@ -6362,16 +6369,15 @@ according to `ellm-fold-tool-calls' / `ellm-fold-reasoning-blocks'."
          (expand-file-name (or ellm--base-default-directory default-directory))))))
 
 (defun ellm--project-buffers (root &optional include-subagents)
-  "Return ellm buffers rooted at ROOT.
+  "Return visible ellm buffers rooted at ROOT.
 Without INCLUDE-SUBAGENTS, omit subagent buffers."
   (let (buffers)
-    (dolist (buffer (buffer-list) (nreverse buffers))
-      (when (and (with-current-buffer buffer
-                   (and (derived-mode-p 'ellm-mode)
-                        (or include-subagents
-                            (not (bound-and-true-p ellm-subagent-id)))))
+    (ellm--with-ellm-buffers buffer
+      (when (and (or include-subagents
+                     (not (bound-and-true-p ellm-subagent-id)))
                  (equal root (ellm--buffer-root-or-directory buffer)))
-        (push buffer buffers)))))
+        (push buffer buffers)))
+    (nreverse buffers)))
 
 (defun ellm--read-project-buffer (prompt buffers)
   "Read an ellm buffer from BUFFERS using PROMPT."
@@ -7917,14 +7923,11 @@ directory so an explicit `cwd:' does not unexpectedly move a conversation."
            (> (plist-get left :activity) (plist-get right :activity)))))
 
 (defun ellm-list--records ()
-  "Return all live ellm conversation records, most active first."
-  (sort
-   (delq nil
-         (mapcar (lambda (buffer)
-                   (when (with-current-buffer buffer (derived-mode-p 'ellm-mode))
-                     (ellm-list--record buffer)))
-                 (buffer-list)))
-   #'ellm-list--record-less-p))
+  "Return all visible ellm conversation records, most active first."
+  (let (records)
+    (ellm--with-ellm-buffers buffer
+      (push (ellm-list--record buffer) records))
+    (sort (nreverse records) #'ellm-list--record-less-p)))
 
 (defun ellm-list--subagent-tree (records)
   "Attach subagent RECORDS to their live parent records.
