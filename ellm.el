@@ -4364,7 +4364,11 @@ allow-for-session, and deny choices through the core permission UI."
                              name (prin1-to-string args)))
                :options '((:id "allow-once" :name "Run once")
                           (:id "allow-session" :name "Allow for session")
-                          (:id "deny" :name "Deny")))
+                          (:id "deny" :name "Deny"))
+               :automatic-outcome
+               (lambda ()
+                 (and (member name (ellm-request-tool-session-permissions request))
+                      '(:status selected :value "allow-session"))))
          (lambda (decision)
            (when (equal decision "allow-session")
              (setf (ellm-request-tool-session-permissions request)
@@ -4464,7 +4468,11 @@ explicitly marked `:retryable' and the core retry budget remains.")
   (activated
    nil
    :type t
-   :documentation "Nil while queued, non-nil while active, or `resolved'."))
+   :documentation "Nil while queued, non-nil while active, or `resolved'.")
+  (automatic-outcome
+   nil
+   :type (or null function)
+   :documentation "Function returning an outcome when this prompt no longer needs input."))
 
 (defvar-local ellm--user-prompt-queue nil
   "FIFO queue of `ellm-user-prompt' records for the current buffer.")
@@ -4529,8 +4537,11 @@ When SUPPRESS-NEXT is non-nil, do not activate the next queued prompt."
   "Read and resolve pending PROMPT with a standard Emacs reader."
   (when (and (ellm-user-prompt-p prompt)
              (not (ellm-user-prompt-activated prompt)))
-    (setf (ellm-user-prompt-activated prompt) t)
-    (condition-case err
+    (if-let* ((automatic-outcome (ellm-user-prompt-automatic-outcome prompt))
+              (outcome (funcall automatic-outcome)))
+        (ellm--resolve-user-prompt prompt outcome)
+      (setf (ellm-user-prompt-activated prompt) t)
+      (condition-case err
         (let* ((title (or (ellm-user-prompt-title prompt) "Input required"))
                (message (ellm-user-prompt-message prompt))
                (options (ellm-user-prompt-options prompt))
@@ -4566,7 +4577,7 @@ When SUPPRESS-NEXT is non-nil, do not activate the next queued prompt."
       (quit (ellm--resolve-user-prompt prompt '(:status cancelled)))
       (error
        (message "ellm: user prompt error: %s" (error-message-string err))
-       (ellm--resolve-user-prompt prompt '(:status cancelled))))))
+       (ellm--resolve-user-prompt prompt '(:status cancelled)))))))
 
 (defun ellm--maybe-activate-user-prompt ()
   "Activate the queue head after the conversation buffer is selected."
@@ -4643,7 +4654,8 @@ When SUPPRESS-NEXT is non-nil, do not activate the next queued prompt."
                               (list :id (plist-get option :id)
                                     :label (or (plist-get option :name)
                                                (plist-get option :id))))
-                            options))
+                            options)
+           :automatic-outcome (plist-get permission :automatic-outcome))
      (lambda (outcome)
        (let ((decision (and (eq (plist-get outcome :status) 'selected)
                             (plist-get outcome :value))))
