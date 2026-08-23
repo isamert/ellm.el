@@ -1,33 +1,30 @@
-# ellm
+# ellm.el
 
-Minimal coding agent with a special conversation format based on
-Markdown. Intuitive to read/navigate/edit, and easy to mix different
-providers.
+_ellm_ is an _agent_ for Emacs. It's fully written in elisp, easily
+extendible and introspectible.
 
-ellm is a major mode. It extends Markdown with *turns* (as in
-*assistant turn* or *user turn*). A turn is like a Markdown header,
-but instead of starting with `#`, turns start with `>-|`. A second
-level turn is `>>-|` (the choice of starting with `>` is deliberate,
-see *Rationale* below). By making *turns* a first-class citizen of the
-format, it becomes very intuitive to handle navigation, folding,
-narrowing, etc. It integrates with `outline-minor-mode`. There is no
-hidden conversation structure—everything is text in a buffer, so it's quite
-easy to understand and manipulate.  Providers may attach explicit references
-to private sidecar files for opaque data that cannot be represented as text,
-such as encrypted reasoning state.  There is no special UI for configuring,
-you simply edit the YAML frontmatter where completion-at-point is
-available and you can see your options in-buffer, interactively.  Your
-Emacs knowledge transfers cleanly.
+It's more simply a plain text driven agent: _ellm-mode_ is a major
+mode that extends Markdown format with _turns_ (as in *assistant turn*
+or *user turn*). A turn is like a Markdown header, but instead of
+starting with `#`, turns start with `>-|`. A second level turn is
+`>>-|`. By making *turns* a first-class citizen of the format, it
+becomes very intuitive to handle navigation, folding, narrowing,
+etc. _ellm-mode_ integrates with `outline-minor-mode`.
 
-This is still a work in progress, things are all over the place, but
-feel free to try it out and share your feedback.  See *Rationale* down
-below for why this project exists.
+There is no hidden conversation structure, everything is text in a
+buffer, so it's quite easy to understand and manipulate. There is no
+special UI for configuring, you simply edit the YAML frontmatter where
+`completion-at-point` is available and you can see your options
+in-buffer, interactively. Your Emacs knowledge transfers quite
+cleanly.
 
-## Usage
+<TODO: IMAGE HERE...>
 
-`ellm` is a major mode for plain-text LLM conversations.  A buffer is
-a Markdown-like file with YAML frontmatter and turn delimiters.  A
-simple conversation looks like this:
+## Basics
+
+`ellm-mode` is a major mode for plain-text LLM conversations. A buffer
+is a Markdown-like file with YAML frontmatter and turn delimiters.  A
+simple conversation looks like this, without any formatting:
 
 ~~~markdown
 ---
@@ -62,51 +59,185 @@ That's straightforward. I'll provide that as the answer, possibly with a brief e
 You can call `(today-date)` to get a string like `"2025-03-14"`.
 To change the format, adjust the format specifiers – for example, `"%A, %B %e, %Y"` gives `"Friday, March 14, 2025"`.
 >-| user
+
 ~~~
 
-Useful commands:
+Here, as you can see, everything is plain-text. You can manipulate the
+yaml-frontmatter to configure your providers/models/tools etc. You can
+even manipulate the conversation itself. There is (almost) no hidden
+state. The good part is that `ellm-mode` is aware of these _turns_ so
+all the navigation/folding is quite intuitive. You can also save this
+file, re-open it and continue from where you left. Even the subagents
+are simple `ellm-mode` buffers/files with their own yaml-frontmatters.
 
-| Key       | Command             | What it does                                     |
-|-----------|---------------------|--------------------------------------------------|
-| `C-c C-c` | `ellm-send`         | Send the final `user` turn.                      |
-| `C-c C-k` | `ellm-cancel`       | Cancel the active request.                       |
+_ellm_ also comes with bunch of different tools to let you do _agentic
+coding_. The default _profile_ is the `agent` profile, which works
+quite similarly to other agents like OpenCode, Claude Code etc. but
+much more simplified and Emacs-y.
 
-Create a new conversation with `M-x ellm-new-buffer`, edit the final
-`user` turn, then run `ellm-send`.
+_ellm_ integrates itself with built-in Emacs tooling where it makes
+sense, does not invent new ways of doing things. Everything is either
+a buffer or a simple invocation of `completing-read` or a
+`read-multiple-choice`. It also provides some convenience functions
+that uses these primitives.
 
-Request attempts default to a 120-second timeout.  HTTP-backed requests retry
-transient failures once; ACP requests time out without being resent.  Customize
-`ellm-request-timeout`, `ellm-request-retries`, and
-`ellm-request-retry-delay` as needed.  Cancelling always leaves a new trailing
-`user` turn ready for the next prompt.
+# Installation
 
-### Dynamic system prompts
+<TODO: INSTALLATION INSTRUCTIONS>
+<TODO: LINK CONFIGURATION AND CONFIGURING PROVIDERS SECTIONS>
 
-System prompts can contain request-time Emacs Lisp interpolation.  This works
-both in the frontmatter `system:` value and in `system` turns:
+# Usage
+
+The basic agentic workflow would look like this:
+
+- Open a project (any file/folder).
+- `M-x ellm-new-buffer`.
+- Write your request, hit `C-c C-c` to send, `C-c C-k` to cancel the
+  current request.
+
+There is also `ellm-dwim` which is like `ellm-new-buffer` but instead
+of creating a new buffer every time, it opens an already existing
+project ellm buffer. If there are more than one, it asks you which one
+to open. If there is a selected region while calling `ellm-dwim`, it
+automatically copies the region with correct fenced blocks and file
+name and line references to the target _ellm_ buffer. With prefix
+argument, it creates a new buffer.
+
+`ellm-toggle-side-window` is exactly like `ellm-dwim` but it opens the
+buffers in a side window to the right (feels like what Cursor does).
+
+## Profiles and system prompts
+
+There are _profiles_ that you can use (see `ellm-profiles`). The
+default profile is called `agent`. By default it has access to file
+reading and editing tools, shell tools (where it can run arbitrary
+shell commands), web tools (to do web search, fetch web pages),
+sub-agent tools (creating/waiting/listing sub agents etc.) You can
+either edit the `ellm-profiles` `defcustom` to change what a profile
+should have, or you can simply edit the frontmatter to customize it
+for the current buffer:
 
 ```markdown
->-| system
-You are working in this project.
+---
+provider: personal-deepseek
+model: deepseek-v4-pro
+profile: agent     # Explicitly setting a profile. The changes below will override the profiles configuration.
+tools-: ["@shell"] # Now your agent does not have shell access
+reasoning: high    # Reasoning is now high.
+system: You are an agent. # Overridden the system prompt compeletly.
+---
 
-Today is #{(format-time-string "%F")}.
->-| user
-Review the current implementation.
+>>-| system
+You can also override the system prompt this way which is much cleaner than using the frontmatter.
+>>-| user
+...
 ```
 
-Each interpolation must contain exactly one parenthesized form.  Its value is
-inserted as text (`nil` inserts nothing), and generated text is not expanded a
-second time.  Write `\#{` for a literal opener.
+You can even define profiles within the frontmatter:
 
-Evaluation happens only when a backend consumes system prompts.  Rendered
-values are memoized by exact template text in the conversation buffer, so
-identical frontmatter and turn templates share one value.  New or edited
-template text is evaluated once; changing it back reuses its earlier value.
-`M-x ellm-refresh-system-prompts` clears the buffer's cache.  The cache is not
-saved.  `M-x ellm-show-effective-system-prompts` shows cached output without
+```markdown
+---
+provider: personal-deepseek
+model: deepseek-v4-pro
+profile: agent
+profiles:
+  - name: reviewer-agent
+    tools: [read_file_lines, git, glob, grep]
+    system: You are a reviewer. Review the code changes and report possible issues.
+
+# Here we defined a profile that has no access to shell and but tools
+# like git (a readonly git tool), file reading, file listing etc. so
+# that it can do proper reviews.
+---
+```
+
+This is generally useful for subagents. The agent tool sees these
+profiles and selects the appropriate subagent (or you can direct the
+agent to use one of these profiles).
+
+It is also useful in a sense that instead of configuring elisp
+variables, you can create your template files and fill your _ellm_
+buffers from these templates. This gives you even more explicitness
+and ease of ad-hoc configurations. The frontmatter supports
+`completion-at-point`, so it is quite easy to discover what you can
+configure and how. It's all plain-text.
+
+### Default system prompt
+
+The default system prompt (see `ellm--agent-system-prompt`) is a
+simple prompt that works well with any type of workflow (be it
+exploring a code base, or doing changes across multiple files,
+delivering e2e features). It wants you to be explicit a bit, if you
+want something to be done, just say "do it" or "implement it".
+
+_ellm_ also comes with another profile, called `explore` which is a
+read-only agent (no access to shell, file editing etc.) but it also
+has access to tools like `git` (a read only git tool, so that agent
+can access git diffs/commits etc. without relying on unrestricted
+shell access), `glob`, `grep` etc.
+
+### System prompt templating and code execution
+
+System prompts support code execution/templating. For example the
+default system prompt contains the following:
+
+```markdown
+<tool_usage>
+#{(when (ellm-tool-enabled-p "todowrite")
+   "- Use todowrite for complex, multi-step work to track progress. Keep the list concise and update it as work is completed; do not use it for straightforward tasks.")}
+#{(when (ellm-tool-enabled-p "agents")
+   "- Use the agents tool to launch subagents when the user explicitly requests delegation, or an independent review. Otherwise, complete the work yourself.")}
+#{(when (ellm-tool-enabled-p "ask")
+   "- Use the ask tool only when the user explicitly requests planning or brainstorming, or when essential information is missing and proceeding would risk a consequential mistake. Otherwise, make reasonable assumptions and proceed autonomously.")}
+</tool_usage>
+```
+
+If you were to remove the `agents` tool from the default profile:
+
+```markdown
+---
+...
+tools-: ["@agents"] # Removed all tools from the agents category of tools.
+---
+```
+
+The part about `agents` in the system prompt automatically disappears,
+no unnecessary context is used and LLM is not confused. Similarly,
+reading your `AGENTS.md` is done through this templating system:
+
+```markdown
+#{(ellm-prompt-read
+   '("AGENTS.md" "CLAUDE.md")
+   :heading "Follow these project instructions:"
+   :tag "project_instructions")}
+```
+
+which in turn produces something like this if you have an `AGENTS.md`
+or `CLAUDE.md`:
+
+```xml
+<project_instructions>
+Project's AGENTS.md here...
+</project_instructions>
+```
+
+ellm also supports XML tags, meaning that they are fontifed and you
+can toggle what's between them with `TAB`. This is also supported
+within anywhere in the buffer, not just for system prompts.
+
+### System prompt cache
+
+System prompt evaluation happens only when a backend consumes system
+prompts.  Rendered values are memoized by exact template text in the
+conversation buffer, so identical frontmatter and turn templates share
+one value.  New or edited template text is evaluated once; changing it
+back reuses its earlier value.  `M-x ellm-refresh-system-prompts`
+clears the buffer's cache.  The cache is not saved.  `M-x
+ellm-show-effective-system-prompts` shows cached output without
 running any Lisp.
 
-For example, expire the caches in every live ellm buffer at midnight:
+For example, expire the caches in every live ellm buffer at midnight
+so that they get re-evalutated:
 
 ```elisp
 (require 'midnight)
@@ -121,63 +252,293 @@ For example, expire the caches in every live ellm buffer at midnight:
 (midnight-mode 1)
 ```
 
-The default `ellm-prompt-interpolation-policy` asks before evaluating new or
-edited templates.  Set it to `allow` for trusted automated conversations or
-`deny` to disable evaluation.  Interpolation is arbitrary Emacs Lisp, so only
-enable it for prompts you trust.  Useful request-context helpers are:
+Also, here are the functions that may help in system prompts:
 
-- `ellm-prompt-read-file` — read a file relative to the request directory.
-- `ellm-prompt-read` — read the first available file from an ordered list,
-  with optional headings and tags.
+- `ellm-prompt-read-file` — read a file relative to the request
+  directory.
+- `ellm-prompt-read` — read the first available file from an ordered
+  list, with optional headings and tags.
 - `ellm-prompt-frontmatter` — read the request's frontmatter snapshot.
 - `ellm-tool-enabled-p` — check whether a local tool is enabled by the
   request's `tools:` selection.
-- `ellm-prompt-directory` and `ellm-prompt-project-root` — inspect request
-  paths.
+- `ellm-prompt-directory` and `ellm-prompt-project-root` — inspect
+  request paths.
 
-A leading `system` turn takes precedence over frontmatter `system:`.  Additional
-system turns remain at their original positions for providers that accept
-mid-conversation system instructions.  Regular user and assistant turns are
-always literal and are not interpolated.
+## Tools
 
-### Lifecycle hooks
+ellm comes with a lot of useful tools, like (list may not be complete,
+see `ellm-tools.el`):
 
-Lifecycle hooks run in the conversation buffer.  Register one for a specific
-conversation with a buffer-local hook, for example:
+- `shell/bash`
+- `files/glob`
+- `files/grep`
+- `files/file-edit`
+- `files/read-file-lines`
+- `buffers/buffer-edit`
+- `buffers/list-buffers`
+- `buffers/read-buffer-lines`
+- `tool-outputs/read`
+- `tool-outputs/search`
+- `buffers/search-buffer`
+- `buffers/get-buffer-issues`
+- `emacs/elisp-info`
+- `emacs/elisp-search`
+- `emacs/elisp-eval`
+- `tasks/todowrite`
+- `agents/list-profiles`
+- `agents/launch-subagent`
+- `agents/list-subagents`
+- `agents/wait-subagent`
+- `buffers/send-ellm-buffer`
+- `web/websearch`
+- `web/webfetch`
+- `user/ask`
+- `git/git`
 
-```elisp
-(add-hook 'ellm-request-finished-hook #'my-ellm-finished nil t)
+Again you can utilize the frontmatter to enable/disable tools:
 
-(defun my-ellm-finished (request outcome)
-  (message "Request %s" (plist-get outcome :state)))
+```markdown
+---
+provider: codex
+model: "gpt-5.6-terra"
+profile: agent    # Brings all tools enabled in `agent` profile
+tools: ["@files"] # This compeletly overrides tool selections for current buffer. Now we only have tools from the files category.
+tools-: [file_edit] # We removed the file_edit tool from available tools. Again, you can use the @category notation to remove whole category.
+tools+: ["@agents", websearch] # Added all @agents category of tools and websearch tool.
+---
 ```
 
-`ellm-before-request-hook` receives `(REQUEST EVENT)` after configuration is
-resolved but before the transcript changes; it may signal an error to veto the
-send.  `ellm-request-started-hook` receives `(REQUEST EVENT)` once before the
-initial backend start.  `ellm-request-finished-hook` receives `(REQUEST
-OUTCOME)` once after final cleanup.  These are logical-request hooks: retries
-and tool-loop continuation legs do not fire them again.
+**Permissions**
 
-`ellm-tool-call-hook` and `ellm-tool-finished-hook` receive `(REQUEST EVENT)`
-for backend-observed tool lifecycle facts.  Tool support is backend-dependent:
-ACP reports calls and terminal `completed`/`failed` updates, while llm.el
-reports completed local tool batches.  For llm.el, `completed` means a result
-was returned to the model; it does not necessarily mean the local tool
-succeeded.  The existing
-`ellm-tools-tool-call-start-hook` and `ellm-tools-tool-call-end-hook` are
-separate hooks for local `ellm-deftool` execution only.
+When enabled, tools can be run directly without any user
+approval. They also do not have any kind of sandboxing. However you
+can change this with `tool-permissions`:
 
-Permissions use `ellm-permission-function` to choose an option and
-`ellm-before-permission-hook` / `ellm-after-permission-hook` as observers.
-They currently apply to ACP permission requests.
+```markdown
+---
+# ...
+tool-permissions:
+  file_edit: ask  # Now you need to manually approve file_edit calls.
+  "@emacs": ask   # This enables manual approval for whole emacs category of tools: elisp-info, elisp_search, elisp_eval
+---
+```
 
-### Notifications
+**Defining/replacing tools**
+
+There is a public API to define tools, `ellm-deftools`. Here is an
+example tool definition from my dotfiles. This one, when evalled,
+replaces the current `web/websearch` tool. Of course you can define
+new tools using this macro too.
+
+```elisp
+(ellm-deftool web/websearch (:async t)
+    ((query :string "The search query."))
+    "Perform a web search and receive concise results and links to sources."
+    (my-kagi-search
+     query
+     :success
+     (lambda (results)
+       (funcall
+        callback
+        (mapconcat
+         (lambda (res)
+           (let-alist res
+             (concat
+              (when .title (format "Title: %s\n" .title))
+              (when .url (format "URL: %s\n" .url))
+              (when .description (format "Desc: %s\n" .description))
+              "---\n")))
+         results "")))
+     :error (lambda (it)
+              (funcall
+               callback
+               (format "Error while searching: %s" it)))))
+```
+
+The category name (`web/` part in this case) is there just for
+grouping, it can be anything. The tool names should be unique (the
+`websearch` part.)
+
+The tool definitions are kept in `gptel` compatible format. See
+`ellm-tools-refs` variable, you can use this to convert ellm tools
+into `gptel` tools if you want. For the opposite direction, converting
+`gptel` tools into ellm tools, see the variable `ellm-tools-list`, but
+I still recommend using `ellm-deftool` macro which comes with it's own
+bells and whistles.
+
+## Utilities
+
+There are a few utilities that make everyday interactions easier, I
+found them to be very effective and hence here is a detailed
+breakdown:
+
+### `ellm-comment`
+
+Comment on current line or selected text and send this to the bottom
+of your next input. This can be called from any buffer:
+
+- If called from the current ellm buffer itself, quotes the selected
+  region or line, asks you for your comment and puts this at the end
+  of your input. For example:
+
+  ```markdown
+  >-| assistant
+  ...
+  I’d take this path:
+  1. **Batch row updates, with one point/window restore and one redisplay.**
+  ...
+  >-| user
+
+
+       (You selected the line with (1.) and commented)
+                           ↓
+
+
+  >-| assistant
+  ...
+  I’d take this path:
+  1. **Batch row updates, with one point/window restore and one redisplay.**
+  ...
+  >-| user
+  > 1. **Batch row updates, with one point/window restore and one redisplay.**
+  Lay out the exact implementation plan for this.
+  ```
+
+  If you select a code to comment from another buffer for example, and
+  commented on it, this is inserted to your prompt:
+
+  ~~~markdown
+  ``` emacs-lisp ellm.el:1347:1350
+  (replace-regexp-in-string
+     (ellm-tools--escaped-tool-body-prefix-regexp)
+     (lambda (match) (substring match 1))
+     text nil t)
+  ```
+  Instead of passing `t`, pass `'literal` so we can track what we enabled here.
+  ~~~
+
+  If the LLM is currently streaming, then your comments will be
+  written into the compose area.
+
+I recommend you to bind this command to a global key, it is especially
+useful for referencing code blocks from the project or doing a code
+review inside a diff buffer and commenting on different parts in quick
+successions.
+
+### `ellm-compose`
+
+While LLM is streaming, the buffer becomes read-only. This is a simple
+work around to schedule messages for your next input. When you `M-x
+ellm-compose` then another temporary buffer will be opened and you can
+enter your next prompt. When ellm finishes streaming, the prompt is
+automatically inserted as your next prompt. It is not sent
+automatically, just inserted.
+
+### `ellm-set-config`
+
+Edit the configuration interactively, the results will be eventually
+written into the frontmatter. This is useful for changing something
+quickly or discovering what's available (especially for ACP backend,
+other than that editing frontmatter directly is easier).
+
+---
+
+Every utility function knows about the compose area and will work
+intuitively.
+
+If there are multiple ellm buffers open, then each function will ask
+you for which buffer to insert your comments/compose or guess from
+your current layout (like if you have one visible ellm buffer, it'll
+target it)
+
+## Managing multiple agents & subagents
+
+<TODO: MANAGING MULTIPLE AGENTS>
+
+- ellm-dwim, toggle-side
+- ellm-list
+- ellm-switch-to-project-buffer
+- ellm-switch-to-subagent-buffer
+
+## In buffer controls
+
+<TODO: IN BUFFER CONTROLS>
+
+- Folding, jumping etc.
+- `ellm-show-effective-system-prompts`
+- `ellm-refresh-system-prompts`
+- `ellm-narrow-to-turn`
+- `ellm-narrow-to-header`
+- `ellm-narrow-dwim`
+- `ellm-jump-to-tool-pair`
+- `ellm-toggle-tag`
+- `ellm-fold-all-tags`
+- `ellm-unfold-all-tags`
+- `ellm-fold-all-tool-blocks`
+- `ellm-fold-all-reasoning-blocks`
+- `ellm-fold-all-blocks`
+
+## Persistence
+
+<TODO: PERSISTENCE>
+
+## MCPs
+
+<TODO: MCPs>
+
+# Configuration
+
+<TODO: SECTION ABOUT GENERAL CONFIGURATION STUFF>
+
+## Visuals and the header line
+
+The header line can show:
+
+- session title;
+- active todo;
+- todo completion progress;
+- context usage;
+- request cost;
+- pending user prompt status;
+- next-prompt draft state.
+
+`ellm-header-line-template` supports placeholders:
+
+- `%t` title
+- `%a` current TODO
+- `%p` TODO progress
+- `%u` context usage
+- `%c` cost
+- `%q` pending user prompt
+- `%d` next draft
+- `%l` title + TODO progress
+- `%r` context usage + cost
+- `%>` right alignment
+- `%%` literal percent sign
+
+Visual controls include:
+
+- `ellm-heading-rescale` — use distinct sizes for Markdown and
+  turn-heading levels; set to `nil` for uniform heading sizes.
+- `ellm-pretty-separators` — replace raw turn delimiter lines with
+  decorative overlays.
+- `ellm-turn-rules` — draw horizontal rules above top-level turns.
+- `ellm-reveal-separator-at-point` — temporarily reveal a raw
+  delimiter when point enters it.
+- `ellm-fold-tool-calls` — insert tool-call turns folded by default.
+- `ellm-fold-reasoning-blocks` — insert reasoning turns folded by
+  default.
+- `ellm-turn-header-1`, `ellm-turn-header-2`, and `ellm-turn-header-3`
+  — customize the delimiter text for top-level turns, child turns, and
+  grandchild turns, respectively.
+- `ellm-tool-header-summary-width` — set the maximum width of tool
+  call and result titles; longer titles are truncated.
+
+## Notifications
 
 ellm notifies you when a permission is requested or when a logical
 request completes or fails, but only when the conversation buffer is
-not visible in a focused Emacs frame.  Cancelled requests do not
-notify by default.
+not visible in a focused Emacs frame.
 
 `ellm-notification-function` controls delivery.  Its default,
 `ellm-notify-default`, tries native `notifications-notify`, then the
@@ -189,656 +550,68 @@ receives a plist with `:event`, `:request`, `:buffer`, `:title`,
 Use `ellm-notifications-enabled` to disable notifications entirely, or
 `ellm-notification-events` to select notification event categories.
 
-### Interactive Configuration
+Of course, you can override `ellm-notification-function` to write your
+own custom notifier.
 
-Run `M-x ellm-set-config` in a conversation buffer to edit frontmatter without
-manually navigating YAML completion.  The command shows only settings supported
-by the current backend, includes current values, and indicates when each change
-takes effect.  Value prompts use completion for models and enums, booleans for
-on/off settings, numeric readers, directory readers, or multiple selection for
-tools and MCP servers.
+## Lifecycle hooks
 
-Changes are persisted in frontmatter.  `llm.el` and Kagi settings apply on the
-next send.  ACP model and advertised `acp.config.*` options apply immediately
-when a session is live; `cwd`, `mcp`, and `acp.additional-directories` are saved
-with a notice that a new ACP session is required.  If dynamic ACP options are
-not loaded, the command offers to start a session first.
-
-Use `C-u M-x ellm-set-config` to remove a selected setting from frontmatter.
-Removing a live ACP override does not mutate the already-running session.
-
-### llm.el Backend
-
-Use this backend for direct LLM API calls through
-[llm.el](https://github.com/ahyatt/llm).  Any `llm.el` chat provider
-can be used.
+Lifecycle hooks run in the conversation buffer.  Register one for a
+specific conversation with a buffer-local hook, for example:
 
 ```elisp
-(require 'ellm)
-(require 'ellm-llm)
-(require 'llm-openai)
+(add-hook 'ellm-request-finished-hook #'my-ellm-finished nil t)
 
-(setq ellm-provider-alist
-      `((openai . (:provider
-                  ,(make-llm-openai
-                    :key (getenv "OPENAI_API_KEY")
-                    :chat-model "gpt-5.4-mini")
-                  :small-model "gpt-5.4-nano"))))
+(defun my-ellm-finished (request outcome)
+  (message "Request %s" (plist-get outcome :state)))
 ```
 
-Provider entries may set `:small-model` for fast, inexpensive auxiliary
-requests.  The llm backend currently uses it to generate a session title from
-the first user prompt; future lightweight tasks may use it as well.  When it is
-omitted, the active chat model is used.  Set `ellm-llm-generate-title` to nil to
-disable the extra request.  Generated titles are stored in the top-level
-`title:` frontmatter key, which is shared by all backends and restored when a
-conversation is reopened.
-
-Set `ellm-llm-log-messages` to non-nil to create a diagnostic log buffer for
-each conversation, named from `ellm-llm-log-buffer-name`.  It records the
-provider request data passed to the plz transport, parsed streaming and final
-results, and errors.  Authentication headers and URL query strings are
-redacted, but prompts, responses, tool arguments, and opaque reasoning state
-are not; enable it only while debugging.  Log buffers grow without bound.
-
-Conversation example:
-
-```markdown
----
-provider: openai
-model: gpt-5.4-mini
-system: You are concise.
-temperature: 0.2
-max-tokens: 1000
----
-
->-| user
-Explain lexical binding in Emacs Lisp.
-```
-
-Enable built-in local tools:
-
-```elisp
-(require 'ellm-tools)
-```
-
-#### Local tool permissions
-
-`tool-permissions:` controls whether enabled local tools run automatically.
-It is separate from `tools:`, which controls which tools are advertised to the
-model.  Rules may name `default`, an exact tool, or an `@CATEGORY`; exact tool
-rules take precedence over category rules, then `default`.
-
-```yaml
----
-tools: ["@files", "@shell"]
-tool-permissions:
-  default: allow
-  "@shell": ask
-  file_edit: ask
-  read_file_lines: allow
----
-```
-
-The policies are `allow`, `ask`, and `deny`.  `ask` prompts before every tool
-invocation, with **Run once**, **Allow for session**, and **Deny** choices.
-A session approval lasts only for the active logical request; it is never
-written to frontmatter.  This policy applies to ellm local tools.  ACP agents
-continue to supply their own permission requests and choices.
-
-### Profiles and subagents
-
-`ellm-profiles` defines reusable global conversation defaults.  A buffer can
-select one with `profile:` and locally add or override definitions with
-`profiles:`.  Maps merge recursively; scalar values and lists such as `tools:`
-replace inherited values.  Ordinary frontmatter overrides the selected profile.
-For named selections, `tools+` / `tools-` and `mcp+` / `mcp-` respectively
-extend or exclude inherited entries (including entries selected by a category).
-An ordinary `tools:` or `mcp:` value resets prior additions and exclusions.
-Profile `description:` is discovery metadata and is not sent to a provider.
-
-New conversations select the built-in `agent` profile.  It contains the
-standard coding-agent system prompt and enables `@files`, `@shell`, `@web`,
-`@tasks`, `@agents`, and `ask`; override `tools:` or use `tools+` / `tools-`
-in frontmatter to adjust that selection.
-
-The built-in `explore` profile is a read-only worker for codebase exploration,
-change analysis, and external research.  It enables source-reading and web
-tools plus the structured `git` tool, which supports only `status`, `diff`,
-`log`, `show`, `blame`, and `ls-files` operations.
-
-```elisp
-(setq ellm-profiles
-      '((explore . ((description . "Read-only codebase exploration.")
-                    (model . "cheap-model")
-                    (tools . ("@files" "@buffers"))
-                    (system . "Explore the codebase. Do not edit files.")))))
-```
-
-```yaml
----
-profile: explore
-tools+: [current_time]
-profiles:
-  explore:
-    system: Explore this project's architecture and report relevant files.
----
-```
-
-With `ellm-tools` enabled, `list_profiles` exposes the effective named-profile
-catalog to the model.  `launch_subagent` accepts an optional `profile` name;
-call `list_profiles` before choosing one.  A child launched with a profile uses
-that profile as its baseline; without one it inherits the parent's effective
-configuration.  `cwd` remains available as a per-launch override.
-
-
-```markdown
----
-provider: openai
-tools: ["@files"] # or just true to enable all
----
-
->-| user
-Read this project and summarize the main package entry point.
-```
-
-Supported by the `llm.el` backend:
-
-| Feature                                                                 | Status                                                 |
-|-------------------------------------------------------------------------|--------------------------------------------------------|
-| Editable full conversation history                                      | yes                                                    |
-| `system`, `model`, `temperature`, `max-tokens`, `reasoning` frontmatter | yes                                                    |
-| `cwd:` as the buffer-local `default-directory` for requests and tools   | yes                                                    |
-| Local `tools:` selection                                                | yes                                                    |
-| Tool call/result serialization in the buffer                            | yes                                                    |
-| Streaming text and reasoning                                            | yes, when provider supports it                         |
-| ACP sessions, permissions, slash commands, plans                        | no                                                     |
-| `mcp:` servers                                                          | parsed by ellm, not used by this backend yet (planned) |
-
-### ChatGPT Codex
-
-`ellm-codex` uses OAuth to access Codex through a ChatGPT subscription; it
-does not require an OpenAI API key.  Configure it as a normal `llm.el`
-provider:
-
-```elisp
-(require 'ellm-codex)
-
-(setq ellm-provider-alist
-      `((codex . ,(ellm-make-codex-provider
-                   :chat-model "gpt-5.6-sol"))))
-```
-
-Run `M-x ellm-codex-login` once, then use `provider: codex` in frontmatter.
-Model completion and `M-x ellm-set-config` include the selectable Codex catalog
-and show only the reasoning efforts supported by the selected model.
-The command opens a browser and receives the OAuth callback on localhost port
-1455.  Browser login requires the `openssl` executable for PKCE randomness.
-Use `C-u M-x ellm-codex-login` for device-code login when OpenSSL or a localhost
-callback is unavailable.  `M-x ellm-codex-logout` removes the stored tokens.
-
-OAuth credentials are stored in `~/.config/ellm/codex-auth.json` by default;
-customize `ellm-codex-auth-file` to change that location.  The credential file
-is mode `0600` and its directory is mode `0700`.
-
-On the first send, ellm creates an opaque `codex.prompt-cache-key` in the
-conversation's YAML frontmatter and reuses it for every Codex request in that
-conversation, including tool-loop requests.  No manual cache configuration is
-needed.  Assistant turn headers report `cached-tokens` when Codex reads a
-cached prefix and `cache-write-tokens` when the API reports tokens written to
-the cache.  A first request, a changed prompt prefix, or an ineligible short
-prompt can still report zero cached tokens.
-
-To disable cache reads and writes for a GPT-5.6 or later conversation, set:
-
-```yaml
-codex:
-  cache: false
-```
-
-This uses explicit cache mode without defining a breakpoint.  Older models do
-not support that API control, so ellm reports an error instead of silently
-leaving automatic caching enabled.
-
-Codex responses contain encrypted reasoning data that must be replayed exactly
-on later requests.  The readable reasoning summary remains in the conversation
-buffer, whose delimiter includes a content-addressed reference such as
-`:reasoning-state rs-...`.  Persisted conversations keep the referenced JSON
-under their session's `.state/reasoning/` directory.  Ephemeral and otherwise
-unpersisted conversations use `~/.cache/ellm/reasoning/`.  These files are also
-private (`0600` files in `0700` directories).  If a referenced file is missing
-or incompatible, ellm falls back to the readable reasoning summary.
-
-### ACP Backend
-
-Use this backend for agents that speak the Agent Client Protocol over
-stdio, such as `opencode acp`.
-
-```elisp
-(require 'ellm)
-(require 'ellm-acp)
-
-(setq ellm-provider-alist
-      `((opencode . ,(ellm-make-acp-provider
-                      :command "opencode"
-                      :args '("acp")
-                      :model "openai/gpt-5.4"))))
-```
-
-Conversation example:
-
-```markdown
----
-provider: opencode
-model: openai/gpt-5.4
-cwd: /home/me/project
----
-
->-| user
-Find one simple refactor in this repository and explain it first.
-```
-
-`ellm` persists the ACP session id in frontmatter:
-
-```markdown
----
-provider: opencode
-acp:
-  session-id: sess_abc123
----
-```
-
-On a fresh connection, saved sessions are restored with `session/resume`
-when the agent supports it, otherwise `session/load` when available.
-
-Set `ellm-acp-tool-detail-limit` to keep ACP buffers smaller.  Nil renders
-full tool params and results.  `summary` renders the human-facing tool title
-and regular text/resource content while omitting raw input/output, locations,
-and structured diffs.  `0` inserts only `tool-call` and `tool-result` headings,
-and a positive integer truncates each rendered parameter value and result body
-to that many characters.  ACP `tool-result` heading titles are limited to 25
-characters because agents commonly use a full command as the title.  This
-setting is ACP-only and does not affect the `llm.el` backend.
-
-Supported by the ACP backend:
-
-| Feature                                                         | Status                     |
-|-----------------------------------------------------------------|----------------------------|
-| stdio JSON-RPC transport                                        | yes                        |
-| `initialize`, `session/new`, `session/prompt`, `session/cancel` | yes                        |
-| Saved session restore with `session/resume` or `session/load`   | yes                        |
-| `session/list` through `ellm-load-session`                      | yes                        |
-| `session/close` through `ellm-close-session`                    | yes                        |
-| `session/delete` through `ellm-delete-session`                  | yes                        |
-| ACP text, thought, and replayed user message chunks             | yes                        |
-| Tool calls, tool updates, diffs, locations, raw input/output    | yes                        |
-| Plans and usage updates                                         | yes                        |
-| Slash command completion from the agent                         | yes                        |
-| Permission requests                                             | yes, via `completing-read` |
-| Model config option                                             | yes                        |
-| MCP servers from `mcp:`                                         | yes                        |
-| `acp.additional-directories`                                    | yes                        |
-| ACP auth/logout                                                 | no                         |
-| Client filesystem methods                                       | no, advertised unsupported |
-| Client terminal methods                                         | no, advertised unsupported |
-| Image/audio/resource prompt blocks                              | no, text prompts only      |
-| Deprecated ACP session modes                                    | no                         |
-| HTTP/WebSocket ACP transports                                   | no, stdio only             |
-
-### Kagi Assistant Backend
-
-This is an example backend that you can use if you have a Kagi
-account. This a proof-of-concept work that showcases ellm as a
-frontend for different kind of backends.
-
-Use the Kagi backend with an existing Kagi Assistant subscription.
-This is an unofficial integration with Kagi Assistant's web API, so it
-may need updates if that API changes.  Authentication uses only the
-`kagi_session` cookie; browser headers are not sent.
-
-```elisp
-(require 'ellm)
-(require 'ellm-kagi)
-
-(setq ellm-provider-alist
-      `((kagi . ,(ellm-make-kagi-provider
-                  :session-token (lambda () (getenv "KAGI_SESSION_TOKEN"))
-                  :model "kimi-k2-6-thinking"))))
-```
-
-Pass the cookie value itself in `KAGI_SESSION_TOKEN`, without the
-`kagi_session=` prefix.  Model completion uses the built-in
-`ellm-kagi-models` fallback catalog.  Run `M-x
-ellm-kagi-refresh-models` from a Kagi conversation to replace that
-provider's candidates with the currently supported models returned by
-Kagi.  You can also pass an explicit `:models` list to
-`ellm-make-kagi-provider`.
-
-A conversation may override Kagi request settings:
-
-```markdown
----
-provider: kagi
-model: kimi-k2-6-thinking
-kagi:
-  enable-search: true
-  personalization: false
-  thinking-preset: extended
----
-
->-| user
-Research this question and summarize what you find.
-```
-
-The backend creates a Kagi conversation on the first send and persists
-its identifiers in frontmatter:
-
-```yaml
-kagi:
-  conversation-id: 56b20b57-dd37-4c7f-ab19-4a1f1461b706
-  branch-id: 952002a5-2a15-455f-837a-31e1f35b6d86
-```
-
-Later sends continue that server-side branch.  Kagi therefore receives
-the latest user turn rather than a replay of the editable ellm
-transcript.  Text and thinking snapshots stream into the buffer; final
-usage and cost are shown in the header line.  Local ellm tools, custom
-system turns, session listing, and remote conversation deletion are
-not supported by this backend.
-
-### MCP Servers
-
-MCP server configuration follows the shape used by `mcp.el`'s
-`mcp-hub-servers`: each entry is a name and a plist with either
-`:command` plus `:args`, or `:url`.
-
-```elisp
-(setq ellm-mcp-servers
-      '(("filesystem" . (:command "npx"
-                         :args ("-y" "@modelcontextprotocol/server-filesystem"
-                                "/home/me/project")
-                         :category "local"))
-        ("docs" . (:url "https://example.com/mcp"
-                   :headers (("X-API-Key" . "secret"))
-                   :category "remote"))))
-```
-
-Enable all configured MCP servers:
-
-```yaml
-mcp: true
-```
-
-Enable named servers:
-
-```yaml
-mcp: [filesystem, docs]
-```
-
-Enable a category:
-
-```yaml
-mcp: ["@local"]
-```
-
-Define an inline server in a conversation:
-
-```yaml
-mcp:
-  - name: filesystem
-    command: npx
-    args: ["-y", "@modelcontextprotocol/server-filesystem", "/home/me/project"]
-```
-
-ACP agents always support stdio MCP servers.  URL-based MCP servers are
-sent only when the agent advertises the matching ACP MCP transport
-capability.
-
-#### mcp.el tools with the llm.el backend
-
-The optional `ellm-mcp` integration exposes tools from
-[lizqwerscott/mcp.el](https://github.com/lizqwerscott/mcp.el) to ellm's
-`llm.el` backend.  Start and connect your `mcp-hub-servers` first, then load
-the integration and register their tools:
-
-```elisp
-(require 'ellm-mcp)
-(mcp-hub-start-all-server #'ellm-register-mcp-tools)
-```
-
-`ellm-register-mcp-tools` may be called again after a reconnect or tool-list
-change.  It registers asynchronous tools with server-qualified names, such as
-`mcp-filesystem--read_file`, and preserves their `mcp-SERVER` category.  Enable
-one server's tools in a conversation with regular `tools:` frontmatter:
-
-```yaml
-tools: ["@mcp-filesystem"]
-```
-
-This is separate from `ellm-mcp-servers` and `mcp:` above, which configure MCP
-servers for ACP agents.
-
-### Automatic Persistence
-
-Automatic persistence is opt-in. You can persist your conversations
-automatically to a file. Global storage creates one directory per
-conversation below `~/ellm/`:
-
-```elisp
-(setq ellm-persistence-enabled t)
-```
-
-To use project-local storage instead:
-
-```elisp
-(setq ellm-persistence-enabled t
-      ellm-persistence-location 'project)
-```
-
-Project-local sessions are stored below `.ellm/`.  Outside a recognized
-project this setting falls back to `ellm-persistence-directory`.  Both the
-global directory and project directory name are customizable.
-
-Each main conversation and all subagents share a session directory:
-
-```text
-20260712T143012-a1b2c3/
-  main.ellm
-  subagents/
-    subagent_1.ellm
-    subagent_2.ellm
-```
-
-Ellm checkpoints the files when a user turn is sent, when an assistant turn
-finishes, and on cancellation, error, or buffer kill.  Reopening `main.ellm`
-restores its subagent history; saved subagents are opened lazily when a tool
-needs them.  Use `M-x ellm-new-temp-buffer` for a deliberately ephemeral
-conversation and ephemeral subagents even when persistence is enabled.
-
-### ACP Workspace Roots
-
-Set `cwd:` for the main project root.  Use `acp.additional-directories`
-when an ACP agent supports extra workspace roots.
-
-```yaml
-cwd: /home/me/project
-acp:
-  additional-directories:
-    - /home/me/shared-lib
-    - /home/me/docs
-```
-
+Notifications are implemented by using these hooks. You can utilize
+them to do other similar things but for normal use, not something that
+you'll reach for but here are they:
+
+- `ellm-before-request-hook` `(REQUEST EVENT)` — Runs after request
+  configuration is resolved but before the conversation or request
+  state is mutated; signaling an error vetoes the send.
+- `ellm-request-started-hook` `(REQUEST EVENT)` — Runs once
+  immediately before the initial backend leg of a logical request
+  starts.
+- `ellm-request-finished-hook` `(REQUEST OUTCOME)` — Runs once after a
+  logical request’s final cleanup; `OUTCOME` has a `:state` of
+  `completed`, `cancelled`, or `failed`.
+- `ellm-tool-call-hook` `(REQUEST EVENT)` — Reports a normalized tool
+  invocation observed by a backend.
+- `ellm-tool-finished-hook` `(REQUEST EVENT)` — Reports a normalized
+  terminal backend-observed tool outcome (`completed` or `failed`).
+- `ellm-before-permission-hook` `(REQUEST PERMISSION)` — Runs before
+  ellm queues a normalized permission prompt.
+- `ellm-after-permission-hook` `(REQUEST PERMISSION DECISION)` — Runs
+  after a permission decision; `DECISION` is `nil` when the prompt was
+  cancelled.
+- `ellm-tools-tool-call-start-hook` `(TOOL ARGS)` — Runs before a
+  local `ellm-deftool` body begins execution.
+- `ellm-tools-tool-call-end-hook` `(TOOL ARGS ERROR RAW RESULT)` —
+  Runs after a local `ellm-deftool` finishes; `RAW` is its
+  pre-transform result and `RESULT` is the value returned to the
+  model.
+
+# Configuring providers
+
+## API providers using `llm.el`
+
+<TODO: API provider configurations>
+
+## Codex
+
+<TODO: CODEX CONFIGURATION>
+
+## ACP
+
+<TODO: ACP CONFIGURATION + WHY IT EXISTS>
 
 # Rationale
 
-**TLDR**: This is a plain-text-first approach to LLM interaction that
-extends Markdown with a simple turn delimiter syntax (`>-| user`, `>-|
-assistant`, `>>-| tool-call`, etc.) to create self-contained,
-homoiconic conversation files. Conversations are regular text files
-that you can edit, fork, and navigate with existing tooling—no special
-management tooling needed. A YAML frontmatter holds per-buffer
-configuration to make files self-contained, and the format is fully
-customizable. ellm can also be seen as a frontend for *agentic* work,
-so you can hook up different providers (like various ACPs, or
-custom-implemented backends) and let your agent do cross-work between
-your different subscriptions, etc.
+<TODO: MOVE OLD RATIONALE HERE? OR JUST LINK MY BLOGPOST?>
 
----
+# Prior art
 
-There are two different parts of ellm, which I believe makes it
-powerful:
-
-- Plain text conversation files with an extended Markdown format. So
-  you get a lot of things for free, and because it's a superset of
-  Markdown, it defines *turns* as first-class citizens, which makes
-  navigation/folding etc. a breeze.
-- It's a frontend for any LLM provider. Right now it supports many API
-  providers through llm.el, Kagi Assistant, and ACP agents. You can also
-  implement a couple of functions and use ellm as your frontend for
-  another backend. Of course, each backend has a different level of
-  flexibility, but this lets you mix your different subscriptions. For
-  example, you can use Fable from your API subscription to make plans
-  and issue the real implementation work to your Codex subscription
-  through the ACP backend, which is orchestrated by Fable using
-  subagents. Subagents are also simple ellm buffers that agents can
-  manipulate. It also gives you a unified frontend for dealing with
-  all this nonsense.
-
-
----
-
-Here is a longer rant about why having it all plain-text is better (of
-course, not all backends have this level of power but you get the
-idea):
-
-I like plain text. I don't like having separate definitions for
-serialized (like having a transcript of an LLM interaction) and *real*
-data. Just like Lisp being homoiconic, I want my LLM interactions to
-be homoiconic (yes, that's not what it exactly means but I hope you
-got where I'm heading to. I also want to sound cool.). Being able to
-edit conversations just like a regular old file opens the doors to
-different opportunities. First of all, your all *file editing and
-navigation* knowledge transfers here completely. You also get *forking
-conversations* feature for free, just copy the parts you want and
-continue your discussion in another buffer. This also relieves you
-from learning another management tool, you are just switching between
-buffers which you do all day. You also get this for free. Also, you
-are able to edit the conversations as you want, this gives you
-different powers like
-this[1:https://haskellforall.com/2026/01/prompting-101-show-dont-tell]. Using
-this approach, build conversations that you like, save them as a file
-and use them anytime you want, or just share them. I can go on much
-more but you got the point.
-
-The natural extension to this mindset in Emacs world is Org. It has
-properties, you can attach data to headers. Runnable code blocks, or
-just any type of blocks. It's also extensible. As much as I wanted to
-use org-mode for interacting with LLMs-like for everything else I
-do--it's not feasible. First of all, you can't make LLMs output Org
-directly. You need to convert it to Org syntax on-the-fly. GPTel does
-this-along with a lot of other wonderful things, great package-but
-there is no real way to get it right, it almost always does something
-wrong. So, in a nutshell, conversion to Org is a frustrating practice
-that'll simply waste your time.
-
-The second best thing is, staying in the plain-text world, is using
-Markdown. LLMs love it for some reason, not matter how abusive you
-are, they don't back off from outputting Markdown. But there are
-couple problems with using Markdown, or as people use it right now:
-
-- No special syntax for conversation like interface. People utilize
-  headers for prompts. But what if your prompt is quite long? How do I
-  separate the LLM output from my prompt? LLMs also output Markdown
-  and you can't reliable tell them "JUST USE SECOND LEVEL HEADERS AND
-  NOTHING ELSE" or whatever you want to yell at those clankers. They
-  are going to use the Markdown construct that you want to keep it to
-  yourself, and output it.
-- This is an Emacs specific thing but markdown-mode, at least in my
-  experience, is slow. `markdown-ts-mode` is not very mature. Also
-  again, there is no special Markdown syntax for conversational
-  interface. You can select a good non-conflicting prefix for your
-  conversations but none of the Markdown modes will play with it
-  nicely when it comes to folding. The conversational turns should
-  have their own *block*, the folding should work within that block
-  without swallowing your special turn separator.
-
-Because LLMs are outputting Markdown-and they do not use every
-Markdown construct from every different Markdown spec, they simply use
-a fairly simple subset of features-, I didn't want to have a format
-that is different from Markdown, hence this, I extended Markdown with
-the following:
-
-```
->-| user
-...
->-| assistant
-...
-```
-
-We can call these a turn delimiter. Ending with `-|` because Markdown
-already uses `>` for denoting quotes and we need to differentiate and
-make it visually distinguishable. Also because quoting someone can
-introduce multiple `>`s stacking, that's why `>>` is not feasible. The
-choice of starting with `>` is deliberate because even without using a
-special mode for this type of file, you get a free syntax
-highlighting, other Markdown parsers will think this is a quote (and
-in a sense, it is). From one turn delimiter to another, all the
-Markdown features should work properly. For example, if you fold a
-header, it should fold at maximum to the next turn delimiter. Now that
-`>-|` lines belongs to our use, we can use it for the tool calls
-too. Adding more `>` would denote hierarchy, just like Markdown or Org
-headers, so you can have easily parsable hierarchies without keeping
-state:
-
-```
->-| user
-...
->-| assistant
-...
->>-| tool-call
-...
->>-| tool-result
-...
->>-| assistant
-...
-```
-
-The `>>-| assistant` line is the continuation of the assistant after
-the calls. Current implementation renders this line blank but it is
-required for being able to distinguish between different types of
-continuation lines, like tool calls and results.
-
-With this, we have a really simple conversational interface on top of
-Markdown. The rest of the features, like sending text from other
-buffers, forking conversations, attaching context etc. are
-responsibilities of the user. You can simply transfer your file
-editing know-how that is already existing.
-
-To make these files self-contained, I also put a YAML
-frontmatter. This can contain various configurations of ellm
-specificly for this buffer. It's also editable and after editing, the
-conversation will continue with these new configurations. For features
-that are not easily editable via YAML-like a long system prompt, you
-can still use the turn delimiters:
-
-```
->-| system
-...
->-| user
-...
->-| assistant
-```
-
-Of course, this is all customizable. You can change it to whatever.
-
-
-These lines can also carry custom data:
-
-```
->-| user | token: 300, cost: 0.25$,
-...
->-| assistant | took: 10s, cost: 0.03$
-...
-```
-
-This is the simple idea.
+<TODO: GPTEL, ALSO SOMETHING ABOUT GPTEL CAN BE AN ANOTHER BACKEND?>
