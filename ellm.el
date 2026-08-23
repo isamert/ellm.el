@@ -2796,7 +2796,15 @@ request-time read-only protection."
   ;; NOTE: yaml.el may emit scalar-looking strings such as "false" or "1" as
   ;; plain YAML scalars.  We accept that limitation because no supported
   ;; provider is known to rely on those exact string values.
-  (yaml-encode object))
+  ;;
+  ;; yaml-parse-string turns mapping keys into symbols, even when they were
+  ;; quoted.  yaml-encode writes symbols verbatim, but `@' may not start a
+  ;; YAML plain scalar.  Re-encoding frontmatter with a category selector
+  ;; would therefore turn `"@files":' into invalid `@files:'.
+  (replace-regexp-in-string
+   "^\\([ \t]*\\)\\(@[^ \t\n:]*\\)\\(:\\)"
+   "\\1\"\\2\"\\3"
+   (yaml-encode object)))
 
 (defun ellm--frontmatter-key-equal-p (left right)
   "Return non-nil when frontmatter keys LEFT and RIGHT name the same key."
