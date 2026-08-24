@@ -8554,7 +8554,7 @@ Return non-nil when BUFFER has a row in the current list."
         (ellm-list--goto-buffer next)))))
 
 (defconst ellm-list--keybindings
-  '(("g" . ellm-list-refresh)
+  '(("r" . ellm-list-refresh)
     ("TAB" . ellm-list-toggle-at-point)
     ("<backtab>" . ellm-list-cycle-groups)
     ("RET" . ellm-list-visit)
