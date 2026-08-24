@@ -141,29 +141,29 @@ and path, respectively, and no implicit pattern/path arguments are appended."
   :group 'ellm-tools)
 
 (defcustom ellm-tools-websearch-url "https://html.duckduckgo.com/html/"
-  "DuckDuckGo HTML endpoint used by the `websearch' tool."
+  "DuckDuckGo HTML endpoint used by the `web_search' tool."
   :type 'string
   :group 'ellm-tools)
 
 (defcustom ellm-tools-websearch-result-limit 5
-  "Default maximum number of results returned by the `websearch' tool."
+  "Default maximum number of results returned by the `web_search' tool."
   :type 'integer
   :group 'ellm-tools)
 
 (defcustom ellm-tools-webfetch-user-agent
   "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36"
-  "User-Agent header sent by the `webfetch' tool."
+  "User-Agent header sent by the `web_fetch' tool."
   :type 'string
   :group 'ellm-tools)
 
 (defcustom ellm-tools-webfetch-character-limit 40000
-  "Maximum number of rendered characters returned by `webfetch'.
+  "Maximum number of rendered characters returned by `web_fetch'.
 The default is roughly 10,000 tokens of typical English text."
   :type 'integer
   :group 'ellm-tools)
 
 (defcustom ellm-tools-webfetch-response-byte-limit 2000000
-  "Maximum response body size processed by `webfetch', in bytes.
+  "Maximum response body size processed by `web_fetch', in bytes.
 This bounds the memory and CPU used to download, decode, parse, and render an
 untrusted response before its rendered text can be subject to
 `ellm-tools-webfetch-character-limit'.  Larger bodies are truncated before
@@ -194,7 +194,7 @@ rendering."
 (defcustom ellm-tools-file-edit-checkers
   '(ellm-tools-file-edit-check-elisp-parens
     ellm-tools-file-edit-check-json)
-  "Functions that check files after `files/file-edit' changes them.
+  "Functions that check files after `files/edit' changes them.
 
 Each function is called with FILE-PATH, BUFFER, and CALLBACK.  FILE-PATH is
 an absolute file name and BUFFER contains the edited contents.  A checker
@@ -904,7 +904,7 @@ files searched."
         "No matches found" 1))
      callback)))
 
-(ellm-deftool files/file-edit (:async t)
+(ellm-deftool files/edit (:async t)
   ((file-path :string "The absolute or relative path to the file to edit.")
    (old-string :string "The exact text to replace, or an empty string to create a new file.")
    (new-string :string "The text to replace OLD-STRING with.")
@@ -917,7 +917,7 @@ the operation fails if the target already exists."
   (let ((default-directory (ellm-tools--default-directory)))
     (ellm-tools--edit-tool file-path old-string new-string callback replace-all)))
 
-(ellm-deftool files/read-file-lines (:async t)
+(ellm-deftool files/read (:async t)
   ((file-path :string "Path to the file. Relative paths are resolved from the conversation working directory.")
    (start-line :integer "Starting line number.")
    (end-line :integer "Ending line number."))
@@ -934,7 +934,7 @@ For a non-text file, return metadata without reading its contents."
 
 ;;;;; Buffers
 
-(ellm-deftool buffers/buffer-edit (:async t)
+(ellm-deftool buffers/edit-buffer (:async t)
   ((buffer-name :string "The name of the buffer to edit.")
    (old-string :string "The exact text to search for and replace in the buffer.")
    (new-string :string "The text to replace OLD-STRING with.")
@@ -949,7 +949,7 @@ is non-nil, in which case all occurrences are replaced."
   (ellm-tools--edit-tool (get-buffer buffer-name)
                          old-string new-string callback replace-all))
 
-(ellm-deftool buffers/list-buffers ()
+(ellm-deftool buffers/buffers ()
   ()
   "List names of open buffers.
 Act directly on buffers if you know the name already, without listing."
@@ -997,7 +997,7 @@ Act directly on buffers if you know the name already, without listing."
          "")
        "\n</buffer>"))))
 
-(ellm-deftool buffers/read-buffer-lines ()
+(ellm-deftool buffers/read-buffer ()
   ((buffer-name :string "Name of the buffer to read.")
    (start-line :integer "Starting line number (1-indexed). Optional." &optional)
    (end-line :integer "Ending line number (1-indexed). Optional." &optional))
@@ -1006,7 +1006,7 @@ Act directly on buffers if you know the name already, without listing."
     (ellm-tools--error "Operation failed: invalid input"))
   (ellm-tools--read-buffer-lines (get-buffer buffer-name) start-line end-line))
 
-(ellm-deftool tool-outputs/read ()
+(ellm-deftool tool-outputs/output ()
   ((output-id :string "Identifier named by a truncated tool result.")
    (start-line :integer "Starting line number (1-indexed). Optional." &optional)
    (end-line :integer "Ending line number (1-indexed). Optional." &optional))
@@ -1054,7 +1054,7 @@ Act directly on buffers if you know the name already, without listing."
     (ellm-tools--error "invalid buffer name"))
   (ellm-tools--search-buffer (get-buffer buffer-name) pattern regexp case-sensitive))
 
-(ellm-deftool tool-outputs/search ()
+(ellm-deftool tool-outputs/search-output ()
   ((output-id :string "Identifier named by a truncated tool result.")
    (pattern :string "The search pattern to look for.")
    (regexp :boolean "If true, treat pattern as a regular expression. Default is false." &optional)
@@ -1069,7 +1069,7 @@ Act directly on buffers if you know the name already, without listing."
 (declare-function flymake-diagnostic-text "flymake")
 
 ;; TODO: Make the issue backend configurable: flymake, flycheck, ...?
-(ellm-deftool buffers/get-buffer-issues ()
+(ellm-deftool buffers/buffer-issues ()
   ((buffer :string "Name of the buffer to get flymake diagnostics for."))
   "List current Flymake diagnostics for BUFFER.
 Each issue is returned as line-range:type:message."
@@ -1133,14 +1133,14 @@ Always pass the full current list, not just incremental changes."
 
 ;;;;; Agents
 
-(ellm-deftool agents/list-profiles ()
+(ellm-deftool agents/profiles ()
   ()
   "List effective named profiles available to this conversation."
   (ellm-tools--format-profiles (ellm--parse-frontmatter)))
 
 (ellm-deftool agents/launch-subagent ()
   ((prompt :string "Prompt to put in the new subagent's initial user turn.")
-   (profile :string "Optional active profile name for the child. Call `list_profiles' before selecting one; omit it to inherit the current effective configuration. Do not invent profile names." &optional)
+   (profile :string "Optional active profile name for the child. Call `profiles' before selecting one; omit it to inherit the current effective configuration. Do not invent profile names." &optional)
    (name :string "Optional display name for the subagent and its conversation." &optional)
    (cwd :string "Optional working directory for the subagent. Overrides the inherited or profile directory." &optional))
   "Launch a subagent in a new conversation and start it.
@@ -1148,13 +1148,13 @@ When PROFILE is supplied, it is the child's active profile.  Otherwise the
 child inherits the current effective configuration."
   (ellm-tools--launch-subagent prompt profile name cwd))
 
-(ellm-deftool agents/list-subagents ()
+(ellm-deftool agents/subagents ()
   ()
   "List subagents launched from the current ellm buffer."
   (ellm-tools--format-subagent-history ellm-subagent-history))
 
 (ellm-deftool agents/wait-subagent (:async t)
-  ((subagent :string "Subagent id from `list_subagents' or its conversation name."))
+  ((subagent :string "Subagent id from `subagents' or its conversation name."))
   "Wait for SUBAGENT to finish and return its latest result."
   (ellm-tools--wait-subagent subagent callback))
 
@@ -1168,7 +1168,7 @@ conversation buffer."
 
 ;;;;; Web
 
-(ellm-deftool web/websearch (:async t)
+(ellm-deftool web/web-search (:async t)
   ((query :string "Search query.")
    (max-results :integer "Maximum number of web results to return. Omit to use the standard limit." &optional))
   "Search the web for pages relevant to QUERY."
@@ -1177,7 +1177,7 @@ conversation buffer."
                 max-results ellm-tools-websearch-result-limit)))
     (ellm-tools--start-websearch query limit callback)))
 
-(ellm-deftool web/webfetch (:async t)
+(ellm-deftool web/web-fetch (:async t)
   ((url :string "HTTP or HTTPS URL to fetch."))
   "Fetch a URL and return its readable text.
 Use this to read a specific web page, document, or text resource."
@@ -2396,7 +2396,7 @@ from their live parent when possible."
 (defun ellm-tools--format-subagent-launch-result (entry buffer)
   "Return model-readable launch result for ENTRY and BUFFER."
   (format (concat "<subagent id=%S buffer=%S status=%S>\n"
-                  "Use read_buffer_lines, search_buffer, buffer_edit, or send_ellm_buffer to inspect or continue this buffer when those tools are enabled.\n"
+                  "Use read_buffer, search_buffer, edit_buffer, or send_ellm_buffer to inspect or continue this buffer when those tools are enabled.\n"
                   "</subagent>")
           (plist-get entry :id)
           (buffer-name buffer)
@@ -2871,7 +2871,7 @@ The return value is a cons of body and whether it was truncated."
     (cons (buffer-substring-no-properties start end) truncated)))
 
 (defun ellm-tools--webfetch (url character-limit user-agent response-byte-limit)
-  "Fetch and render URL for the `webfetch' tool."
+  "Fetch and render URL for the `web_fetch' tool."
   ;; The parent applies CHARACTER-LIMIT so it can retain the complete rendering.
   (ignore character-limit)
   (require 'url)

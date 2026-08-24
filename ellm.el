@@ -182,7 +182,7 @@ into implementation work.")
               (tools . ("@files" "@shell" "@web" "@tasks" "@agents" "@user" "@tool-outputs"))
               (system . ,ellm--agent-system-prompt)))
     (explore . ((description . "Read-only codebase exploration, change analysis, and external research.")
-                (tools . ("glob" "grep" "read_file_lines" "websearch" "webfetch" "git" "@tool-outputs"))
+                (tools . ("glob" "grep" "read" "web_search" "web_fetch" "git" "@tool-outputs"))
                 (system . ,ellm--explore-system-prompt))))
   "Global reusable conversation profiles.
 Each entry maps a profile name to frontmatter defaults.  Buffer-local

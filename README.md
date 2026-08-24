@@ -166,7 +166,7 @@ model: deepseek-v4-pro
 profile: agent
 profiles:
   - name: reviewer-agent
-    tools: [read_file_lines, git, glob, grep]
+    tools: [read, git, glob, grep]
     system: You are a reviewer. Review the code changes and report possible issues.
 
 # Here we defined a profile that has no access to shell and but tools
@@ -296,28 +296,33 @@ see `ellm-tools.el`):
 - `shell/bash`
 - `files/glob`
 - `files/grep`
-- `files/file-edit`
-- `files/read-file-lines`
-- `buffers/buffer-edit`
-- `buffers/list-buffers`
-- `buffers/read-buffer-lines`
-- `tool-outputs/read`
-- `tool-outputs/search`
+- `files/edit`
+- `files/read`
+- `buffers/edit-buffer`
+- `buffers/buffers`
+- `buffers/read-buffer`
+- `tool-outputs/output`
+- `tool-outputs/search-output`
 - `buffers/search-buffer`
-- `buffers/get-buffer-issues`
+- `buffers/buffer-issues`
 - `emacs/elisp-info`
 - `emacs/elisp-search`
 - `emacs/elisp-eval`
 - `tasks/todowrite`
-- `agents/list-profiles`
+- `agents/profiles`
 - `agents/launch-subagent`
-- `agents/list-subagents`
+- `agents/subagents`
 - `agents/wait-subagent`
 - `buffers/send-ellm-buffer`
-- `web/websearch`
-- `web/webfetch`
+- `web/web-search`
+- `web/web-fetch`
 - `user/ask`
 - `git/git`
+
+The category is only for grouping.  The name exposed to providers and used in
+frontmatter is the part after `/`, with hyphens written as underscores: for
+example, `files/read` is `read` and `web/web-search` is `web_search`.  Exposed
+names are globally unique.
 
 Again you can utilize the frontmatter to enable/disable tools:
 
@@ -327,8 +332,8 @@ provider: codex
 model: "gpt-5.6-terra"
 profile: agent    # Brings all tools enabled in `agent` profile
 tools: ["@files"] # This compeletly overrides tool selections for current buffer. Now we only have tools from the files category.
-tools-: [file_edit] # We removed the file_edit tool from available tools. Again, you can use the @category notation to remove whole category.
-tools+: ["@agents", websearch] # Added all @agents category of tools and websearch tool.
+tools-: [edit] # We removed the edit tool from available tools. Again, you can use the @category notation to remove whole category.
+tools+: ["@agents", web_search] # Added all @agents category of tools and web_search tool.
 ---
 ```
 
@@ -342,7 +347,7 @@ can change this with `tool-permissions`:
 ---
 # ...
 tool-permissions:
-  file_edit: ask  # Now you need to manually approve file_edit calls.
+  edit: ask  # Now you need to manually approve edit calls.
   "@emacs": ask   # This enables manual approval for whole emacs category of tools: elisp-info, elisp_search, elisp_eval
 ---
 ```
@@ -351,11 +356,11 @@ tool-permissions:
 
 There is a public API to define tools, `ellm-deftools`. Here is an
 example tool definition from my dotfiles. This one, when evalled,
-replaces the current `web/websearch` tool. Of course you can define
+replaces the current `web/web-search` tool. Of course you can define
 new tools using this macro too.
 
 ```elisp
-(ellm-deftool web/websearch (:async t)
+(ellm-deftool web/web-search (:async t)
     ((query :string "The search query."))
     "Perform a web search and receive concise results and links to sources."
     (my-kagi-search
@@ -381,7 +386,7 @@ new tools using this macro too.
 
 The category name (`web/` part in this case) is there just for
 grouping, it can be anything. The tool names should be unique (the
-`websearch` part.)
+`web_search` part.)
 
 The tool definitions are kept in `gptel` compatible format. See
 `ellm-tools-refs` variable, you can use this to convert ellm tools
@@ -497,7 +502,9 @@ either a project or a subagent tree. The updates are reflected in real
 time. This is a simple and very effective interface for managing
 multiple agents across many different projects. It also uses some
 colors, temporary pulsing etc. to get your attention. You can directly
-answer prompts for agents within this buffer.
+answer prompts for agents within this buffer. Press `C` on a project or
+directory group (or one of its conversations) to create a new conversation
+there.
 
 <TODO: IMAGE HERE>
 
