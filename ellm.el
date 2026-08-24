@@ -3666,10 +3666,12 @@ The current session store is preferred over the global cache."
      (ellm--persistence-session-directory-from-file
       (ellm--persistence-session-role)))))
 
-(defun ellm--persistence-setup-buffer ()
-  "Assign persistence metadata and a visited file to the current buffer."
-  (when (and ellm-persistence-enabled
-             (not ellm--persistence-ephemeral-p)
+(defun ellm--persistence-setup-buffer (&optional force root)
+  "Assign persistence metadata and a visited file to the current buffer.
+When FORCE is non-nil, persist regardless of automatic-persistence settings.
+ROOT, when non-nil, is the parent directory for a newly created session."
+  (when (and (or force ellm-persistence-enabled)
+             (or force (not ellm--persistence-ephemeral-p))
              (not ellm--persistence-saving-p))
     (let* ((ellm--persistence-saving-p t)
            (role (ellm--persistence-session-role))
@@ -3678,7 +3680,7 @@ The current session store is preferred over the global cache."
         (setq-local
          ellm--session-directory
          (or (ellm--persistence-session-directory-from-file role)
-             (when-let* ((root (ellm--persistence-root)))
+             (when-let* ((root (or root (ellm--persistence-root))))
                (expand-file-name (concat session-id "/") root)))))
       (when ellm--session-directory
         (make-directory ellm--session-directory t)
@@ -3691,14 +3693,16 @@ The current session store is preferred over the global cache."
               (set-visited-file-name file t)
               (rename-buffer name t))))))))
 
-(defun ellm--persistence-checkpoint ()
-  "Persist the current ellm buffer at a stable conversation boundary."
-  (when (and ellm-persistence-enabled
-             (not ellm--persistence-ephemeral-p)
+(defun ellm--persistence-checkpoint (&optional force root)
+  "Persist the current ellm buffer at a stable conversation boundary.
+When FORCE is non-nil, persist regardless of automatic-persistence settings.
+ROOT has the same meaning as in `ellm--persistence-setup-buffer'."
+  (when (and (or force ellm-persistence-enabled)
+             (or force (not ellm--persistence-ephemeral-p))
              (not ellm--persistence-saving-p))
     (condition-case err
         (progn
-          (ellm--persistence-setup-buffer)
+          (ellm--persistence-setup-buffer force root)
           (ellm--localize-reasoning-state-files)
           (ellm--persist-tool-output-buffers)
           (when buffer-file-name
@@ -3711,6 +3715,71 @@ The current session store is preferred over the global cache."
        (lwarn 'ellm :warning "Failed to persist conversation: %s"
               (error-message-string err))
        nil))))
+
+(defun ellm--related-session-buffers (session-id)
+  "Return live ellm buffers related to the current session.
+SESSION-ID identifies already persisted members.  Live subagent parent links
+also include members created before their parent was explicitly saved."
+  (let ((pending (list (current-buffer)))
+        seen)
+    (while pending
+      (let ((buffer (pop pending)))
+        (unless (memq buffer seen)
+          (push buffer seen)
+          (let ((name (buffer-name buffer)))
+            (dolist (candidate (buffer-list))
+              (when (and (not (memq candidate seen))
+                         (with-current-buffer candidate
+                           (and (derived-mode-p 'ellm-mode)
+                                (or (equal (ellm--frontmatter-value
+                                            '(ellm session-id))
+                                           session-id)
+                                    (equal (and (local-variable-p
+                                                 'ellm-subagent-parent-buffer)
+                                                ellm-subagent-parent-buffer)
+                                           name)))))
+                (push candidate pending)))
+            (when-let* ((parent-name
+                         (with-current-buffer buffer
+                           (and (local-variable-p
+                                 'ellm-subagent-parent-buffer)
+                                ellm-subagent-parent-buffer)))
+                        (parent (get-buffer parent-name)))
+              (push parent pending))))))
+    (nreverse seen)))
+
+;;;###autoload
+(defun ellm-save (&optional choose-directory)
+  "Save the current ellm session and its related buffers.
+This explicitly persists the main conversation, all live subagents, retained
+tool outputs, and reasoning state without enabling automatic persistence.
+
+With prefix argument CHOOSE-DIRECTORY, prompt for the parent directory of a
+new session.  An existing session always keeps its current directory."
+  (interactive "P")
+  (unless (derived-mode-p 'ellm-mode)
+    (user-error "ellm-save must be called from an ellm buffer"))
+  (when (and choose-directory ellm--session-directory)
+    (user-error "This ellm session is already saved in %s"
+                ellm--session-directory))
+  (let ((root (and choose-directory
+                   (read-directory-name "Save ellm session in: " nil nil t))))
+    (unless (or ellm--session-directory root (ellm--persistence-root))
+      (user-error "ellm: persistence has no directory here; use a prefix argument"))
+    (ellm--persistence-setup-buffer t root)
+    (unless ellm--session-directory
+      (user-error "ellm: could not determine a session directory"))
+    (let* ((session-id (ellm--ensure-session-id))
+           (directory ellm--session-directory)
+           (buffers (ellm--related-session-buffers session-id)))
+      (dolist (buffer buffers)
+        (with-current-buffer buffer
+          ;; Subagents can have been launched before their parent was saved.
+          ;; Give every related live buffer the newly established session first.
+          (setq-local ellm--session-directory directory)
+          (ellm--persistence-set-frontmatter-value '(ellm session-id) session-id)
+          (ellm--persistence-checkpoint t)))
+      (message "ellm: saved session to %s" directory))))
 
 (defun ellm--persistence-before-kill ()
   "Save the current conversation before backend session cleanup."
