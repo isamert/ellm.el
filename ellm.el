@@ -3693,6 +3693,26 @@ ROOT, when non-nil, is the parent directory for a newly created session."
               (set-visited-file-name file t)
               (rename-buffer name t))))))))
 
+(defun ellm--persistence-capture-working-directory ()
+  "Record and apply the current conversation working directory.
+A persisted transcript must not derive its workspace from its storage path.
+When its effective frontmatter has no `cwd', record that directory as an
+absolute `cwd' before associating the buffer with its persistence file."
+  (let ((frontmatter (ellm--effective-frontmatter)))
+    (unless (alist-get 'cwd frontmatter)
+      (ellm--set-frontmatter-value
+       'cwd (ellm--working-directory frontmatter)))
+    (ellm--apply-working-directory (ellm--effective-frontmatter))))
+
+(defun ellm--persistence-prepare (&optional force root)
+  "Prepare the current buffer for persistence.
+FORCE and ROOT have the same meanings as in `ellm--persistence-checkpoint'."
+  (ellm--persistence-capture-working-directory)
+  (ellm--persistence-setup-buffer force root)
+  ;; `set-visited-file-name' changes `default-directory' to the storage path.
+  ;; Reapply the conversation workspace afterwards.
+  (ellm--apply-working-directory (ellm--effective-frontmatter)))
+
 (defun ellm--persistence-checkpoint (&optional force root)
   "Persist the current ellm buffer at a stable conversation boundary.
 When FORCE is non-nil, persist regardless of automatic-persistence settings.
@@ -3702,7 +3722,7 @@ ROOT has the same meaning as in `ellm--persistence-setup-buffer'."
              (not ellm--persistence-saving-p))
     (condition-case err
         (progn
-          (ellm--persistence-setup-buffer force root)
+          (ellm--persistence-prepare force root)
           (ellm--localize-reasoning-state-files)
           (ellm--persist-tool-output-buffers)
           (when buffer-file-name
@@ -3766,7 +3786,7 @@ new session.  An existing session always keeps its current directory."
                    (read-directory-name "Save ellm session in: " nil nil t))))
     (unless (or ellm--session-directory root (ellm--persistence-root))
       (user-error "ellm: persistence has no directory here; use a prefix argument"))
-    (ellm--persistence-setup-buffer t root)
+    (ellm--persistence-prepare t root)
     (unless ellm--session-directory
       (user-error "ellm: could not determine a session directory"))
     (let* ((session-id (ellm--ensure-session-id))
