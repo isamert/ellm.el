@@ -253,6 +253,15 @@ It receives one `%s' argument: the subagent display name or id."
   :type 'string
   :group 'ellm-tools)
 
+(defcustom ellm-subagent-max-depth 2
+  "Maximum number of subagent levels below a root conversation.
+
+A root conversation has depth zero.  When a child reaches this depth,
+its agent-management tools are removed.  Nil permits unlimited nesting."
+  :type '(choice (const :tag "Unlimited" nil)
+                 (integer :tag "Levels" 0))
+  :group 'ellm-tools)
+
 (defvar-local ellm-subagent-history nil
   "Buffer-local history of subagents launched from this ellm buffer.
 Each entry is a plist with serializable values such as `:id',
@@ -2173,8 +2182,81 @@ FALLBACK-PROVIDER is used when FRONTMATTER has no `provider:' key."
       (setq result (ellm--alist-delete-nested result path)))
     result))
 
+(defun ellm-tools--subagent-depth (frontmatter)
+  "Return the current subagent depth from FRONTMATTER.
+
+Older live subagent buffers may not have persisted a depth.  Derive theirs
+from their live parent when possible."
+  (let ((depth (ellm--alist-get-nested frontmatter '(subagent depth))))
+    (cond
+     ((and (integerp depth) (>= depth 0)) depth)
+     ((and ellm-subagent-id ellm-subagent-parent-buffer
+           (get-buffer ellm-subagent-parent-buffer))
+      (with-current-buffer (get-buffer ellm-subagent-parent-buffer)
+        (1+ (ellm-tools--subagent-depth (ellm--parse-frontmatter)))))
+     (t 0))))
+
+(defun ellm-tools--more-restrictive-permission (left right)
+  "Return the more restrictive of tool permissions LEFT and RIGHT."
+  (if (>= (alist-get left '((allow . 0) (ask . 1) (deny . 2)))
+          (alist-get right '((allow . 0) (ask . 1) (deny . 2))))
+      left
+    right))
+
+(defun ellm-tools--clamp-subagent-frontmatter (parent child)
+  "Restrict CHILD's resolved capabilities to those available to PARENT."
+  (let* ((parent (ellm--effective-frontmatter parent))
+         (child-effective (ellm--effective-frontmatter child))
+         (parent-tools (ellm--resolve-tools parent))
+         (child-tools
+          (cl-remove-if-not
+           (lambda (tool)
+             (memq tool parent-tools))
+           (ellm--resolve-tools child-effective)))
+         (parent-mcp (ellm--resolve-mcp-servers parent))
+         (child-mcp
+          (cl-remove-if-not
+           (lambda (server)
+             (cl-find (car server) parent-mcp :key #'car :test #'equal))
+           (ellm--resolve-mcp-servers child-effective)))
+         (permissions
+          (mapcar
+           (lambda (tool)
+             (let ((permission
+                    (ellm-tools--more-restrictive-permission
+                     (ellm--tool-permission-policy parent tool)
+                     (ellm--tool-permission-policy child-effective tool))))
+               (cons (ellm-tool-name tool) (symbol-name permission))))
+           child-tools)))
+    ;; Explicit resolved selections prevent a profile from adding capabilities
+    ;; after the parent ceiling has been applied.
+    (dolist (key '(tools+ tools- mcp+ mcp-))
+      (setq child (ellm-tools--alist-delete-nested child key)))
+    (setq child
+          (ellm-tools--frontmatter-set
+           child 'tools (mapcar #'ellm-tool-name child-tools)))
+    (setq child
+          (ellm-tools--frontmatter-set
+           child 'mcp
+           (mapcar (lambda (server)
+                     (let ((config (cdr server)))
+                       (if (ellm--mcp-inline-server-p config)
+                           (copy-tree config)
+                         (car server))))
+                   child-mcp)))
+    (ellm-tools--frontmatter-set child 'tool-permissions permissions)))
+
+(defun ellm-tools--disable-subagent-tools (frontmatter)
+  "Remove agent-management tools from FRONTMATTER's enabled tools."
+  (ellm-tools--frontmatter-set
+   frontmatter 'tools-
+   (delete-dups
+    (append (ellm--frontmatter-selector-entry-list
+             'tools (alist-get 'tools- frontmatter))
+            '("@agents")))))
+
 (defun ellm-tools--subagent-frontmatter
-    (parent-frontmatter id parent-id parent-name parent-file name prompt profile
+    (parent-frontmatter id parent-id parent-name parent-file depth name prompt profile
                         cwd fallback-provider)
   "Return (FRONTMATTER . PROFILE-NAME) for a new subagent."
   (let* ((profile-name (and (ellm-tools--present-string profile)
@@ -2199,12 +2281,18 @@ FALLBACK-PROVIDER is used when FRONTMATTER has no `provider:' key."
            frontmatter 'subagent
            (delq nil
                  (list (cons 'id id)
+                       (cons 'depth depth)
                        (and parent-id (cons 'parent-id parent-id))
                        (cons 'parent-buffer parent-name)
                        (and parent-file (cons 'parent-file parent-file))
                        (and (ellm-tools--present-string name) (cons 'name name))
                        (and profile-name (cons 'profile profile-name))
                        (cons 'prompt (ellm-tools--prompt-summary prompt))))))
+    (setq frontmatter
+          (ellm-tools--clamp-subagent-frontmatter parent-frontmatter frontmatter))
+    (when (and ellm-subagent-max-depth
+               (>= depth ellm-subagent-max-depth))
+      (setq frontmatter (ellm-tools--disable-subagent-tools frontmatter)))
     (ellm-tools--validate-subagent-frontmatter
      (ellm--effective-frontmatter frontmatter) fallback-provider)
     (cons frontmatter profile-name)))
@@ -2330,6 +2418,7 @@ FALLBACK-PROVIDER is used when FRONTMATTER has no `provider:' key."
          (parent-frontmatter (if (derived-mode-p 'ellm-mode)
                                  (ellm--parse-frontmatter)
                                nil))
+         (depth (1+ (ellm-tools--subagent-depth parent-frontmatter)))
          (fallback-provider
           (if parent-frontmatter
               (ellm--resolve-provider
@@ -2340,7 +2429,7 @@ FALLBACK-PROVIDER is used when FRONTMATTER has no `provider:' key."
          (id (ellm-tools--next-subagent-id))
          (frontmatter-entry
           (ellm-tools--subagent-frontmatter
-           parent-frontmatter id parent-id parent-buffer-name parent-file name prompt
+           parent-frontmatter id parent-id parent-buffer-name parent-file depth name prompt
            profile cwd fallback-provider))
          (frontmatter (car frontmatter-entry))
          (profile-name (cdr frontmatter-entry))
