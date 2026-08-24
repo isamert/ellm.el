@@ -83,8 +83,32 @@ that uses these primitives.
 
 # Installation
 
-<TODO: INSTALLATION INSTRUCTIONS>
-<TODO: LINK CONFIGURATION AND CONFIGURING PROVIDERS SECTIONS>
+Install it from this repository with your package manager.  For
+example, with Elpaca and `use-package`:
+
+```elisp
+(use-package ellm
+  ;; elpaca
+  :ensure (:host github :repo "isamert/ellm.el" :files ("*.el"))
+  ;; vc (requires use-package-vc)
+  ;; :vc (:url "https://github.com/isamert/ellm.el")
+  ;; straight.el
+  ;; :straight (:host github :repo "isamert/ellm.el" :files ("*.el"))
+  :config
+  (require 'ellm-tools)
+  (require 'ellm-llm)
+  ;; Set this to not get bombarded by nonfree warnings
+  (setq llm-warn-on-nonfree nil))
+```
+
+`ellm.el` provides the mode and conversation core.  Load `ellm-tools`
+for the built-in tools and `ellm-llm` for API providers through
+`llm.el`.  The Codex and ACP backends are optional; load `ellm-codex`
+or `ellm-acp` when you use them.
+
+You still need to configure a provider before sending a request.  See
+[Configuration](#configuration) and [Configuring
+providers](#configuring-providers).
 
 # Usage
 
@@ -453,54 +477,127 @@ target it)
 
 ## Managing multiple agents & subagents
 
-<TODO: MANAGING MULTIPLE AGENTS>
+`M-x ellm-dwim` finds the main conversations for the current project
+(or current directory outside a project).  It reuses one when possible
+and asks when there are several.  Use a prefix argument to always
+start a new one.  `ellm-toggle-side-window` does the same thing in a
+side window.
 
-- ellm-dwim, toggle-side
-- ellm-list
-- ellm-switch-to-project-buffer
-- ellm-switch-to-subagent-buffer
+`M-x ellm-switch-to-project-buffer` switches to a main conversation
+for the current project.  With a prefix argument it includes subagents
+too.  The agent can create subagents with the `launch-subagent` tool;
+they are ordinary ellm buffers with their own frontmatter and can be
+visited, edited, and sent like any other conversation. There is also
+`ellm-switch-to-subagent-buffer` which is pretty self explanatory.
+
+`M-x ellm-list` shows every live conversation, grouped by project or
+directory.  It shows request status, todos, context use, and model.
+Main conversations show their subagents as children; `TAB` folds
+either a project or a subagent tree. The updates are reflected in real
+time. This is a simple and very effective interface for managing
+multiple agents across many different projects. It also uses some
+colors, temporary pulsing etc. to get your attention. You can directly
+answer prompts for agents within this buffer.
+
+<TODO: IMAGE HERE>
 
 ## In buffer controls
 
-<TODO: IN BUFFER CONTROLS>
+Turns and Markdown headings work with the usual outline commands.
+`TAB` cycles the subtree at point and `S-TAB` cycles the whole buffer.
+`C-c C-c` sends the current prompt, `C-c C-k` cancels the current
+request, and `C-c C-e` opens a compose buffer while a response is
+streaming. You can jump between headings with, again, using the usual
+outline commands like `outline-{next,prev,up}-heading` etc.
 
-- Folding, jumping etc.
-- `ellm-show-effective-system-prompts`
-- `ellm-refresh-system-prompts`
-- `ellm-narrow-to-turn`
-- `ellm-narrow-to-header`
-- `ellm-narrow-dwim`
-- `ellm-jump-to-tool-pair`
-- `ellm-toggle-tag`
-- `ellm-fold-all-tags`
-- `ellm-unfold-all-tags`
-- `ellm-fold-all-tool-blocks`
-- `ellm-fold-all-reasoning-blocks`
-- `ellm-fold-all-blocks`
+Some other useful commands are:
+
+- `ellm-narrow-to-turn`, `ellm-narrow-to-header`, and
+  `ellm-narrow-dwim` narrow to the relevant turn or Markdown section.
+- `ellm-jump-to-tool-pair` jumps between a tool call and its result.
+- `ellm-toggle-tag`, `ellm-fold-all-tags`, and `ellm-unfold-all-tags`
+  fold XML-style prompt tags. Again, `TAB` also works for folding
+  them.
+- `ellm-fold-all-tool-blocks`, `ellm-fold-all-reasoning-blocks`, and
+  `ellm-fold-all-blocks` fold generated details.
 
 ## Persistence
 
-<TODO: PERSISTENCE>
+Conversations are plain text, so you can always save an `.ellm` file yourself
+and reopen it later.  Automatic persistence is optional.  Set
+`ellm-persistence-enabled` to non-nil and new main conversations are saved as
+`main.ellm` in their own session directories.  Their subagents, retained tool
+outputs, and reasoning state are saved alongside them.
+
+`ellm-persistence-location` controls where sessions go.  The default
+`global` location is `ellm-persistence-directory` (`~/ellm/`).  Set it to
+`project` to store sessions below `ellm-persistence-project-directory`
+(`.ellm`) in each project.  `M-x ellm-open-session` opens a saved main
+conversation.
+
+You can also use the `ellm-save` command to save the current
+conversation and its live subagents/tool-outputs/encrypted reasonings
+etc. even when automatic persistence is disabled; use a prefix
+argument to choose its parent directory manually, otherwise it still
+uses the `ellm-persistence-location`.
 
 ## MCPs
 
-<TODO: MCPs>
+WARNING: This is not working properly right now
+
+For ACP agents, configure available servers with `ellm-mcp-servers` and
+select them in frontmatter.  Server entries use the same shape as
+`mcp-hub-servers`: a command and arguments for stdio, or a URL for a remote
+server.
+
+```elisp
+(setq ellm-mcp-servers
+      '((filesystem . (:command "npx"
+                       :args ("-y"
+                              "@modelcontextprotocol/server-filesystem"
+                              ".")
+                       :category "local"))))
+```
+
+```markdown
+---
+mcp: [filesystem]
+---
+```
+
+`mcp: true` enables every configured server.  `@CATEGORY` selects a category,
+and inline server maps are also supported by frontmatter completion.
+
+For the `llm.el` backend, install and configure `mcp.el`, connect its
+servers, then load `ellm-mcp` and run `M-x ellm-register-mcp-tools`.  Registered tools are
+named by server category, so `tools: ["@mcp-filesystem"]` enables the tools
+from the `filesystem` server.
 
 # Configuration
 
-<TODO: SECTION ABOUT GENERAL CONFIGURATION STUFF>
+Most configuration is either a regular Emacs customization variable or YAML
+frontmatter.  Use `M-x customize-group RET ellm` for global defaults, and use
+frontmatter when a setting belongs to one conversation.  Frontmatter has
+completion-at-point, and `M-x ellm-set-config` provides an interactive editor.
+
+The important global starting point is `ellm-provider-alist`, which maps the
+names used by `provider:` to provider objects.  `ellm-provider` is the
+fallback when a buffer does not name one.  `ellm-profiles` contains reusable
+frontmatter defaults such as tools, system prompts, and model choices.  See
+[Profiles and system prompts](#profiles-and-system-prompts) for profile
+examples.
 
 ## Visuals and the header line
 
 The header line can show:
 
-- session title;
-- active todo;
-- todo completion progress;
-- context usage;
-- request cost;
-- pending user prompt status;
-- next-prompt draft state.
+- session title
+- active todo
+- todo completion progress
+- context usage
+- request cost
+- pending user prompt status
+- next-prompt draft state
 
 `ellm-header-line-template` supports placeholders:
 
@@ -598,15 +695,93 @@ you'll reach for but here are they:
 
 ## API providers using `llm.el`
 
-<TODO: API provider configurations>
+ellm uses [`llm.el`](https://github.com/ahyatt/llm) for ordinary API
+providers.  Load the provider implementation you need, create its provider
+object, then add it to `ellm-provider-alist`.  For example, an OpenAI
+provider can look like this:
+
+```elisp
+(require 'auth-source)
+(require 'llm-openai)
+
+(setq ellm-provider-alist
+      `((openai . (:provider ,(make-llm-openai
+                                :key (auth-source-pick-first-password :host "api.openai.com")
+                                :chat-model "gpt-5.5")
+                   :models ("gpt-5.5" "gpt-5.6-sol") ; optional list of models, known ones will be available by default
+                   :small-model "gpt-5.4-nano"))))
+```
+
+Then select it in a conversation:
+
+```markdown
+---
+provider: openai
+model: gpt-5.5
+temperature: 0.1
+---
+```
+
+`llm.el` has providers for a number of services and local models.  The same
+pattern applies to all of them: require its library, construct a provider,
+and give it a name in `ellm-provider-alist`.  `:models` supplies frontmatter
+completion; `:small-model` is used for small auxiliary requests such as
+title generation.
 
 ## Codex
 
-<TODO: CODEX CONFIGURATION>
+The Codex provider uses your ChatGPT subscription rather than an API
+key.  Load `ellm-codex`, create a provider, and add it to the provider
+alist:
+
+```elisp
+(require 'ellm-codex)
+
+(setq ellm-provider-alist
+      `((codex . (:provider ,(ellm-make-codex-provider :chat-model "gpt-5.6-terra")
+                  :models ("gpt-5.6-terra" "gpt-5.6-sol" "gpt-5.6-luna")))))
+```
+
+Run `M-x ellm-codex-login` once to sign in.  It opens a browser by
+default; with a prefix argument it uses device-code login.
+Credentials are stored in `ellm-codex-auth-file`.  Select it with
+`provider: codex` in frontmatter.  The available models and reasoning
+levels are completed in the buffer.
 
 ## ACP
 
-<TODO: ACP CONFIGURATION + WHY IT EXISTS>
+[Agent Client Protocol](https://agentclientprotocol.com/) (ACP) lets
+ellm use an external coding agent while keeping the same conversation
+buffer and controls.
+
+The whole reason this exists is that sometimes at work I also use a
+subscription my company gives me and I want the same level of
+controls, ease of use and familiarity of ellm. Of course, this backend
+is not as powerful as `llm` backend because it comes with it's own
+tools, profiles, system prompts etc. and you are not allowed to
+customize but I believe the Emacs integration and the familiarity
+makes it worthwhile. Still needs a lot of polishing though.
+
+Load `ellm-acp`, configure the program that starts the agent's ACP
+server, and add it to `ellm-provider-alist`:
+
+```elisp
+(require 'ellm-acp)
+
+(defvar my-agent
+  (ellm-make-acp-provider
+   :command "YOUR-AGENT"
+   :args '("acp")
+   :model "YOUR-MODEL"))
+
+(setq ellm-provider-alist
+      `((my-agent . ,my-agent)))
+```
+
+Use `provider: my-agent` in frontmatter.  ellm starts a session for the
+buffer, translates ACP events into turns, and forwards permission requests
+to the usual ellm permission UI.  Agent capabilities differ, so frontmatter
+completion discovers session configuration when the agent exposes it.
 
 # Rationale
 
