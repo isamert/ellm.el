@@ -8622,6 +8622,25 @@ Return non-nil when BUFFER has a row in the current list."
     (pop-to-buffer buffer)
     (ellm-answer-prompt)))
 
+(defun ellm-list-new ()
+  "Create and visit an ellm conversation for the group at point."
+  (interactive nil ellm-list-mode)
+  (let* ((buffer (ellm-list--buffer-at-point t))
+         (directory
+          (or (and buffer (ellm--buffer-root-or-directory buffer))
+              (when-let* ((group (ellm-list--group-at-point)))
+                (cond
+                 ((string-prefix-p "project:" group)
+                  (substring group (length "project:")))
+                 ((string-prefix-p "directory:" group)
+                  (substring group (length "directory:"))))))))
+    (unless directory
+      (user-error "ellm: no project or directory at point"))
+    (let* ((default-directory directory)
+           (new-buffer (save-window-excursion (ellm-new-buffer))))
+      (ellm-list-refresh)
+      (pop-to-buffer new-buffer))))
+
 (defun ellm-list-kill ()
   "Kill the conversation at point, retaining point on the nearest row."
   (interactive nil ellm-list-mode)
@@ -8649,6 +8668,7 @@ Return non-nil when BUFFER has a row in the current list."
     ("RET" . ellm-list-visit)
     ("c" . ellm-list-cancel)
     ("a" . ellm-list-answer-prompt)
+    ("C" . ellm-list-new)
     ("x" . ellm-list-kill)
     ("q" . quit-window))
   "Bindings shared by `ellm-list-mode' and its Evil normal state.")
@@ -8686,7 +8706,8 @@ conversation state only when such updates were skipped."
 \\<ellm-list-mode-map>\\[ellm-list-toggle-at-point] toggles subagents or the group at point,
 \\[ellm-list-cycle-groups] cycles all groups, \\[ellm-list-visit] visits,
 \\[ellm-list-cancel] cancels, \\[ellm-list-answer-prompt] answers input,
-and \\[ellm-list-kill] kills the selected conversation."
+\\[ellm-list-new] creates a conversation for the group at point, and
+\\[ellm-list-kill] kills the selected conversation."
   (setq-local truncate-lines t)
   (hl-line-mode 1)
   (add-to-invisibility-spec '(ellm-list-group . t))
