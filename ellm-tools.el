@@ -197,7 +197,8 @@ rendering."
   "Functions that check files after `files/edit' changes them.
 
 Each function is called with FILE-PATH, BUFFER, and CALLBACK.  FILE-PATH is
-an absolute file name and BUFFER contains the edited contents.  A checker
+an absolute file name, or nil for an unvisited buffer, and BUFFER contains the
+edited contents.  A checker
 must call CALLBACK with nil when it finds no problem, or a concise diagnostic
 string otherwise.  It may do this synchronously or asynchronously, and may
 return a cancellation function, timer, or process.  The buffer remains live
@@ -3326,8 +3327,9 @@ The return value is a cons of body and whether it was truncated."
   "Report an unmatched delimiter in Emacs Lisp FILE-PATH, if any.
 BUFFER contains the edited contents.  CALLBACK receives nil when the contents
 are balanced, or a concise diagnostic string otherwise."
-  (if (not (string-equal (downcase (or (file-name-extension file-path) ""))
-                         "el"))
+  (if (not (and file-path
+                (string-equal (downcase (or (file-name-extension file-path) ""))
+                              "el")))
       (funcall callback nil)
     (with-current-buffer buffer
       (save-excursion
@@ -3348,8 +3350,9 @@ are balanced, or a concise diagnostic string otherwise."
   "Report invalid JSON in FILE-PATH, if any.
 JSON with comments is deliberately not supported.  BUFFER contains the edited
 contents and CALLBACK receives nil or a concise diagnostic string."
-  (if (not (string-equal (downcase (or (file-name-extension file-path) ""))
-                         "json"))
+  (if (not (and file-path
+                (string-equal (downcase (or (file-name-extension file-path) ""))
+                              "json")))
       (funcall callback nil)
     (with-current-buffer buffer
       (save-excursion
