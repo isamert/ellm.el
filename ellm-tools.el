@@ -419,8 +419,8 @@ DETAIL describes the displayed preview when it is useful to the model."
                  #'cons
                  (mapcar (lambda (it) (upcase (symbol-name (nth 0 it)))) arglist)
                  (mapcar (lambda (it) (format
-                                  "`%s`"
-                                  (ellm-tools--normalize-name (symbol-name (nth 0 it))))) arglist))))
+                                       "`%s`"
+                                       (ellm-tools--normalize-name (symbol-name (nth 0 it))))) arglist))))
     `(progn
        (defconst ,const-sym
          (list :name ,tool-name
@@ -525,7 +525,6 @@ DETAIL describes the displayed preview when it is useful to the model."
              (cl-remove-if (lambda (it) (equal (ellm-tool-name it) ,tool-name))
                            ellm-tools-list))
        (push (apply #'ellm-make-tool ,const-sym) ellm-tools-list))))
-
 
 ;;;; Tool lifecycle
 
@@ -1166,13 +1165,11 @@ child inherits the current effective configuration."
   "Wait for SUBAGENT to finish and return its latest result."
   (ellm-tools--wait-subagent subagent callback))
 
-(ellm-deftool buffers/send-ellm-buffer ()
-  ((buffer-name :string "Name of the ellm buffer to send.")
-   (prompt :string "Optional prompt to add as a new trailing user turn before sending." &optional))
-  "Send an existing ellm buffer, optionally appending PROMPT first.
-This is useful for continuing a subagent after inspecting or editing its
-conversation buffer."
-  (ellm-tools--send-ellm-buffer buffer-name prompt))
+(ellm-deftool agents/send-subagent ()
+  ((subagent :string "Subagent id from `subagents' or its conversation name.")
+   (prompt :string "Prompt to add as a new user turn before sending."))
+  "Send PROMPT to SUBAGENT."
+  (ellm-tools--send-subagent subagent prompt))
 
 ;;;;; Web
 
@@ -2404,7 +2401,7 @@ from their live parent when possible."
 (defun ellm-tools--format-subagent-launch-result (entry buffer)
   "Return model-readable launch result for ENTRY and BUFFER."
   (format (concat "<subagent id=%S buffer=%S status=%S>\n"
-                  "Use read_buffer, search_buffer, edit_buffer, or send_ellm_buffer to inspect or continue this buffer when those tools are enabled.\n"
+                  "Use wait_subagent to wait for its result, or send_subagent to give it another task.\n"
                   "</subagent>")
           (plist-get entry :id)
           (buffer-name buffer)
@@ -2571,8 +2568,11 @@ SUBAGENT may be a remembered id or a live buffer name."
                  (unless done
                    (setq done t)
                    (cleanup)
-                   (funcall callback
-                            (ellm-tools--last-assistant-content buffer)))))
+                   (let ((content (ellm-tools--last-assistant-content buffer)))
+           (funcall callback
+                    (or content
+                        (format "Subagent %s has no assistant response available."
+                                (plist-get target :id))))))))
       (setq listener (lambda (_request _outcome) (finish)))
       (if (running-p)
           (with-current-buffer buffer
@@ -2581,19 +2581,6 @@ SUBAGENT may be a remembered id or a live buffer name."
       (lambda ()
         (setq done t)
         (cleanup)))))
-
-(defun ellm-tools--ellm-buffer (buffer-name)
-  "Return live ellm buffer named BUFFER-NAME, or signal an error."
-  (unless (and (stringp buffer-name)
-               (not (string-empty-p buffer-name)))
-    (ellm-tools--error "invalid buffer name"))
-  (let ((buffer (get-buffer buffer-name)))
-    (unless buffer
-      (ellm-tools--error "invalid buffer name"))
-    (with-current-buffer buffer
-      (unless (derived-mode-p 'ellm-mode)
-        (ellm-tools--error "buffer is not an ellm buffer: %s" buffer-name)))
-    buffer))
 
 (defun ellm-tools--append-ellm-prompt (prompt)
   "Append PROMPT to the current ellm buffer as the next user turn."
@@ -2611,16 +2598,25 @@ SUBAGENT may be a remembered id or a live buffer name."
         (ellm--insert-turn "user")
         (insert (ellm--ensure-newline text))))))
 
-(defun ellm-tools--send-ellm-buffer (buffer-name prompt)
-  "Implementation for the `send_ellm_buffer' tool."
-  (let ((buffer (ellm-tools--ellm-buffer buffer-name)))
+(defun ellm-tools--send-subagent (subagent prompt)
+  "Implementation for the `send_subagent' tool."
+  (let* ((target (ellm-tools--subagent-target subagent))
+         (entry (plist-get target :entry))
+         (buffer (plist-get target :buffer)))
+    (unless entry
+      (ellm-tools--error "unknown subagent: %s" subagent))
+    (unless buffer
+      (ellm-tools--error "subagent buffer is unavailable: %s"
+                         (plist-get target :id)))
+    (ellm-tools--validate-pattern prompt "prompt")
     (with-current-buffer buffer
       (when ellm--active-request
-        (ellm-tools--error "ellm buffer already has a request in flight: %s"
-                           buffer-name))
+        (ellm-tools--error "subagent already has a request in flight: %s"
+                           (plist-get target :id)))
       (ellm-tools--append-ellm-prompt prompt)
       (ellm-send)
-      (format "<ellm_buffer buffer=%S status=%S>\nSent.\n</ellm_buffer>"
+      (format "<subagent id=%S buffer=%S status=%S>\nSent.\n</subagent>"
+              (plist-get target :id)
               (buffer-name buffer)
               (ellm-tools--ellm-buffer-status buffer)))))
 
