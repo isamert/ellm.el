@@ -298,6 +298,13 @@ When DESCENDANTS is non-nil, include subagents at every depth."
               (push buffer pending))))))
     (nreverse buffers)))
 
+(defun ellm-tools--cancel-subagent-requests (_request)
+  "Cancel active requests in all descendant subagent buffers."
+  (dolist (buffer (ellm-tools--subagent-buffers t))
+    (with-current-buffer buffer
+      (when ellm--active-request
+        (ellm-cancel t)))))
+
 ;;;###autoload
 (defun ellm-switch-to-subagent-buffer (&optional all-children)
   "Switch to a subagent buffer belonging to the current buffer.
@@ -3634,6 +3641,7 @@ exactly one occurrence.  NAME is used for error and status messages."
 
 ;;;; Footer
 
+(add-hook 'ellm-request-cancelling-hook #'ellm-tools--cancel-subagent-requests)
 (add-hook 'ellm-mode-hook #'ellm-tools--restore-persisted-subagents)
 (add-hook 'ellm-mode-hook #'ellm-tools--initialize-elisp-sessions)
 

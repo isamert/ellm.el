@@ -550,6 +550,14 @@ request legs such as recursive tool-call handling."
   :type 'hook
   :group 'ellm)
 
+(defcustom ellm-request-cancelling-hook nil
+  "Hook run when a logical request begins cancellation.
+Each function receives REQUEST.  The request has already been invalidated and
+marked `cancelling', but its backend has not yet been cancelled.  Hook errors
+are reported without interrupting cancellation."
+  :type 'hook
+  :group 'ellm)
+
 (defcustom ellm-tool-call-hook nil
   "Hook run for a normalized backend-observed tool invocation.
 Each function receives REQUEST and EVENT.  EVENT contains `:type' `tool-call'
@@ -7227,6 +7235,7 @@ If QUIET is non-nil, then do not print any messages."
       (cl-incf (ellm-request-attempt request))
       (setf (ellm-request-state request) 'cancelling)
       (ellm--request-cancel-retry-timer request)
+      (ellm--run-observer-hook 'ellm-request-cancelling-hook request)
       (unwind-protect
           (ellm-backend-cancel (ellm-request-backend request))
         (ellm--request-terminal-transition request 'cancelled)))
