@@ -5841,7 +5841,7 @@ appended to the fallback annotation."
       (goto-char contents-beg)
       (while (< (point) current-bol)
         (cond
-         ((looking-at "^\\([ \t]*\\)\\(\"[^\"]+\"\\|[a-zA-Z0-9_-]+\\):")
+         ((looking-at "^\\([ \t]*\\)\\(\"[^\"]+\"\\|[a-zA-Z0-9_+-]+\\):")
           (let* ((line-indent (length (match-string-no-properties 1)))
                  (key (match-string-no-properties 2)))
             (while (and stack (>= (caar stack) line-indent))
@@ -5849,7 +5849,7 @@ appended to the fallback annotation."
             (when-let* ((spec (ellm--frontmatter-capf--lookup-key
                                key (ellm--frontmatter-capf--key-entries (cdar stack)))))
               (push (cons line-indent spec) stack))))
-         ((looking-at "^\\([ \t]*\\)-[ \t]+\\(\"[^\"]+\"\\|[a-zA-Z0-9_-]+\\):")
+         ((looking-at "^\\([ \t]*\\)-[ \t]+\\(\"[^\"]+\"\\|[a-zA-Z0-9_+-]+\\):")
           (let ((line-indent (length (match-string-no-properties 1))))
             (while (and stack (>= (caar stack) line-indent))
               (pop stack))
@@ -6009,7 +6009,7 @@ Returns nil when POS is outside the value region or not on a token."
 
 (defun ellm--frontmatter-capf--directory-result-at-point (pos)
   "Return file-name completion at POS for a directory-valued YAML field."
-  (if (looking-at "^\\([ \t]*\\)\\(\"[^\"]+\"\\|[a-zA-Z0-9_-]+\\):[ \t]*\\(.*?\\)[ \t]*$")
+  (if (looking-at "^\\([ \t]*\\)\\(\"[^\"]+\"\\|[a-zA-Z0-9_+-]+\\):[ \t]*\\(.*?\\)[ \t]*$")
       (let* ((indent (length (match-string-no-properties 1)))
              (key (match-string-no-properties 2))
              (beg (match-beginning 3))
@@ -6063,7 +6063,7 @@ Completes:
                    tbeg tend cands "item" source))))))
          ;; KEY: VALUE (inline) — value-side completion.
          ;; Handles both bare values and inline arrays like ["a", "b"].
-         ((looking-at "^\\([ \t]*\\)\\(\"[^\"]+\"\\|[a-zA-Z0-9_-]+\\):[ \t]*\\(.*?\\)[ \t]*$")
+         ((looking-at "^\\([ \t]*\\)\\(\"[^\"]+\"\\|[a-zA-Z0-9_+-]+\\):[ \t]*\\(.*?\\)[ \t]*$")
           (let* ((indent (length (match-string-no-properties 1)))
                  (key (match-string-no-properties 2))
                  (vbeg (match-beginning 3))
@@ -6083,7 +6083,7 @@ Completes:
                     (ellm--frontmatter-capf--make-result
                      tbeg tend cands key source)))))))
          ;; No `:' yet — key-side completion.
-         ((looking-at "^\\([ \t]*\\)\\(\"?[a-zA-Z0-9_@-]*\"?\\)[ \t]*$")
+         ((looking-at "^\\([ \t]*\\)\\(\"?[a-zA-Z0-9_@+-]*\"?\\)[ \t]*$")
           (let* ((indent (length (match-string-no-properties 1)))
                  (kbeg (match-beginning 2))
                  (kend (match-end 2))
