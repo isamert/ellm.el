@@ -577,8 +577,9 @@ and inline server maps are also supported by frontmatter completion.
 
 For the `llm.el` backend, install and configure `mcp.el`, connect its
 servers, then load `ellm-mcp` and run `M-x ellm-register-mcp-tools`.  Registered tools are
-named by server category, so `tools: ["@mcp-filesystem"]` enables the tools
-from the `filesystem` server.
+named as `mcp-SERVER/TOOL`, so `tools: ["@mcp-filesystem"]` enables the
+tools from the `filesystem` server.  Use an individual tool name such as
+`mcp-filesystem/read_file` to enable only that tool.
 
 # Configuration
 

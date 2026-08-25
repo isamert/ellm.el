@@ -49,7 +49,7 @@ symbols.  Types may occur in nested `:items' and `:properties' schemas too."
 (defun ellm-mcp--make-tool (tool)
   "Convert mcp.el TOOL plist to an `ellm-tool'."
   (let* ((category (or (plist-get tool :category) "mcp"))
-         (name (format "%s--%s" category (plist-get tool :name))))
+         (name (format "%s/%s" category (plist-get tool :name))))
     (ellm-make-tool
      :name name
      :description (plist-get tool :description)
@@ -66,8 +66,8 @@ This obtains every tool from currently connected mcp.el servers through
 `mcp-hub-get-all-tool'.  Start and connect servers with mcp.el first, then
 call this command; call it again after an MCP reconnect or tool-list change.
 
-Registered names are prefixed with their `mcp-SERVER' category, for example
-`mcp-filesystem--read_file', so tools from separate servers cannot collide.
+Registered names are qualified by their `mcp-SERVER' category, for example
+`mcp-filesystem/read_file', so tools from separate servers cannot collide.
 Enable a server's tools in ellm frontmatter with `tools: [@mcp-SERVER]'.
 
 The mcp.el dependency is loaded only when this command is invoked.  Return
