@@ -29,6 +29,23 @@
 (defvar ellm-mcp-tools nil
   "MCP tools most recently registered by `ellm-register-mcp-tools'.")
 
+(defun ellm-mcp--normalize-schema (schema)
+  "Convert MCP JSON Schema types in SCHEMA to llm.el's representation.
+
+mcp.el preserves JSON Schema type names as strings, whereas llm.el expects
+symbols.  Types may occur in nested `:items' and `:properties' schemas too."
+  (cond
+   ((consp schema)
+    (let ((normalized (mapcar #'ellm-mcp--normalize-schema schema)))
+      (cl-loop for tail on normalized by #'cddr
+               when (and (eq (car tail) :type)
+                         (stringp (cadr tail)))
+               do (setcar (cdr tail) (intern (cadr tail))))
+      normalized))
+   ((vectorp schema)
+    (vconcat (mapcar #'ellm-mcp--normalize-schema schema)))
+   (t schema)))
+
 (defun ellm-mcp--make-tool (tool)
   "Convert mcp.el TOOL plist to an `ellm-tool'."
   (let* ((category (or (plist-get tool :category) "mcp"))
@@ -36,7 +53,7 @@
     (ellm-make-tool
      :name name
      :description (plist-get tool :description)
-     :args (plist-get tool :args)
+     :args (ellm-mcp--normalize-schema (plist-get tool :args))
      :async (plist-get tool :async)
      :function (plist-get tool :function)
      :category category)))
