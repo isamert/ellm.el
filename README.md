@@ -93,11 +93,13 @@ example, with Elpaca and `use-package`:
 ```elisp
 (use-package ellm
   ;; elpaca
-  :ensure (:host github :repo "isamert/ellm.el" :files ("*.el"))
+  :ensure (:host github :repo "isamert/ellm.el"
+           :files ("*.el" (:exclude "ellm-test.el")))
   ;; vc (requires use-package-vc)
   ;; :vc (:url "https://github.com/isamert/ellm.el")
   ;; straight.el
-  ;; :straight (:host github :repo "isamert/ellm.el" :files ("*.el"))
+  ;; :straight (:host github :repo "isamert/ellm.el"
+  ;;            :files ("*.el" (:exclude "ellm-test.el")))
   :config
   (require 'ellm-tools)
   (require 'ellm-llm)

@@ -43,7 +43,8 @@
 ;; with Elpaca and use-package:
 ;;
 ;;   (use-package ellm
-;;     :ensure (:host github :repo "isamert/ellm.el" :files ("*.el"))
+;;     :ensure (:host github :repo "isamert/ellm.el"
+;;              :files ("*.el" (:exclude "ellm-test.el")))
 ;;     :config
 ;;     (require 'ellm-tools)
 ;;     (require 'ellm-llm)
