@@ -550,36 +550,94 @@ uses the `ellm-persistence-location`.
 
 ## MCPs
 
-WARNING: This is not working properly right now
+This requires [mcp.el](https://github.com/lizqwerscott/mcp.el).
 
-For ACP agents, configure available servers with `ellm-mcp-servers` and
-select them in frontmatter.  Server entries use the same shape as
-`mcp-hub-servers`: a command and arguments for stdio, or a URL for a remote
-server.
+```elisp
+(use-package mcp
+  :ensure t
+  :config (require 'mcp-hub))
+```
+
+Configure available servers with `ellm-mcp-servers` and select them in
+frontmatter. You can also use `mcp-hub-servers` instead too, ellm
+automatically picks up both. `ellm-mcp-servers` has precedence. They
+both use the same configuration style, except you can also have
+`:category` while defining using `ellm-mcp-servers`.
 
 ```elisp
 (setq ellm-mcp-servers
       '((filesystem . (:command "npx"
-                       :args ("-y"
-                              "@modelcontextprotocol/server-filesystem"
-                              ".")
+                       :args ("-y" "@modelcontextprotocol/server-filesystem" ".")
                        :category "local"))))
+;; or
+
+(setq mcp-hub-servers
+      '((filesystem . (:command "npx"
+                       :args ("-y" "@modelcontextprotocol/server-filesystem" ".")))))
 ```
+
+Now you can enable MCP servers in the frontmatter:
 
 ```markdown
 ---
 mcp: [filesystem]
+# or by category, if available
+# mcp: ["@local"]
 ---
 ```
 
-`mcp: true` enables every configured server.  `@CATEGORY` selects a category,
-and inline server maps are also supported by frontmatter completion.
+ellm automatically starts and waits for the MCP server to become
+online, then adds each MCP tool to current sessions tool list. Tools
+are named `mcp-SERVER/TOOL`, which keeps tool calls from different
+servers distinct. (ACP backend does not require mcp.el, it directly
+takes the list of MCPs)
 
-For the `llm.el` backend, install and configure `mcp.el`, connect its
-servers, then load `ellm-mcp` and run `M-x ellm-register-mcp-tools`.  Registered tools are
-named as `mcp-SERVER/TOOL`, so `tools: ["@mcp-filesystem"]` enables the
-tools from the `filesystem` server.  Use an individual tool name such as
-`mcp-filesystem/read_file` to enable only that tool.
+`mcp: true` enables every configured server.  `@CATEGORY` selects a
+category, and inline server maps are also supported by frontmatter:
+
+```markdown
+---
+mcp+:
+  # Enable another_mcp_server that is defined in ellm-mcp-servers/mcp-hub-servers
+  - another_mcp_server
+  # Define and enable a new MCP server inline:
+  - name: local-tools
+    command: npx
+    args:
+      - "-y"
+      - "@example/local-tools"
+# Remove an MCP server from active servers for current session:
+mcp-: [some_mcp_server]
+---
+```
+
+---
+
+Also, you can simply define your servers via `mcp-hub-servers`, start
+them via `(mcp-hub-start-all-server)` and then:
+
+```elisp
+(require 'ellm-mcp)
+(ellm-register-mcp-tools)
+```
+
+Now, you can enable/disable tools from given MCP servers via the
+fronmatter:
+
+```markdown
+---
+# Assuming you have an MCP server named "filesystem",
+# it becomes a category of tools named "mcp-filesystem"
+tools: ["@mcp-filesystem"]
+
+# You can also selectively enable them:
+tools:
+  - mcp-filesystem/read_file
+  - mcp-github/create_issue
+---
+```
+
+This is not supported by the ACP backend.
 
 # Configuration
 

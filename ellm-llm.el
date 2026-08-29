@@ -36,6 +36,8 @@
 (require 'pp)
 (require 'ellm)
 
+(declare-function ellm-mcp-session-tools "ellm-mcp" (frontmatter))
+
 ;; `llm.el' signals `(not-implemented)' from generic fall-through methods
 ;; without registering it as an error symbol.
 (unless (get 'not-implemented 'error-conditions)
@@ -547,10 +549,10 @@ reconstructed from the conversation buffer later."
                   (run)
                 (finish (format "Tool `%s` was denied by the user." name)))))))))))
 
-(defun ellm-llm--resolve-tools (frontmatter request)
-  "Return FRONTMATTER selected tools converted to `llm-tool' objects."
+(defun ellm-llm--resolve-tools (frontmatter request &optional mcp-tools)
+  "Return FRONTMATTER and MCP tools converted to `llm-tool' objects."
   (mapcar (lambda (tool) (ellm-llm--make-llm-tool tool request))
-          (ellm--resolve-tools frontmatter)))
+          (append (ellm--resolve-tools frontmatter) mcp-tools)))
 
 (defun ellm-llm--cancel-tool-activity-timers (driver)
   "Cancel heartbeat timers owned by DRIVER."
@@ -941,7 +943,7 @@ earlier observations from the same request leg."
         (setq usage (plist-put usage key value))))))
 
 (cl-defun ellm-llm--parse-buffer-as-chat
-    (provider &optional (frontmatter (ellm--effective-frontmatter)))
+    (provider &optional (frontmatter (ellm--effective-frontmatter)) mcp-tools)
   "Build an `llm-chat-prompt' from the current buffer for PROVIDER.
 FRONTMATTER, when supplied, is the already parsed YAML frontmatter alist."
   (let* ((fm          frontmatter)
@@ -951,7 +953,7 @@ FRONTMATTER, when supplied, is the already parsed YAML frontmatter alist."
          (system      (ellm-llm--canonical-text
                        (plist-get system-state :initial)))
          (reasoning   (alist-get 'reasoning fm))
-         (tools       (ellm-llm--resolve-tools fm ellm--active-request))
+         (tools       (ellm-llm--resolve-tools fm ellm--active-request mcp-tools))
          (prompt      (make-llm-chat-prompt
                        ;; `llm.el' models system instructions as prompt
                        ;; context.  A literal system interaction is outside
@@ -1206,7 +1208,11 @@ could not be executed: %s. Retry it using an advertised tool and valid arguments
   "Create a normal `llm.el' backend driver for BUFFER."
   (with-current-buffer buffer
     (ellm--apply-working-directory frontmatter)
-    (let* ((prompt (ellm-llm--parse-buffer-as-chat provider frontmatter))
+    (let* ((mcp-tools (when (or (alist-get 'mcp frontmatter)
+                                    (alist-get 'mcp+ frontmatter))
+                         (require 'ellm-mcp)
+                         (ellm-mcp-session-tools frontmatter)))
+           (prompt (ellm-llm--parse-buffer-as-chat provider frontmatter mcp-tools))
            (interactions (llm-chat-prompt-interactions prompt))
            (users (seq-filter
                    (lambda (interaction)

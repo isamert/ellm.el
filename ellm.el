@@ -385,7 +385,9 @@ servers.  `:env', `:headers', `:token', `:roots', and `:timeout' are kept
 compatible with mcp.el where possible.  ellm also recognizes optional
 `:category' for frontmatter category references.
 
-Buffers select servers through top-level YAML frontmatter `mcp:'.  The
+Buffers select servers through top-level YAML frontmatter `mcp:'.  When
+mcp.el is loaded, its `mcp-hub-servers' are also available as fallback
+server definitions; entries here take precedence for duplicate names.  The
 value may be:
 
   true             enable all configured MCP servers
@@ -4020,11 +4022,28 @@ can be a tool name like \"a_tool_name\"."
        (or (ellm--plistish-get entry 'command)
            (ellm--plistish-get entry 'url))))
 
+(defun ellm--mcp-server-definitions ()
+  "Return MCP definitions available to ellm.
+
+`ellm-mcp-servers' takes precedence over mcp.el's optional
+`mcp-hub-servers' when both define the same name."
+  (let (definitions)
+    (dolist (server (append ellm-mcp-servers
+                            (and (boundp 'mcp-hub-servers)
+                                 mcp-hub-servers)))
+      (unless (cl-find (ellm--mcp-server-name (car server)) definitions
+                       :key (lambda (entry)
+                              (ellm--mcp-server-name (car entry)))
+                       :test #'equal)
+        (push server definitions)))
+    (nreverse definitions)))
+
 (defun ellm--resolve-mcp-servers (frontmatter)
   "Return MCP servers enabled by FRONTMATTER.
 
 Servers come from top-level `mcp:' frontmatter and are resolved against
-`ellm-mcp-servers'.  The accepted syntax mirrors `tools:': true enables
+`ellm-mcp-servers' plus, when available, mcp.el's `mcp-hub-servers'.  The
+accepted syntax mirrors `tools:': true enables
 all configured servers, strings name servers, and strings beginning with
 @ expand categories.  Unlike `tools:', inline server maps are also
 accepted."
@@ -4035,7 +4054,7 @@ accepted."
      ((ellm--false-value-p entries)
       nil)
      ((eq entries t)
-      (dolist (server ellm-mcp-servers)
+      (dolist (server (ellm--mcp-server-definitions))
         (push server resolved)))
      ((or (stringp entries) (symbolp entries) (ellm--mcp-inline-server-p entries))
       (dolist (server (ellm--resolve-mcp-server entries))
@@ -4055,37 +4074,39 @@ accepted."
     (list (cons (ellm--mcp-server-name (ellm--plistish-get entry 'name))
                 entry)))
    ((or (stringp entry) (symbolp entry))
-    (let ((spec (ellm--mcp-server-name entry)))
+    (let ((spec (ellm--mcp-server-name entry))
+          (definitions (ellm--mcp-server-definitions)))
       (if (and (> (length spec) 1) (eq (aref spec 0) ?@))
           (let* ((category (substring spec 1))
                  (matches
-                  (cl-loop for server in ellm-mcp-servers
+                  (cl-loop for server in definitions
                            when (equal (ellm--plistish-get (cdr server) 'category)
                                        category)
                            collect server)))
             (unless matches
-              (warn "ellm: no MCP servers in `ellm-mcp-servers' have category `%s'"
+              (warn "ellm: no available MCP servers have category `%s'"
                     category))
             matches)
-        (let ((server (cl-find spec ellm-mcp-servers
+        (let ((server (cl-find spec definitions
                                :key (lambda (server)
                                       (ellm--mcp-server-name (car server)))
                                :test #'equal)))
           (unless server
-            (warn "ellm: MCP server `%s' not found in `ellm-mcp-servers'"
+            (warn "ellm: MCP server `%s' not found"
                   spec))
           (and server (list server))))))))
 
 (defun ellm--capf-mcp-candidates ()
   "Return completion strings for `mcp:' frontmatter entries."
-  (append
-   (mapcar (lambda (server) (ellm--mcp-server-name (car server)))
-           ellm-mcp-servers)
-   (mapcar (lambda (cat) (concat "@" cat))
-           (delete-dups
-            (delq nil (mapcar (lambda (server)
-                                (ellm--plistish-get (cdr server) 'category))
-                              ellm-mcp-servers))))))
+  (let ((definitions (ellm--mcp-server-definitions)))
+    (append
+     (mapcar (lambda (server) (ellm--mcp-server-name (car server)))
+             definitions)
+     (mapcar (lambda (cat) (concat "@" cat))
+             (delete-dups
+              (delq nil (mapcar (lambda (server)
+                                  (ellm--plistish-get (cdr server) 'category))
+                                definitions)))))))
 
 ;;;;; Insertion
 
