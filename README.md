@@ -18,7 +18,7 @@ special UI for configuring, you simply edit the YAML frontmatter where
 in-buffer, interactively. Your Emacs knowledge transfers quite
 cleanly.
 
-<TODO: IMAGE HERE...>
+<img width="1155" height="749" alt="image" src="https://github.com/user-attachments/assets/9ec8152f-e90a-4e54-ac36-376c0464d27e" />
 
 ## Basics
 
@@ -80,6 +80,10 @@ sense, does not invent new ways of doing things. Everything is either
 a buffer or a simple invocation of `completing-read` or a
 `read-multiple-choice`. It also provides some convenience functions
 that uses these primitives.
+
+Here's how a regular conversation might look like:
+
+<img width="830" height="970" alt="image" src="https://github.com/user-attachments/assets/3931b281-177b-418c-a9a6-54b610e15f85" />
 
 # Installation
 
@@ -529,7 +533,7 @@ answer prompts for agents within this buffer. Press `C` on a project or
 directory group (or one of its conversations) to create a new conversation
 there.
 
-<TODO: IMAGE HERE>
+<img width="1099" height="647" alt="image" src="https://github.com/user-attachments/assets/718b617b-4ad0-40c9-8cf5-6c82bf3101f8" />
 
 ## In buffer controls
 
@@ -565,7 +569,8 @@ outputs, and reasoning state are saved alongside them.
 (`.ellm`) in each project.  `M-x ellm-open-session` opens a saved main
 conversation.
 
-<TODO: IMAGE HERE>
+<img width="761" height="113" alt="image" src="https://github.com/user-attachments/assets/8df682dd-046a-4051-93ee-82f3350978f1" />
+
 
 You can also use the `ellm-save` command to save the current
 conversation and its live subagents/tool-outputs/encrypted reasonings
@@ -923,8 +928,193 @@ completion discovers session configuration when the agent exposes it.
 
 # Rationale
 
-<TODO: MOVE OLD RATIONALE HERE? OR JUST LINK MY BLOGPOST?>
+There are two different parts of ellm, which I believe makes it
+powerful:
+
+- Plain text conversation files with an extended Markdown format. So
+  you get a lot of things for free, and because it's a superset of
+  Markdown, it defines *turns* as first-class citizens, which makes
+  navigation/folding etc. a breeze.
+- It's a frontend for any LLM provider. Right now it supports many API
+  providers through llm.el, Kagi Assistant, and ACP agents. You can also
+  implement a couple of functions and use ellm as your frontend for
+  another backend. Of course, each backend has a different level of
+  flexibility, but this lets you mix your different subscriptions. For
+  example, you can use Fable from your API subscription to make plans
+  and issue the real implementation work to your Codex subscription
+  through the ACP backend, which is orchestrated by Fable using
+  subagents. Subagents are also simple ellm buffers that agents can
+  manipulate. It also gives you a unified frontend for dealing with
+  all these nonsense.
+
+---
+
+Here is a longer rant about why having it all plain-text is better (of
+course, not all backends have this level of power but you get the
+idea):
+
+I like plain text. I don't like having separate definitions for
+serialized (like having a transcript of an LLM interaction) and *real*
+data. Just like Lisp being homoiconic, I want my LLM interactions to
+be homoiconic (yes, that's not what it exactly means but I hope you
+got where I'm heading to. I also want to sound cool). Being able to
+edit conversations just like a regular old file opens the doors to
+different opportunities. First of all, your all *file editing and
+navigation* knowledge transfers here completely. You also get *forking
+conversations* feature for free, just copy the parts you want and
+continue your discussion in another buffer. This also relieves you
+from learning another management tool, you are just switching between
+buffers which you do all day. You also get this for free. Also, you
+are able to edit the conversations as you want, this gives you
+different powers [like
+this](https://haskellforall.com/2026/01/prompting-101-show-dont-tell). Using
+this approach, build conversations that you like, save them as a file
+and use them anytime you want, or just share them. I can go on much
+more but you got the point.
+
+The natural extension to this mindset in Emacs world is Org. It has
+properties, you can attach data to headers. Runnable code blocks, or
+just any type of blocks. It's also extensible. As much as I wanted to
+use org-mode for interacting with LLMs-like for everything else I
+do--it's not feasible. First of all, you can't make LLMs output Org
+directly. You need to convert it to Org syntax on-the-fly. GPTel does
+this-along with a lot of other wonderful things, great package-but
+there is no real way to get it right, it almost always does something
+wrong. So, in a nutshell, conversion to Org is a frustrating practice
+that'll simply waste your time.
+
+The second best thing is, staying in the plain-text world, is using
+Markdown. LLMs love it for some reason, not matter how abusive you
+are, they don't back off from outputting Markdown. But there are
+couple problems with using Markdown, or as people use it right now:
+
+- No special syntax for conversation like interface. People utilize
+  headers for prompts. But what if your prompt is quite long? How do I
+  separate the LLM output from my prompt? LLMs also output Markdown
+  and you can't reliable tell them "JUST USE SECOND LEVEL HEADERS AND
+  NOTHING ELSE" or whatever you want to yell at those clankers. They
+  are going to use the Markdown construct that you want to keep it to
+  yourself, and output it.
+- This is an Emacs specific thing but markdown-mode, at least in my
+  experience, is slow. `markdown-ts-mode` is not very mature. Also
+  again, there is no special Markdown syntax for conversational
+  interface. You can select a good non-conflicting prefix for your
+  conversations but none of the Markdown modes will play with it
+  nicely when it comes to folding. The conversational turns should
+  have their own *block*, the folding should work within that block
+  without swallowing your special turn separator.
+
+Because LLMs are outputting Markdown-and they do not use every
+Markdown construct from every different Markdown spec, they simply use
+a fairly simple subset of features-, I didn't want to have a format
+that is different from Markdown, hence this, I extended Markdown with
+the following:
+
+```
+>-| user
+...
+>-| assistant
+...
+```
+
+We can call these a turn delimiter. Ending with `-|` because Markdown
+already uses `>` for denoting quotes and we need to differentiate and
+make it visually distinguishable. Also because quoting someone can
+introduce multiple `>`s stacking, that's why `>>` is not feasible. The
+choice of starting with `>` is deliberate because even without using a
+special mode for this type of file, you get a free syntax
+highlighting, other Markdown parsers will think this is a quote (and
+in a sense, it is). From one turn delimiter to another, all the
+Markdown features should work properly. For example, if you fold a
+header, it should fold at maximum to the next turn delimiter. Now that
+`>-|` lines belongs to our use, we can use it for the tool calls
+too. Adding more `>` would denote hierarchy, just like Markdown or Org
+headers, so you can have easily parsable hierarchies without keeping
+state:
+
+```
+>-| user
+...
+>-| assistant
+...
+>>-| tool-call
+...
+>>-| tool-result
+...
+>>-| assistant
+...
+```
+
+The `>>-| assistant` line is the continuation of the assistant after
+the calls. Current implementation renders this line blank but it is
+required for being able to distinguish between different types of
+continuation lines, like tool calls and results.
+
+With this, we have a really simple conversational interface on top of
+Markdown. The rest of the features, like sending text from other
+buffers, forking conversations, attaching context etc. are
+responsibilities of the user. You can simply transfer your file
+editing know-how that is already existing.
+
+To make these files self-contained, I also put a YAML
+frontmatter. This can contain various configurations of ellm
+specificly for this buffer. It's also editable and after editing, the
+conversation will continue with these new configurations. For features
+that are not easily editable via YAML-like a long system prompt, you
+can still use the turn delimiters:
+
+```
+>-| system
+...
+>-| user
+...
+>-| assistant
+```
+
+Of course, this is all customizable. You can change it to whatever.
+
+These lines can also carry custom data:
+
+```
+>-| user | token: 300, cost: 0.25$,
+...
+>-| assistant | took: 10s, cost: 0.03$
+...
+```
+
+This is the simple idea.
 
 # Prior art
 
-<TODO: GPTEL, ALSO SOMETHING ABOUT GPTEL CAN BE AN ANOTHER BACKEND?>
+There are other really good LLM tooling that you can use in Emacs.
+
+- **[gptel](https://github.com/karthink/gptel/)** :: I think this is
+  the gold standard. It is moldable, can be used anywhere in Emacs
+  with anything. To make it "agentic", you can add your own tools or
+  use packages like
+  [gptel-agent](https://github.com/karthink/gptel-agent/). ellm is
+  quite similar to gptel-agent but mainly differs itself with the
+  conversation format being fully plain-text, the configuration being
+  plain-text and in-buffer completable, everything being explicit
+  instead of having implicit state and also all the bells and whistles
+  that comes with it (turns, buffer formatting, folding capabilities,
+  `ellm-list`, `ellm-comment`, `ellm-save`... etc.)  Another
+  difference is ellm is mostly a UI + tools, it defers the
+  LLM-interactions to other packages/programs (like using llm.el or an
+  ACP server). gptel might as well be an another backend for ellm
+  (which I am considering for the future so that you can use ellm as
+  your "agent" and gptel anywhere else in the Emacs with a shared
+  configuration)
+- **[agent-shell](https://github.com/xenodium/agent-shell)** :: Great
+  package for integrating Emacs with ACP servers. ellm also provides
+  an ACP integration but it's very primitive. I added it so that I can
+  simply use the same ellm interface with the Cursor subscription that
+  my company gives to me. **agent-shell** is built on top
+  [acp.el](https://github.com/xenodium/acp.el) (from the same author,
+  xenodium), which ellm does not use for now but in the future, it
+  might to have a better ACP integration.
+- **Other Claude/Codex etc. wrappers** :: These are different class of
+  packages. They simply wrap these CLI tools and provide some
+  contextual integration with Emacs. Whole reason ellm exists is that
+  I want minimal friction between Emacs and my LLM usage. ellm is
+  *native*, your Emacs knowledge transfers quite well.

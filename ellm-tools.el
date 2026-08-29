@@ -3465,7 +3465,7 @@ cancels the checker currently in progress."
         diagnostics active)
     (cl-labels
         ((run-next ()
-                   (if-let ((checker (pop checkers)))
+                   (if-let* ((checker (pop checkers)))
                        (let (called checker-callback)
                          (setq checker-callback
                                (lambda (diagnostic)
