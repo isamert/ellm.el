@@ -6,7 +6,7 @@
 ;; URL: https://github.com/isamert/ellm.el
 ;; Version: 0.0.1
 ;; Package-Requires: ((emacs "29.1") (yaml "0.5.5") (llm "0.32.0") (plz "0.9") (async "1.9.9"))
-;; Keywords: TODO
+;; Keywords: tools, convenience, applications
 
 ;; This file is not part of GNU Emacs.
 
@@ -25,20 +25,76 @@
 
 ;;; Commentary:
 
-;; TODO: ...
+;; ellm is a plain-text coding agent for Emacs.  `ellm-mode' extends
+;; Markdown with first-class conversation turns: `>-|' begins a turn and
+;; `>>-|' begins a nested turn.  Conversations, configuration, and generated
+;; output all live in the buffer, making them easy to inspect, edit, save, and
+;; resume.  YAML frontmatter selects providers, models, profiles, and tools;
+;; completion is available while editing it.  The mode integrates with
+;; `outline-minor-mode' for familiar navigation and folding.
+;;
+;; The default `agent' profile provides tools for agentic coding, including
+;; files, shell commands, web access, and subagents.  Tool access is
+;; configurable per profile or buffer, and can require confirmation.
 
 ;;;; Installation
 
-;; TODO: ...
+;; Install ellm from its repository with your package manager.  For example,
+;; with Elpaca and use-package:
+;;
+;;   (use-package ellm
+;;     :ensure (:host github :repo "isamert/ellm.el" :files ("*.el"))
+;;     :config
+;;     (require 'ellm-tools)
+;;     (require 'ellm-llm)
+;;     ;; Optional: suppress llm.el's nonfree-provider warnings.
+;;     (setq llm-warn-on-nonfree nil))
+;;
+;; `ellm.el' provides the conversation core and major mode.  Load
+;; `ellm-tools' for its built-in tools and `ellm-llm' for llm.el API
+;; providers.  `ellm-codex' and `ellm-acp' provide optional Codex and ACP
+;; backends.  Configure a provider in `ellm-provider-alist' (or set
+;; `ellm-provider') before sending requests.  For an llm.el API provider,
+;; require its library, create its provider object, and associate it with the
+;; name used by frontmatter.  For example:
+;;
+;;   (require 'auth-source)
+;;   (require 'llm-openai)
+;;   (setq ellm-provider-alist
+;;         `((openai . (:provider ,(make-llm-openai
+;;                                  :key (auth-source-pick-first-password
+;;                                        :host "api.openai.com")
+;;                                  :chat-model "gpt-5.5")
+;;                      :models ("gpt-5.5" "gpt-5.6-sol")
+;;                      :small-model "gpt-5.4-nano"))))
+;;
+;; Select it per conversation with `provider: openai' and, optionally,
+;; `model: gpt-5.5' in its frontmatter.  `:models' supplies completion and
+;; `:small-model' selects a cheaper model for auxiliary requests.
 
 ;;;; Usage
 
-;; TODO: ...
-
-;;;; Credits
-
-;; This package would not have been possible without the following
-;; packages: TODO
+;; Open a project and run `ellm-new-buffer'.  Write a prompt in the current
+;; user turn and press `C-c C-c' to send it; `C-c C-k' cancels the active
+;; request.  `ellm-dwim' reuses a project conversation when possible (or,
+;; with a prefix argument, creates one) and copies an active region into its
+;; prompt with file and line references.  `ellm-toggle-side-window' is the
+;; corresponding side-window command.
+;;
+;; Configure individual conversations by editing their YAML frontmatter, for
+;; example:
+;;
+;;   ---
+;;   provider: my-provider
+;;   model: my-model
+;;   profile: agent
+;;   ---
+;;
+;; Turns and Markdown headings support the usual outline commands: `TAB'
+;; folds the subtree at point and `S-TAB' cycles the whole buffer.  Use
+;; `C-c C-e' (or `ellm-compose') to prepare a follow-up while a response is
+;; streaming.  Conversations are ordinary text and may be saved as `.ellm'
+;; files and reopened later.
 
 ;;; Code:
 
