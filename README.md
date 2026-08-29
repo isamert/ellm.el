@@ -68,10 +68,10 @@ even manipulate the conversation itself. There is (almost) no hidden
 state. The good part is that `ellm-mode` is aware of these _turns_ so
 all the navigation/folding is quite intuitive. You can also save this
 file, re-open it and continue from where you left. Even the subagents
-are simple `ellm-mode` buffers/files with their own yaml-frontmatters.
+are simple `ellm-mode` buffers/files with their own YAML frontmatter.
 
-_ellm_ also comes with bunch of different tools to let you do _agentic
-coding_. The default _profile_ is the `agent` profile, which works
+_ellm_ also comes with a range of tools for _agentic coding_. The default
+_profile_ is the `agent` profile, which works
 quite similarly to other agents like OpenCode, Claude Code etc. but
 much more simplified and Emacs-y.
 
@@ -152,7 +152,7 @@ model: deepseek-v4-pro
 profile: agent     # Explicitly setting a profile. The changes below will override the profiles configuration.
 tools-: ["@shell"] # Now your agent does not have shell access
 reasoning: high    # Reasoning is now high.
-system: You are an agent. # Overridden the system prompt compeletly.
+system: You are an agent. # Overrides the system prompt completely.
 ---
 
 >>-| system
@@ -294,10 +294,14 @@ Also, here are the functions that may help in system prompts:
 
 ## Tools
 
-ellm comes with a lot of useful tools, like (list may not be complete,
-see `ellm-tools.el`):
+`ellm-tools-list` is the authoritative runtime registry: after loading
+`ellm-tools`, use `M-x describe-variable RET ellm-tools-list` to
+inspect the available tools, including any tools you have added or
+replaced.  The built-in registry contains:
 
+- `user/ask`
 - `shell/bash`
+- `git/git`
 - `files/glob`
 - `files/grep`
 - `files/edit`
@@ -306,8 +310,8 @@ see `ellm-tools.el`):
 - `buffers/buffers`
 - `buffers/read-buffer`
 - `tool-outputs/output`
-- `tool-outputs/search-output`
 - `buffers/search-buffer`
+- `tool-outputs/search-output`
 - `buffers/buffer-issues`
 - `emacs/elisp-info`
 - `emacs/elisp-search`
@@ -317,11 +321,9 @@ see `ellm-tools.el`):
 - `agents/launch-subagent`
 - `agents/subagents`
 - `agents/wait-subagent`
-- `buffers/send-ellm-buffer`
+- `agents/send-subagent`
 - `web/web-search`
 - `web/web-fetch`
-- `user/ask`
-- `git/git`
 
 The category is only for grouping.  The name exposed to providers and used in
 frontmatter is the part after `/`, with hyphens written as underscores: for
@@ -335,7 +337,7 @@ Again you can utilize the frontmatter to enable/disable tools:
 provider: codex
 model: "gpt-5.6-terra"
 profile: agent    # Brings all tools enabled in `agent` profile
-tools: ["@files"] # This compeletly overrides tool selections for current buffer. Now we only have tools from the files category.
+tools: ["@files"] # This completely overrides the tool selection for the current buffer; only tools from the files category remain.
 tools-: [edit] # We removed the edit tool from available tools. Again, you can use the @category notation to remove whole category.
 tools+: ["@agents", web_search] # Added all @agents category of tools and web_search tool.
 ---
@@ -396,15 +398,14 @@ The tool definitions are kept in `gptel` compatible format. See
 `ellm-tools-refs` variable, you can use this to convert ellm tools
 into `gptel` tools if you want. For the opposite direction, converting
 `gptel` tools into ellm tools, see the variable `ellm-tools-list`, but
-I still recommend using `ellm-deftool` macro which comes with it's own
+I still recommend using the `ellm-deftool` macro, which comes with its own
 bells and whistles.
 
 ### Tool customization and extras
 
-Some of the tools comes with their configurations and extensions. For
-example you can edit `ellm-tools-glob-options` to change the behavior
-of the glob tool etc. Do `M-x customize-group ellm-tools` to learn
-more about these.
+Some tools have their own configuration and extensions. For example, you can
+edit `ellm-tools-glob-options` to change the behavior of the glob tool etc.
+Do `M-x customize-group ellm-tools` to learn more about these.
 
 There are also extra functionalities some tools offer. For example, if
 `file/edit` tool realizes it's editing a lisp file, then it'll do a
@@ -900,10 +901,10 @@ buffer and controls.
 The whole reason this exists is that sometimes at work I also use a
 subscription my company gives me and I want the same level of
 controls, ease of use and familiarity of ellm. Of course, this backend
-is not as powerful as `llm` backend because it comes with it's own
-tools, profiles, system prompts etc. and you are not allowed to
-customize but I believe the Emacs integration and the familiarity
-makes it worthwhile. Still needs a lot of polishing though.
+is not as powerful as `llm` backend because it comes with its own
+tools, profiles, and system prompts that cannot be customized.  I
+still believe the Emacs integration and familiarity make it
+worthwhile. It still needs a lot of polishing, though.
 
 Load `ellm-acp`, configure the program that starts the agent's ACP
 server, and add it to `ellm-provider-alist`:

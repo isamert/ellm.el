@@ -9,7 +9,3 @@
 
 # Undo-tree save-files
 *.~undo-tree
-
-# Local development only
-AGENTS.md
-ellm-test.el
