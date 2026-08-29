@@ -2917,6 +2917,29 @@ Profile metadata and the profile catalog are not passed to providers."
 KEY may be a symbol/string or a list naming a nested path."
   (ellm--alist-get-nested (ellm--parse-frontmatter) key))
 
+(defun ellm--replace-frontmatter (frontmatter &optional bounds)
+  "Replace frontmatter with FRONTMATTER and refresh its parse cache.
+BOUNDS is the value of `ellm--frontmatter-bounds' before the replacement.
+When it is nil, create a frontmatter block at the start of the buffer.
+FRONTMATTER must be a nonempty mapping."
+  (let* ((bounds (or bounds (ellm--frontmatter-bounds)))
+         (body (if frontmatter (ellm--yaml-encode frontmatter) ""))
+         (beg (or (nth 2 bounds) (point-min)))
+         (end (or (nth 3 bounds) (point-min)))
+         (replacement (if bounds (or body "")
+                        (concat "---\n" body "\n---\n\n")))
+         (inhibit-read-only t))
+    ;; Do not use `replace-region-contents' here.  Its temporary buffer can
+    ;; run frontmatter-aware hooks and needlessly parse the complete YAML.
+    (save-excursion
+      (goto-char beg)
+      (delete-region beg end)
+      (insert replacement))
+    (setq ellm--frontmatter-cache-valid t
+          ellm--frontmatter-cache-body body
+          ellm--frontmatter-cache-value (copy-tree frontmatter)
+          ellm--frontmatter-cache-error nil)))
+
 (defun ellm--set-frontmatter-value (key &optional value)
   "Set scalar frontmatter KEY to VALUE in the current buffer.
 When the buffer has no frontmatter, create one at the beginning.  VALUE is
@@ -2924,15 +2947,10 @@ written as a YAML scalar string.  Nil VALUE deletes KEY.  This ignores
 request-time read-only protection."
   (if (null value)
       (ellm--delete-frontmatter-value key)
-    (let ((inhibit-read-only t))
-      (pcase-let ((fm (ellm--parse-frontmatter))
-                  (`(_ _ ,beg ,end _) (ellm--frontmatter-bounds)))
-        (replace-region-contents
-         (or beg (point-min)) (or end (point-min))
-         (lambda ()
-           (concat (unless beg "---\n")
-                   (ellm--yaml-encode (ellm--alist-set-nested fm key value))
-                   (unless beg "\n---\n\n"))))))))
+    (let ((frontmatter (ellm--parse-frontmatter))
+          (bounds (ellm--frontmatter-bounds)))
+      (ellm--replace-frontmatter
+       (ellm--alist-set-nested frontmatter key value) bounds))))
 
 (defun ellm--yaml-encode (object)
   "Encode OBJECT as YAML."
@@ -2976,17 +2994,11 @@ Empty maps created by deleting the final child are removed as well."
   "Delete frontmatter KEY and prune empty parent maps.
 KEY may be a symbol/string or a list naming a nested path."
   (when-let* ((bounds (ellm--frontmatter-bounds)))
-    (let ((fm (copy-tree (ellm--parse-frontmatter))))
+    (let ((frontmatter (copy-tree (ellm--parse-frontmatter))))
       (when ellm--frontmatter-cache-error
         (user-error "ellm: Cannot edit malformed frontmatter"))
-      (pcase-let ((`(_ _ ,beg ,end _) bounds))
-        (let ((inhibit-read-only t))
-          (replace-region-contents
-           beg end
-           (lambda ()
-             (if-let* ((updated (ellm--alist-delete-nested fm key)))
-                 (ellm--yaml-encode updated)
-               ""))))))))
+      (ellm--replace-frontmatter
+       (ellm--alist-delete-nested frontmatter key) bounds))))
 
 ;;;;; Directory tracking
 
@@ -3742,13 +3754,10 @@ The current session store is preferred over the global cache."
                                             ellm--session-directory)))
     (expand-file-name "main.ellm" ellm--session-directory)))
 
-(defun ellm--persistence-set-frontmatter-value (key value)
-  "Set frontmatter KEY to VALUE only when it differs."
-  (unless (equal (ellm--frontmatter-value key) value)
-    (ellm--set-frontmatter-value key value)))
-
 (defun ellm--persistence-recognize-buffer ()
-  "Restore persistence state from an already visited ellm file."
+  "Restore persistence state from an already visited ellm file.
+Return the restored session directory, or nil when the file is not a
+persisted ellm session."
   (when (and buffer-file-name
              (ellm--frontmatter-value '(ellm session-id)))
     (setq-local
@@ -3756,16 +3765,37 @@ The current session store is preferred over the global cache."
      (ellm--persistence-session-directory-from-file
       (ellm--persistence-session-role)))))
 
-(defun ellm--persistence-setup-buffer (&optional force root)
-  "Assign persistence metadata and a visited file to the current buffer.
-When FORCE is non-nil, persist regardless of automatic-persistence settings.
-ROOT, when non-nil, is the parent directory for a newly created session."
+(defun ellm--persistence-prepare (&optional force root session-id)
+  "Prepare the current buffer for persistence.
+FORCE and ROOT have the same meanings as in `ellm--persistence-checkpoint'.
+When SESSION-ID is non-nil, assign it to the buffer.  All persistence
+metadata is written in one frontmatter replacement."
   (when (and (or force ellm-persistence-enabled)
              (or force (not ellm--persistence-ephemeral-p))
              (not ellm--persistence-saving-p))
     (let* ((ellm--persistence-saving-p t)
-           (role (ellm--persistence-session-role))
-           (session-id (ellm--ensure-session-id)))
+           (frontmatter (ellm--parse-frontmatter))
+           (effective (ellm--effective-frontmatter frontmatter))
+           (role (if (ellm--alist-get-nested frontmatter '(subagent id))
+                     "subagent"
+                   (or (ellm--alist-get-nested frontmatter '(ellm role)) "main")))
+           (session-id (or session-id
+                           (ellm--alist-get-nested frontmatter '(ellm session-id))
+                           (ellm--new-session-id)))
+           (updated frontmatter))
+      (unless (alist-get 'cwd effective)
+        (setq updated
+              (ellm--alist-set-nested
+               updated 'cwd (ellm--working-directory effective))))
+      (unless (equal (ellm--alist-get-nested updated '(ellm session-id))
+                     session-id)
+        (setq updated
+              (ellm--alist-set-nested updated '(ellm session-id) session-id)))
+      (unless (equal (ellm--alist-get-nested updated '(ellm role)) role)
+        (setq updated
+              (ellm--alist-set-nested updated '(ellm role) role)))
+      (unless (equal updated frontmatter)
+        (ellm--replace-frontmatter updated))
       (unless ellm--session-directory
         (setq-local
          ellm--session-directory
@@ -3774,45 +3804,26 @@ ROOT, when non-nil, is the parent directory for a newly created session."
                (expand-file-name (concat session-id "/") root)))))
       (when ellm--session-directory
         (make-directory ellm--session-directory t)
-        (ellm--persistence-set-frontmatter-value '(ellm session-id) session-id)
-        (ellm--persistence-set-frontmatter-value '(ellm role) role)
         (unless buffer-file-name
           (when-let* ((file (ellm--persistence-target-file role)))
             (make-directory (file-name-directory file) t)
             (let ((name (buffer-name)))
               (set-visited-file-name file t)
-              (rename-buffer name t))))))))
+              (rename-buffer name t))))
+        ;; `set-visited-file-name' changes `default-directory' to storage.
+        (ellm--apply-working-directory
+         (ellm--effective-frontmatter updated))))))
 
-(defun ellm--persistence-capture-working-directory ()
-  "Record and apply the current conversation working directory.
-A persisted transcript must not derive its workspace from its storage path.
-When its effective frontmatter has no `cwd', record that directory as an
-absolute `cwd' before associating the buffer with its persistence file."
-  (let ((frontmatter (ellm--effective-frontmatter)))
-    (unless (alist-get 'cwd frontmatter)
-      (ellm--set-frontmatter-value
-       'cwd (ellm--working-directory frontmatter)))
-    (ellm--apply-working-directory (ellm--effective-frontmatter))))
-
-(defun ellm--persistence-prepare (&optional force root)
-  "Prepare the current buffer for persistence.
-FORCE and ROOT have the same meanings as in `ellm--persistence-checkpoint'."
-  (ellm--persistence-capture-working-directory)
-  (ellm--persistence-setup-buffer force root)
-  ;; `set-visited-file-name' changes `default-directory' to the storage path.
-  ;; Reapply the conversation workspace afterwards.
-  (ellm--apply-working-directory (ellm--effective-frontmatter)))
-
-(defun ellm--persistence-checkpoint (&optional force root)
+(defun ellm--persistence-checkpoint (&optional force root session-id)
   "Persist the current ellm buffer at a stable conversation boundary.
 When FORCE is non-nil, persist regardless of automatic-persistence settings.
-ROOT has the same meaning as in `ellm--persistence-setup-buffer'."
+ROOT and SESSION-ID have the same meanings as in `ellm--persistence-prepare'."
   (when (and (or force ellm-persistence-enabled)
              (or force (not ellm--persistence-ephemeral-p))
              (not ellm--persistence-saving-p))
     (condition-case err
         (progn
-          (ellm--persistence-prepare force root)
+          (ellm--persistence-prepare force root session-id)
           (ellm--localize-reasoning-state-files)
           (ellm--persist-tool-output-buffers)
           (when buffer-file-name
@@ -3887,8 +3898,7 @@ new session.  An existing session always keeps its current directory."
           ;; Subagents can have been launched before their parent was saved.
           ;; Give every related live buffer the newly established session first.
           (setq-local ellm--session-directory directory)
-          (ellm--persistence-set-frontmatter-value '(ellm session-id) session-id)
-          (ellm--persistence-checkpoint t)))
+          (ellm--persistence-checkpoint t nil session-id)))
       (message "ellm: saved session to %s" directory))))
 
 (defun ellm--persistence-before-kill ()
@@ -9014,8 +9024,10 @@ conversation state only when such updates were skipped."
     (when-let* ((title (ignore-errors (ellm--frontmatter-value '(title)))))
       (setq ellm--session-title title)
       (ellm-update-session-title title)))
-  (ellm--persistence-recognize-buffer)
-  (ellm--persistence-checkpoint)
+  ;; A visited persisted session is already complete on disk.  Recognize it
+  ;; without immediately reparsing and rewriting its frontmatter.
+  (unless (ellm--persistence-recognize-buffer)
+    (ellm--persistence-checkpoint))
   (ellm--touch-activity))
 
 ;;;###autoload

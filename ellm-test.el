@@ -3815,6 +3815,9 @@
           (should (file-in-directory-p
                    child-file (expand-file-name "subagents/"
                                                 (file-name-directory parent-file))))
+          (with-current-buffer child
+            (should (equal (ellm--frontmatter-value 'profile) "agent"))
+            (should-not (alist-get 'system (ellm--parse-frontmatter))))
           (kill-buffer child)
           (setq child nil)
           (kill-buffer parent)
@@ -3836,6 +3839,28 @@
             (set-buffer-modified-p nil))
           (kill-buffer buffer)))
       (delete-directory root t))))
+
+(ert-deftest ellm-test-persistence-opening-session-does-not-checkpoint ()
+  "Opening an existing persisted session should not rewrite it."
+  (let* ((directory (make-temp-file "ellm-persisted-open-" t))
+         (file (expand-file-name "main.ellm" directory))
+         buffer (checkpoints 0))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "---\nellm:\n  session-id: session-1\n  role: main\n---\n"))
+          (cl-letf (((symbol-function 'ellm--persistence-checkpoint)
+                     (lambda (&rest _) (cl-incf checkpoints))))
+            (setq buffer (find-file-noselect file)))
+          (with-current-buffer buffer
+            (should (equal ellm--session-directory
+                           (file-name-as-directory directory))))
+          (should (= checkpoints 0)))
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer
+          (set-buffer-modified-p nil))
+        (kill-buffer buffer))
+      (delete-directory directory t))))
 
 (cl-defstruct ellm-test-tool-provider)
 

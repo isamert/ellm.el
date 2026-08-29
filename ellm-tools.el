@@ -2279,7 +2279,6 @@ from their live parent when possible."
   "Return (FRONTMATTER . PROFILE-NAME) for a new subagent."
   (let* ((profile-name (and (ellm-tools--present-string profile)
                             (ellm--profile-name profile)))
-         (inherited (ellm--effective-frontmatter parent-frontmatter))
          (frontmatter
           (if profile-name
               ;; The selected profile is the baseline.  Keep the catalog so the
@@ -2289,7 +2288,9 @@ from their live parent when possible."
               (let ((base (when-let* ((profiles (alist-get 'profiles parent-frontmatter)))
                             (list (cons 'profiles (copy-tree profiles))))))
                 (ellm-tools--frontmatter-set base 'profile profile-name))
-            (ellm-tools--sanitize-subagent-frontmatter inherited))))
+            ;; Preserve the parent's profile reference instead of serializing
+            ;; its resolved system prompt into every child transcript.
+            (ellm-tools--sanitize-subagent-frontmatter parent-frontmatter))))
     (when-let* ((value (ellm-tools--present-string cwd)))
       (setq frontmatter (ellm-tools--frontmatter-set frontmatter 'cwd value)))
     (setq frontmatter
