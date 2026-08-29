@@ -232,7 +232,7 @@ or `llm-make-tool' etc. via doing something like:
 
   (mapcar
     (lambda (tool) (apply #\\='gptel-make-tool (symbol-value tool)))
-    `ellm-tools-refs')")
+    \='ellm-tools-refs)")
 
 (defcustom ellm-tools-tool-call-start-hook nil
   "Hook run before an ellm tool body starts.
