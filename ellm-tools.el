@@ -2334,11 +2334,11 @@ from their live parent when possible."
           (setq-local ellm--persistence-ephemeral-p parent-ephemeral-p)
           (setq-local ellm-subagent-id id)
           (setq-local ellm-subagent-parent-buffer parent-buffer-name)
-          (when fallback-provider
-            (setq-local ellm-provider fallback-provider))
           (insert "---\n" (ellm--ensure-newline (ellm--yaml-encode frontmatter))
                   "---\n\n")
           (ellm-mode)
+          (when fallback-provider
+            (setq-local ellm-provider fallback-provider))
           (setq-local ellm--session-titling-p nil)
           (ellm--insert-turn "user")
           (insert (ellm--ensure-newline prompt))
