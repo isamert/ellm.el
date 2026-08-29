@@ -34,7 +34,6 @@
 (require 'async)
 (require 'cl-lib)
 (require 'seq)
-(require 's)
 (require 'subr-x)
 
 ;;;; Customization
@@ -357,6 +356,19 @@ DETAIL describes the displayed preview when it is useful to the model."
 ;;;; `ellm-deftool' macro
 
 (eval-and-compile
+  (defun ellm-tools--blank-p (string)
+    "Return non-nil when STRING is nil or empty."
+    (or (null string) (string= "" string)))
+
+  (defun ellm-tools--replace-all (replacements string)
+    "Replace literal strings in STRING according to REPLACEMENTS.
+REPLACEMENTS is an alist of strings."
+    (let ((case-fold-search nil))
+      (replace-regexp-in-string
+       (regexp-opt (mapcar #'car replacements))
+       (lambda (match) (cdr (assoc-string match replacements t)))
+       string t t)))
+
   (defun ellm-tools--normalize-name (s)
     (string-replace "-" "_" s))
 
@@ -424,7 +436,7 @@ DETAIL describes the displayed preview when it is useful to the model."
     `(progn
        (defconst ,const-sym
          (list :name ,tool-name
-               :description ,(s-replace-all
+               :description ,(ellm-tools--replace-all
                               param-name-replacements
                               doc)
                :async ,async?
@@ -435,7 +447,7 @@ DETAIL describes the displayed preview when it is useful to the model."
                                  :type  (intern (string-trim-left (symbol-name (nth 1 it)) ":"))
                                  :optional (ellm-tools--argument-optional-p it)
                                  :description
-                                 (s-replace-all
+                                 (ellm-tools--replace-all
                                   param-name-replacements
                                   (nth 2 it)))
                            (ellm-tools--argument-schema-metadata it)))
@@ -738,7 +750,7 @@ standard input in the conversation working directory."
 (defun ellm-tools--git-string (value name)
   "Return VALUE as a safe Git argument named NAME."
   (unless (and (stringp value)
-               (not (s-blank? value))
+               (not (ellm-tools--blank-p value))
                (not (string-prefix-p "-" value))
                (not (string-match-p "\0" value)))
     (ellm-tools--error "%s must be a non-empty argument that does not start with -" name))
@@ -931,7 +943,7 @@ the operation fails if the target already exists."
    (end-line :integer "Ending line number."))
   "Return text from START-LINE to END-LINE (inclusive).
 For a non-text file, return metadata without reading its contents."
-  (when (or (s-blank? file-path)
+  (when (or (ellm-tools--blank-p file-path)
             (not (and (numberp start-line) (numberp end-line)))
             (< start-line 1)
             (< end-line start-line))
@@ -1026,7 +1038,7 @@ Act directly on buffers if you know the name already, without listing."
   "Return bounded matches for PATTERN in BUFFER."
   (unless (buffer-live-p buffer)
     (ellm-tools--error "Invalid buffer"))
-  (when (s-blank? pattern)
+  (when (ellm-tools--blank-p pattern)
     (ellm-tools--error "search pattern is empty"))
   (with-current-buffer buffer
     (let ((case-fold-search (not case-sensitive))
@@ -1206,12 +1218,12 @@ Use this to read a specific web page, document, or text resource."
 (defun ellm-tools--validate-pattern (pattern name)
   "Signal an error unless PATTERN is a non-blank string named NAME."
   (when (or (not (stringp pattern))
-            (s-blank? pattern))
+            (ellm-tools--blank-p pattern))
     (ellm-tools--error "%s must be a non-empty string" name)))
 
 (defun ellm-tools--search-path (path)
   "Return PATH or `.' for file search tools."
-  (if (and (stringp path) (not (s-blank? path)))
+  (if (and (stringp path) (not (ellm-tools--blank-p path)))
       path
     "."))
 
@@ -1227,7 +1239,7 @@ Use this to read a specific web page, document, or text resource."
   (let ((names (if (vectorp symbols) (append symbols nil) symbols)))
     (unless (and (consp names)
                  (cl-every (lambda (name)
-                             (and (stringp name) (not (s-blank? name))))
+                             (and (stringp name) (not (ellm-tools--blank-p name))))
                            names))
       (ellm-tools--error
        "symbols must be a non-empty array of non-empty strings"))
@@ -1422,7 +1434,7 @@ whose documentation contains all QUERY words are included as well."
 (defun ellm-tools--normalize-elisp-session (session)
   "Return a validated Elisp SESSION name."
   (let ((name (or session "temp")))
-    (unless (and (stringp name) (not (s-blank? name)))
+    (unless (and (stringp name) (not (ellm-tools--blank-p name)))
       (ellm-tools--error "session must be a non-empty string"))
     name))
 
@@ -1435,7 +1447,7 @@ whose documentation contains all QUERY words are included as well."
                 (t :invalid))))
     (unless (and (not (eq names :invalid))
                  (cl-every (lambda (name)
-                             (and (stringp name) (not (s-blank? name))))
+                             (and (stringp name) (not (ellm-tools--blank-p name))))
                            names))
       (ellm-tools--error
        "features must be an array of non-empty strings"))
@@ -1814,7 +1826,7 @@ whose documentation contains all QUERY words are included as well."
   "Start PROGRAM with ARGS asynchronously.
 FORMATTER is called with EXIT-CODE, STDOUT and STDERR, and its return value
 is passed to CALLBACK.  Return a cancellation function."
-  (unless (and (stringp program) (not (s-blank? program)))
+  (unless (and (stringp program) (not (ellm-tools--blank-p program)))
     (ellm-tools--error "Invalid command program"))
   (unless (executable-find program)
     (ellm-tools--error "program not found: %s" program))
@@ -2053,7 +2065,7 @@ lines or non-text file metadata.  Return a cancellation function."
 
 (defun ellm-tools--present-string (value)
   "Return VALUE as a non-blank string, or nil."
-  (when (and (stringp value) (not (s-blank? value)))
+  (when (and (stringp value) (not (ellm-tools--blank-p value)))
     value))
 
 (defun ellm-tools--key-name (key)
@@ -2590,7 +2602,7 @@ SUBAGENT may be a remembered id or a live buffer name."
            (last-turn (car (last turns))))
       (if (and last-turn
                (equal (ellm-turn-role last-turn) "user")
-               (s-blank? (ellm-turn-content last-turn)))
+               (ellm-tools--blank-p (ellm-turn-content last-turn)))
           (progn
             (goto-char (ellm-turn-beg last-turn))
             (delete-region (ellm-turn-beg last-turn)
@@ -2653,7 +2665,7 @@ SUBAGENT may be a remembered id or a live buffer name."
   (let ((parsed (url-generic-parse-url url)))
     (unless (and (member (downcase (or (url-type parsed) ""))
                          '("http" "https"))
-                 (not (s-blank? (url-host parsed))))
+                 (not (ellm-tools--blank-p (url-host parsed))))
       (ellm-tools--error "url must be an absolute HTTP or HTTPS URL"))))
 
 (defun ellm-tools--webfetch-header (name header-end)
@@ -2669,7 +2681,7 @@ SUBAGENT may be a remembered id or a live buffer name."
                     (string-trim
                      (car (split-string header ";")))))))
     (cond
-     ((not (s-blank? type)) type)
+     ((not (ellm-tools--blank-p type)) type)
      ((string-match-p
        "\\`[[:space:]\ufeff]*<\\(?:!doctype[[:space:]]+html\\|html\\|head\\|body\\)"
        (downcase (substring body 0 (min 1024 (length body)))))
@@ -2982,7 +2994,7 @@ The return value is a cons of body and whether it was truncated."
       (if (plist-get result :readable) "true" "false")
       (if (plist-get result :truncated) "true" "false"))
      (when-let* ((title (plist-get result :title))
-                 ((not (s-blank? title))))
+                 ((not (ellm-tools--blank-p title))))
        (format "Title: %s\n\n" title))
      (let* ((content (plist-get result :content))
             (output-truncated (plist-get result :output-truncated))
@@ -3172,7 +3184,7 @@ The return value is a cons of body and whether it was truncated."
 
 (defun ellm-tools--decode-html-entities (text)
   "Decode common HTML entities in TEXT."
-  (let ((decoded (s-replace-all '(("&amp;" . "&")
+  (let ((decoded (ellm-tools--replace-all '(("&amp;" . "&")
                                   ("&lt;" . "<")
                                   ("&gt;" . ">")
                                   ("&quot;" . "\"")
@@ -3204,7 +3216,7 @@ The return value is a cons of body and whether it was truncated."
 (defun ellm-tools--duckduckgo-result-url (href)
   "Return the destination URL for a DuckDuckGo result HREF."
   (require 'url-util)
-  (when (and href (not (s-blank? href)))
+  (when (and href (not (ellm-tools--blank-p href)))
     (let ((url (ellm-tools--decode-html-entities href)))
       (when (string-prefix-p "//" url)
         (setq url (concat "https:" url)))
@@ -3233,7 +3245,7 @@ The return value is a cons of body and whether it was truncated."
                                 (ellm-tools--dom-text anchor)))
                         (href (ellm-tools--dom-attr anchor 'href))
                         (url (ellm-tools--duckduckgo-result-url href)))
-              (unless (or (s-blank? title)
+              (unless (or (ellm-tools--blank-p title)
                           (gethash url seen))
                 (puthash url t seen)
                 (push (list :title title
@@ -3281,7 +3293,7 @@ The return value is a cons of body and whether it was truncated."
                          "class=[\"'][^\"']*result__snippet[^\"']*[\"'][^>]*>\\(\\(?:.\\|\n\\)*?\\)</\\(?:a\\|div\\)>"
                          block)
                     (ellm-tools--strip-html-tags (match-string 1 block)))))
-            (unless (or (not url) (s-blank? title) (gethash url seen))
+            (unless (or (not url) (ellm-tools--blank-p title) (gethash url seen))
               (puthash url t seen)
               (push (list :title title :url url :snippet (or snippet ""))
                     results))))))
@@ -3309,7 +3321,7 @@ The return value is a cons of body and whether it was truncated."
                      (plist-get result :title)
                      (plist-get result :url))
              (let ((snippet (plist-get result :snippet)))
-               (unless (s-blank? snippet)
+               (unless (ellm-tools--blank-p snippet)
                  (concat "\nSnippet: " snippet))))))
         (cl-loop for result in results
                  for index from 1
