@@ -157,7 +157,7 @@ Work autonomously when the request is clear:
 #{(when (ellm-tool-enabled-p \"agents\")
    \"- Use the agents tool to launch subagents when the user explicitly requests delegation, or an independent review. Otherwise, complete the work yourself.\")}
 #{(when (ellm-tool-enabled-p \"ask\")
-   \"- Use the ask tool only when the user explicitly requests planning or brainstorming, or when essential information is missing and proceeding would risk a consequential mistake. Otherwise, make reasonable assumptions and proceed autonomously.\")}
+   \"- Use the ask tool for planning, brainstorming, essential missing information, or whenever you need to ask the user a question. Otherwise, make reasonable assumptions and proceed autonomously.\")}
 </tool_usage>
 
 #{(ellm-prompt-read
