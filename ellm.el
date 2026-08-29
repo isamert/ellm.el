@@ -1406,7 +1406,7 @@ This catches delimiters assembled across streaming chunk boundaries."
       (forward-char 1))))
 
 (defun ellm--unescape-turn-delimiters (text)
-  "Decode reversible line-prefix escaping in TEXT."
+  "Decode reversible line prefix escaping in TEXT."
   (replace-regexp-in-string
    (ellm-tools--escaped-tool-body-prefix-regexp)
    (lambda (match) (substring match 1))
@@ -2656,7 +2656,7 @@ parsing fails.  Unless QUIET is non-nil, parsing failures issue a
   (let ((name (cond ((symbolp value) (symbol-name value))
                     ((stringp value) value))))
     (unless (and name (not (string-empty-p name)))
-      (user-error "ellm: profile must be a non-empty string or symbol"))
+      (user-error "ellm: Profile must be a non-empty string or symbol"))
     name))
 
 (defun ellm--frontmatter-map (value label)
@@ -2779,11 +2779,11 @@ RESOLVE accepts one selector entry and returns matching items."
                                             (ellm--profile-name (car entry)))
                        :test #'equal)))
     (unless cell
-      (user-error "ellm: profile not found: %s" name))
+      (user-error "ellm: Profile not found: %s" name))
     (let ((map (cdr cell)))
       (ellm--frontmatter-map map (format "profile `%s'" name))
       (when (or (assq 'profile map) (assq 'profiles map))
-        (user-error "ellm: profile `%s' cannot select or define profiles" name))
+        (user-error "ellm: Profile `%s' cannot select or define profiles" name))
       (ellm--normalize-frontmatter-selector-overlays map))))
 
 (defun ellm--effective-profiles (frontmatter)
@@ -2900,7 +2900,7 @@ KEY may be a symbol/string or a list naming a nested path."
   (when-let* ((bounds (ellm--frontmatter-bounds)))
     (let ((fm (copy-tree (ellm--parse-frontmatter))))
       (when ellm--frontmatter-cache-error
-        (user-error "ellm: cannot edit malformed frontmatter"))
+        (user-error "ellm: Cannot edit malformed frontmatter"))
       (pcase-let ((`(_ _ ,beg ,end _) bounds))
         (let ((inhibit-read-only t))
           (replace-region-contents
@@ -2931,7 +2931,7 @@ KEY may be a symbol/string or a list naming a nested path."
   "Return FRONTMATTER's `cwd' as an absolute directory, or nil."
   (when-let* ((cwd (alist-get 'cwd frontmatter)))
     (unless (stringp cwd)
-      (user-error "ellm: frontmatter `cwd' must be a string"))
+      (user-error "ellm: Frontmatter `cwd' must be a string"))
     (ellm--validate-directory
      (expand-file-name cwd (ellm--base-directory)) "cwd")))
 
@@ -2951,7 +2951,7 @@ root, then the buffer base directory."
     (ellm--validate-directory
      (expand-file-name override (ellm--base-directory)) "cwd"))
    (override
-    (user-error "ellm: cwd must be a non-empty string"))
+    (user-error "ellm: `cwd' must be a non-empty string"))
    ((ellm--frontmatter-cwd frontmatter))
    (ellm--effective-working-directory
     (ellm--validate-directory ellm--effective-working-directory
@@ -3037,13 +3037,13 @@ Signal when the text exceeds MAX-CHARS.  When MAX-CHARS is nil, use
   (let ((path (expand-file-name file (ellm-prompt-directory)))
         (limit (or max-chars ellm-prompt-interpolation-max-chars)))
     (unless (file-readable-p path)
-      (user-error "ellm: prompt file is not readable: %s" path))
+      (user-error "ellm: Prompt file is not readable: %s" path))
     (unless (file-regular-p path)
-      (user-error "ellm: prompt file is not a regular file: %s" path))
+      (user-error "ellm: Prompt file is not a regular file: %s" path))
     (with-temp-buffer
       (insert-file-contents path)
       (when (and limit (> (buffer-size) limit))
-        (user-error "ellm: prompt file exceeds %d characters: %s"
+        (user-error "ellm: Prompt file exceeds %d characters: %s"
                     limit path))
       (buffer-string))))
 
@@ -3059,13 +3059,13 @@ non-nil, wrap the file contents in matching angle-bracket tags.  HEADING and
 TAG are only applied to non-empty file contents."
   (unless (or (stringp files)
               (and (listp files) files (cl-every #'stringp files)))
-    (user-error "ellm: prompt files must be a string or non-empty list of strings"))
+    (user-error "ellm: Prompt files must be a string or non-empty list of strings"))
   (unless (or (null directory) (stringp directory))
-    (user-error "ellm: prompt directory must be a string"))
+    (user-error "ellm: Prompt directory must be a string"))
   (unless (or (null heading) (stringp heading))
-    (user-error "ellm: prompt heading must be a string"))
+    (user-error "ellm: Prompt heading must be a string"))
   (unless (or (null tag) (stringp tag))
-    (user-error "ellm: prompt tag must be a string"))
+    (user-error "ellm: Prompt tag must be a string"))
   (let* ((files (ensure-list files))
          (directory (expand-file-name (or directory (ellm-prompt-directory))))
          (path (cl-find-if (lambda (file)
@@ -3084,7 +3084,7 @@ TAG are only applied to non-empty file contents."
                   contents
                   (and tag (concat "\n</" tag ">"))))))
      (required
-      (user-error "ellm: none of the prompt files exist in %s: %s"
+      (user-error "ellm: None of the prompt files exist in %s: %s"
                   directory (string-join files ", ")))
      (t ""))))
 
@@ -3096,7 +3096,7 @@ template interpolation.  Category selections and `tools: true' are resolved
 using the same rules as local tool requests."
   (let ((name (cond ((stringp name) name)
                     ((symbolp name) (symbol-name name))
-                    (t (user-error "ellm: tool name must be a string or symbol: %S"
+                    (t (user-error "ellm: Tool name must be a string or symbol: %S"
                                    name))))
         (frontmatter (or frontmatter (ellm-prompt-frontmatter))))
     (cl-find name (ellm--resolve-tools frontmatter)
@@ -3162,7 +3162,7 @@ using the same rules as local tool requests."
                   (or ellm--prompt-interpolation-source "system prompt")))
        (user-error "ellm: Lisp prompt interpolation was not approved")))
     (_
-     (user-error "ellm: invalid prompt interpolation policy: %S"
+     (user-error "ellm: Invalid prompt interpolation policy: %S"
                  ellm-prompt-interpolation-policy))))
 
 (defun ellm--prompt-interpolation-string (value)
@@ -3179,7 +3179,7 @@ CONTEXT defaults to the current buffer's prompt context.  Interpolation uses
 the syntax `#{(FORM)}'; `\\#{' inserts a literal opener.  Generated text is
 not recursively expanded."
   (unless (stringp template)
-    (user-error "ellm: prompt template must be a string"))
+    (user-error "ellm: Prompt template must be a string"))
   (when (and (ellm--prompt-template-interpolation-p template)
              (not (member template ellm--trusted-prompt-templates)))
     (ellm--authorize-prompt-interpolation))
@@ -3210,7 +3210,7 @@ not recursively expanded."
           (unless (and (< form-start (length template))
                        (eq (aref template form-start) ?\())
             (user-error
-             "ellm: prompt interpolation at %s must contain one parenthesized form"
+             "ellm: Prompt interpolation at %s must contain one parenthesized form"
              (ellm--prompt-interpolation-location template position)))
           (pcase-let*
               ((`(,form . ,form-end)
@@ -3218,7 +3218,7 @@ not recursively expanded."
                     (read-from-string template form-start)
                   (error
                    (user-error
-                    "ellm: invalid prompt interpolation at %s: %s"
+                    "ellm: Invalid prompt interpolation at %s: %s"
                     (ellm--prompt-interpolation-location template position)
                     (error-message-string err)))))
                (closing form-end))
@@ -3228,7 +3228,7 @@ not recursively expanded."
             (unless (and (< closing (length template))
                          (eq (aref template closing) ?}))
               (user-error
-               "ellm: prompt interpolation at %s must end after one form"
+               "ellm: Prompt interpolation at %s must end after one form"
                (ellm--prompt-interpolation-location template position)))
             (let ((ellm--prompt-interpolation-context context))
               (push
@@ -3243,7 +3243,7 @@ not recursively expanded."
                               (eval form t))))))
                   (error
                    (user-error
-                    "ellm: prompt interpolation at %s failed: %s"
+                    "ellm: Prompt interpolation at %s failed: %s"
                     (ellm--prompt-interpolation-location template position)
                     (error-message-string err)))))
                pieces))
@@ -3253,7 +3253,7 @@ not recursively expanded."
     (let ((rendered (apply #'concat (nreverse pieces))))
       (when (and ellm-prompt-interpolation-max-chars
                  (> (length rendered) ellm-prompt-interpolation-max-chars))
-        (user-error "ellm: rendered prompt exceeds %d characters"
+        (user-error "ellm: Rendered prompt exceeds %d characters"
                     ellm-prompt-interpolation-max-chars))
       rendered)))
 
@@ -3295,7 +3295,7 @@ Templates are memoized by exact text across frontmatter and system turns."
     (unless leading
       (when frontmatter-template
         (unless (stringp frontmatter-template)
-          (user-error "ellm: frontmatter `system' must be a string"))
+          (user-error "ellm: Frontmatter `system' must be a string"))
         (setq initial
               (ellm--memoized-prompt-template
                frontmatter-template context "frontmatter system prompt"))))
@@ -3317,7 +3317,7 @@ When QUIET is non-nil, do not report the change.  An already-created request
 keeps its resolved prompt; clearing the cache only affects future requests."
   (interactive nil ellm-mode)
   (unless (derived-mode-p 'ellm-mode)
-    (user-error "ellm: not in an ellm buffer"))
+    (user-error "ellm: Not in an ellm buffer"))
   (ellm--clear-system-prompt-cache)
   (unless quiet
     (message "ellm: system prompt cache cleared")))
@@ -3326,7 +3326,7 @@ keeps its resolved prompt; clearing the cache only affects future requests."
   "Show cached effective system prompts without evaluating templates."
   (interactive nil ellm-mode)
   (unless (derived-mode-p 'ellm-mode)
-    (user-error "ellm: not in an ellm buffer"))
+    (user-error "ellm: Not in an ellm buffer"))
   (let* ((frontmatter (ellm--effective-frontmatter))
          (turns (ellm--parse-turns))
          (leading (and turns
@@ -3395,7 +3395,7 @@ keeps its resolved prompt; clearing the cache only affects future requests."
   (let ((ids (ellm--frontmatter-value '(tool-outputs))))
     (unless (or (null ids)
                 (and (listp ids) (cl-every #'stringp ids)))
-      (error "tool-outputs must be a list of output identifiers"))
+      (error "Tool-outputs must be a list of output identifiers"))
     ids))
 
 (defun ellm--tool-output-file-name (id)
@@ -3468,7 +3468,7 @@ output buffer."
   (unless (and (stringp id)
                (string-match-p ellm--tool-output-id-regexp id)
                (member id (ellm--tool-output-ids)))
-    (error "unknown tool output: %s" id))
+    (error "Unknown tool output: %s" id))
   (or (get-buffer (ellm--tool-output-buffer-name id))
       (when-let* ((path (ellm--tool-output-path id))
                   ((file-readable-p path)))
@@ -3478,7 +3478,7 @@ output buffer."
             (setq-local buffer-read-only t)
             (set-buffer-modified-p nil))
           buffer))
-      (error "retained tool output is unavailable: %s" id)))
+      (error "Retained tool output is unavailable: %s" id)))
 
 ;;;###autoload
 (defun ellm-switch-to-tool-output-buffer ()
@@ -3797,10 +3797,10 @@ new session.  An existing session always keeps its current directory."
   (let ((root (and choose-directory
                    (read-directory-name "Save ellm session in: " nil nil t))))
     (unless (or ellm--session-directory root (ellm--persistence-root))
-      (user-error "ellm: persistence has no directory here; use a prefix argument"))
+      (user-error "ellm: Persistence has no directory here; use a prefix argument"))
     (ellm--persistence-prepare t root)
     (unless ellm--session-directory
-      (user-error "ellm: could not determine a session directory"))
+      (user-error "ellm: Could not determine a session directory"))
     (let* ((session-id (ellm--ensure-session-id))
            (directory ellm--session-directory)
            (buffers (ellm--related-session-buffers session-id)))
@@ -3908,14 +3908,14 @@ new session.  An existing session always keeps its current directory."
   "Open a persisted main conversation from the current persistence root."
   (interactive)
   (let* ((root (or (ellm--persistence-root)
-                   (user-error "ellm: persistence has no directory here")))
+                   (user-error "ellm: Persistence has no directory here")))
          (sessions (ellm--persisted-sessions root))
          (choices (mapcar (lambda (session)
                             (cons (ellm--persisted-session-choice session)
                                   session))
                           sessions)))
     (unless choices
-      (user-error "ellm: no persisted sessions in %s" root))
+      (user-error "ellm: No persisted sessions in %s" root))
     (let ((session (cdr (assoc (completing-read "ellm session: " choices nil t)
                             choices))))
       (ellm--find-file-or-switch-to-buffer
@@ -3926,13 +3926,13 @@ new session.  An existing session always keeps its current directory."
   "Open a persisted subagent conversation from the current session."
   (interactive)
   (unless ellm--session-directory
-    (user-error "ellm: current conversation is not a persisted session"))
+    (user-error "ellm: Current conversation is not a persisted session"))
   (let* ((files (ellm--persisted-session-subagent-files ellm--session-directory))
          (choices (mapcar (lambda (file)
                             (cons (file-name-base file) file))
                           files)))
     (unless choices
-      (user-error "ellm: this session has no persisted subagents"))
+      (user-error "ellm: This session has no persisted subagents"))
     (ellm--find-file-or-switch-to-buffer
      (cdr (assoc (completing-read "ellm subagent: " choices nil t) choices)))))
 
@@ -4044,12 +4044,12 @@ Signals `user-error' when no provider can be resolved."
               (setq entry (alist-get sym ellm-provider-alist))
               (unless entry
                 (user-error
-                 "ellm: provider `%s' not found in `ellm-provider-alist'"
+                 "ellm: Provider `%s' not found in `ellm-provider-alist'"
                  sym))
               (ellm--provider-entry-provider entry)))
            (ellm-provider ellm-provider)
            (t (user-error
-               "ellm: no provider configured (set `ellm-provider' or use frontmatter `provider:')"))))
+               "ellm: No provider configured (set `ellm-provider' or use frontmatter `provider:')"))))
          (model (alist-get 'model frontmatter))
          (resolved (if model
                        (ellm--provider-with-model provider model)
@@ -4102,14 +4102,14 @@ can be a tool name like \"a_tool_name\"."
                        when (equal (ellm-tool-category tool) cat)
                        collect tool)))
         (if matches matches
-          (warn "ellm: no tools in `ellm-tools-list' have category `%s'" cat))))
+          (warn "ellm: No tools in `ellm-tools-list' have category `%s'" cat))))
      ;; name ref
      (t
       (let ((tool (cl-find spec ellm-tools-list
                            :key #'ellm-tool-name
                            :test #'equal)))
         (if tool (list tool)
-          (warn "ellm: tool `%s' not found in `ellm-tools-list'" spec)))))))
+          (warn "ellm: Tool `%s' not found in `ellm-tools-list'" spec)))))))
 
 ;;;;; MCP server resolution
 
@@ -4188,7 +4188,7 @@ accepted."
                                        category)
                            collect server)))
             (unless matches
-              (warn "ellm: no available MCP servers have category `%s'"
+              (warn "ellm: No available MCP servers have category `%s'"
                     category))
             matches)
         (let ((server (cl-find spec definitions
@@ -4269,7 +4269,7 @@ When SELECT-PROVIDER-MODEL is non-nil, prompt for the provider and model."
                     (ellm-provider-default-model provider-name))))
          (system (plist-get default-configuration :system)))
     (when (and system (not (stringp system)))
-      (user-error "ellm: default `:system' must be a string"))
+      (user-error "ellm: Default `:system' must be a string"))
     (with-current-buffer buf
       (setq-local ellm--persistence-ephemeral-p ephemeral)
       (insert "---\n"
@@ -4616,12 +4616,12 @@ precedence over category selectors, which take precedence over `default'."
                                   :test #'equal))))
          (value (if entry (format "%s" (cdr entry)) "allow")))
     (unless (or (null rules) (and (listp rules) (cl-every #'consp rules)))
-      (user-error "ellm: tool-permissions must be a map"))
+      (user-error "ellm: Tool-permissions must be a map"))
     (pcase value
       ("allow" 'allow)
       ("ask" 'ask)
       ("deny" 'deny)
-      (_ (user-error "ellm: invalid tool permission policy for `%s': %s"
+      (_ (user-error "ellm: Invalid tool permission policy for `%s': %s"
                      (if entry (car entry) "default") value)))))
 
 (defun ellm--format-tool-permission-arguments (args)
@@ -4899,7 +4899,7 @@ When SUPPRESS-NEXT is non-nil, do not activate the next queued prompt."
   (interactive nil ellm-mode)
   (if ellm--active-user-prompt
       (ellm--activate-user-prompt ellm--active-user-prompt)
-    (user-error "ellm: no input is pending")))
+    (user-error "ellm: No input is pending")))
 
 (defun ellm-answer-prompt-mouse (event)
   "Answer the pending prompt in the window clicked by mouse EVENT."
@@ -5391,7 +5391,7 @@ MESSAGE-TEXT is reported after cleanup when non-nil."
                (pcase (plist-get event :mode)
                  ('snapshot (ellm--request-render-snapshot request event))
                  ('append (ellm--request-render-chunk request event))
-                 (_ (error "ellm: invalid stream event mode: %S"
+                 (_ (error "ellm: Invalid stream event mode: %S"
                            (plist-get event :mode)))))
               ('usage
                (ellm--request-merge-usage request event))
@@ -5427,7 +5427,7 @@ MESSAGE-TEXT is reported after cleanup when non-nil."
                      (ellm--request-schedule-retry request text)
                    (ellm--request-terminal-transition request 'failed text))))
               (_
-               (error "ellm: unknown backend event: %S" event))))
+               (error "ellm: Unknown backend event: %S" event))))
         (error
          (ellm--request-terminal-transition
           request 'failed (error-message-string err)))))))
@@ -5924,7 +5924,7 @@ Returns (CANDIDATES . SOURCE) where SOURCE may be nil."
     (current-buffer)))
 
 (defun ellm--frontmatter-capf--make-result (beg end candidates context &optional source)
-  "Return a completion-at-point result for CANDIDATES from BEG to END.
+  "Return a `completion-at-point' result for CANDIDATES from BEG to END.
 CONTEXT is used as the fallback annotation.  SOURCE, when non-nil, is
 appended to the fallback annotation."
   (let ((names (mapcar #'ellm--frontmatter-capf--candidate-name candidates)))
@@ -6492,15 +6492,15 @@ Turn delimiter lines belong to their following turn."
 The tool call and result must have matching `id' attributes."
   (interactive nil ellm-mode)
   (unless (derived-mode-p 'ellm-mode)
-    (user-error "ellm: this command requires an ellm buffer"))
+    (user-error "ellm: This command requires an ellm buffer"))
   (let* ((turn (ellm--tool-turn-at-point))
          (role (and turn (ellm-turn-role turn)))
          (id (and turn (alist-get "id" (ellm-turn-attrs turn)
                                   nil nil #'equal))))
     (unless (member role '("tool-call" "tool-result"))
-      (user-error "ellm: point is not in a tool call or result"))
+      (user-error "ellm: Point is not in a tool call or result"))
     (unless (and id (not (string-empty-p id)))
-      (user-error "ellm: this tool %s has no ID" role))
+      (user-error "ellm: This tool %s has no ID" role))
     (let ((target
            (cl-find-if
             (lambda (candidate)
@@ -6513,7 +6513,7 @@ The tool call and result must have matching `id' attributes."
                           id)))
             (ellm--parse-turns))))
       (unless target
-        (user-error "ellm: no matching tool %s for %s"
+        (user-error "ellm: No matching tool %s for %s"
                     (if (equal role "tool-call") "result" "call") id))
       (goto-char (ellm--turn-delimiter-beg target))
       (outline-show-entry))))
@@ -6936,7 +6936,7 @@ new target conversation outside an ellm buffer."
                   (in-compose ellm--composer-conversation)
                   (t (ellm--select-or-create-project-buffer root new)))))
     (unless (buffer-live-p target)
-      (user-error "ellm: no conversation for this draft"))
+      (user-error "ellm: No conversation for this draft"))
     (pcase (ellm--append-to-next-prompt target entry)
       ('draft (message "ellm: added to draft for next user prompt"))
       ('prompt (message "ellm: added to next user prompt")))))
@@ -7237,10 +7237,10 @@ Otherwise move point to the real trailing user turn in the conversation."
 While the request is still active, retain the draft for review when it ends."
   (interactive nil ellm-compose-mode)
   (unless (derived-mode-p 'ellm-compose-mode)
-    (user-error "ellm: not in a next-prompt draft"))
+    (user-error "ellm: Not in a next-prompt draft"))
   (let ((conversation ellm--composer-conversation))
     (unless (buffer-live-p conversation)
-      (user-error "ellm: draft's conversation no longer exists"))
+      (user-error "ellm: Draft's conversation no longer exists"))
     (with-current-buffer conversation
       (if ellm--active-request
           (progn
@@ -7253,10 +7253,10 @@ While the request is still active, retain the draft for review when it ends."
   "Discard the current next-prompt draft without cancelling its request."
   (interactive nil ellm-compose-mode)
   (unless (derived-mode-p 'ellm-compose-mode)
-    (user-error "ellm: not in a next-prompt draft"))
+    (user-error "ellm: Not in a next-prompt draft"))
   (when (and (not (string-blank-p (buffer-string)))
              (not (yes-or-no-p "Discard next-prompt draft? ")))
-    (user-error "ellm: draft kept"))
+    (user-error "ellm: Draft kept"))
   (let ((conversation ellm--composer-conversation)
         (composer (current-buffer)))
     (when (buffer-live-p conversation)
@@ -7275,7 +7275,7 @@ While the request is still active, retain the draft for review when it ends."
   (let* ((turns (ellm--parse-turns))
          (last  (car (last turns))))
     (unless (and last (equal (ellm-turn-role last) "user"))
-      (user-error "ellm: last turn must be `user' (got %s)"
+      (user-error "ellm: Last turn must be `user' (got %s)"
                   (if last (ellm-turn-role last) "no turns")))))
 
 (defun ellm-send ()
@@ -7375,7 +7375,7 @@ If QUIET is non-nil, then do not print any messages."
 (defun ellm--ensure-no-config-in-flight ()
   "Signal when a live configuration change is still being applied."
   (when ellm--config-in-flight
-    (user-error "ellm: configuration is still being applied")))
+    (user-error "ellm: Configuration is still being applied")))
 
 (defun ellm--config-path-string (path)
   "Return dotted display text for frontmatter PATH."
@@ -7571,15 +7571,15 @@ before persistence; other settings apply on the next send or a new session.
 With prefix argument REMOVE, remove the selected frontmatter setting instead."
   (interactive "P")
   (unless (derived-mode-p 'ellm-mode)
-    (user-error "ellm: this command requires an ellm buffer"))
+    (user-error "ellm: This command requires an ellm buffer"))
   (when ellm--active-request
-    (user-error "ellm: cannot change configuration while a request is active"))
+    (user-error "ellm: Cannot change configuration while a request is active"))
   (ellm--ensure-no-config-in-flight)
   (let* ((buffer (current-buffer))
          (raw-frontmatter (ellm--parse-frontmatter))
          (frontmatter (ellm--effective-frontmatter raw-frontmatter)))
     (when ellm--frontmatter-cache-error
-      (user-error "ellm: cannot edit malformed frontmatter"))
+      (user-error "ellm: Cannot edit malformed frontmatter"))
     (let ((provider (ellm--resolve-provider frontmatter)))
       (when (and (not remove)
                  (ellm-provider-config-metadata-session-start-p provider buffer)
@@ -7596,7 +7596,7 @@ With prefix argument REMOVE, remove the selected frontmatter setting instead."
                               setting))
                       settings)))
         (unless choices
-          (user-error "ellm: provider exposes no editable settings"))
+          (user-error "ellm: Provider exposes no editable settings"))
         (let* ((selected (completing-read "Setting: " choices nil t))
                (setting (cdr (assoc selected choices)))
                (path (plist-get setting :path))
@@ -7646,7 +7646,7 @@ With prefix argument REMOVE, remove the selected frontmatter setting instead."
                          (ellm--provider-entry-provider
                           (cdar ellm-provider-alist))))))
     (unless provider
-      (user-error "ellm: no provider configured"))
+      (user-error "ellm: No provider configured"))
     provider))
 
 (defun ellm-load-session ()
@@ -7845,7 +7845,7 @@ FRONTMATTER is the parsed YAML frontmatter alist for BUFFER.")
 
 (cl-defmethod ellm-provider-start-session (_provider _frontmatter _buffer)
   "Default session start implementation for providers without sessions."
-  (user-error "ellm: provider does not support explicit session start"))
+  (user-error "ellm: Provider does not support explicit session start"))
 
 (cl-defgeneric ellm-provider-model-completion-session-start-p (provider buffer)
   "Return non-nil if model completion should offer starting PROVIDER for BUFFER.")
@@ -7858,7 +7858,7 @@ FRONTMATTER is the parsed YAML frontmatter alist for BUFFER.")
     (provider frontmatter buffer)
   "Start PROVIDER's session for model completion in BUFFER.
 Implementations should avoid frontmatter rewrites that would invalidate the
-completion-at-point bounds when possible.")
+`completion-at-point' bounds when possible.")
 
 (cl-defmethod ellm-provider-start-session-for-model-completion
   (_provider _frontmatter _buffer)
@@ -7870,14 +7870,14 @@ completion-at-point bounds when possible.")
 
 (cl-defmethod ellm-provider-load-session (_provider _frontmatter)
   "Default session loading implementation for providers without sessions."
-  (user-error "ellm: provider does not support session listing/loading"))
+  (user-error "ellm: Provider does not support session listing/loading"))
 
 (cl-defgeneric ellm-provider-close-session (provider frontmatter buffer)
   "Close PROVIDER's active session for BUFFER using FRONTMATTER context.")
 
 (cl-defmethod ellm-provider-close-session (_provider _frontmatter _buffer)
   "Default session close implementation for providers without sessions."
-  (user-error "ellm: provider does not support session close"))
+  (user-error "ellm: Provider does not support session close"))
 
 (cl-defgeneric ellm-provider-delete-session (provider frontmatter buffer &optional select)
   "Delete a PROVIDER session using FRONTMATTER and BUFFER context.
@@ -7885,7 +7885,7 @@ When SELECT is non-nil, implementations may prompt for the session to delete.")
 
 (cl-defmethod ellm-provider-delete-session (_provider _frontmatter _buffer &optional _select)
   "Default session delete implementation for providers without sessions."
-  (user-error "ellm: provider does not support session delete"))
+  (user-error "ellm: Provider does not support session delete"))
 
 (cl-defgeneric ellm-backend-create (provider frontmatter buffer)
   "Create a backend driver for PROVIDER, FRONTMATTER, and BUFFER.
@@ -7962,11 +7962,11 @@ This hook must not perform core lifecycle or conversation-buffer finalization.")
                        "medium")))
     (when (or (not content)
               (string-match-p "\\`[[:space:]]*\\'" content))
-      (error "ellm: todo item %d has no content" index))
+      (error "ellm: Todo item %d has no content" index))
     (unless (member status ellm--todo-statuses)
-      (error "ellm: todo item %d has invalid status: %S" index status))
+      (error "ellm: Todo item %d has invalid status: %S" index status))
     (unless (member priority ellm--todo-priorities)
-      (error "ellm: todo item %d has invalid priority: %S" index priority))
+      (error "ellm: Todo item %d has invalid priority: %S" index priority))
     (append (when id (list :id id))
             (list :content content :status status :priority priority))))
 
@@ -7975,7 +7975,7 @@ This hook must not perform core lifecycle or conversation-buffer finalization.")
   (let ((items (cond
                 ((vectorp todos) (append todos nil))
                 ((listp todos) todos)
-                (t (error "ellm: todos must be an array")))))
+                (t (error "ellm: Todos must be an array")))))
     (cl-loop for todo in items
              for index from 1
              collect (ellm--normalize-todo todo index))))
@@ -8416,14 +8416,14 @@ Subagents whose parent cannot be found remain top-level records."
   "Return COLUMN's formatted value for session RECORD."
   (let ((function (alist-get column ellm-list-column-format-functions)))
     (unless function
-      (user-error "ellm: unknown session-list column: %S" column))
+      (user-error "ellm: Unknown session-list column: %S" column))
     (funcall function record)))
 
 (defun ellm-list--format-column (value column)
   "Format VALUE according to COLUMN's display properties."
   (let ((width (plist-get (alist-get column ellm-list-column-properties) :width)))
     (unless width
-      (user-error "ellm: unknown session-list column: %S" column))
+      (user-error "ellm: Unknown session-list column: %S" column))
     (if (zerop width)
         value
       (format (format "%%-%ds" width)
@@ -8506,7 +8506,7 @@ Subagents whose parent cannot be found remain top-level records."
 When NOERROR is non-nil, return nil on a group heading or unrelated line."
   (or (get-text-property (point) 'ellm-list-buffer)
       (unless noerror
-        (user-error "ellm: no conversation at point"))))
+        (user-error "ellm: No conversation at point"))))
 
 (defun ellm-list--goto-buffer (buffer)
   "Move point to BUFFER's row and return non-nil when it is present."
@@ -8695,7 +8695,7 @@ Return non-nil when BUFFER has a row in the current list."
          (buffer (ellm-list--buffer-at-point))
          (children (get-text-property start 'ellm-list-subagent-children)))
     (unless children
-      (user-error "ellm: no subagents below this conversation"))
+      (user-error "ellm: No subagents below this conversation"))
     (if (member buffer ellm-list--folded-subagents)
         (setq ellm-list--folded-subagents
               (delete buffer ellm-list--folded-subagents))
@@ -8718,7 +8718,7 @@ Return non-nil when BUFFER has a row in the current list."
   (interactive nil ellm-list-mode)
   (let ((group (ellm-list--group-at-point)))
     (unless group
-      (user-error "ellm: no project or directory group at point"))
+      (user-error "ellm: No project or directory group at point"))
     (if (member group ellm-list--folded-groups)
         (setq ellm-list--folded-groups (delete group ellm-list--folded-groups))
       (push group ellm-list--folded-groups))
@@ -8769,7 +8769,7 @@ Return non-nil when BUFFER has a row in the current list."
                  ((string-prefix-p "directory:" group)
                   (substring group (length "directory:"))))))))
     (unless directory
-      (user-error "ellm: no project or directory at point"))
+      (user-error "ellm: No project or directory at point"))
     (let* ((default-directory directory)
            (new-buffer (save-window-excursion (ellm-new-buffer))))
       (ellm-list-refresh)

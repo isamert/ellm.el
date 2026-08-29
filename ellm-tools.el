@@ -336,7 +336,7 @@ children of children.  Without it, offer only direct children."
   "Return TIMEOUT or DEFAULT as a permitted tool duration."
   (let ((value (or timeout default ellm-tools-default-timeout)))
     (unless (and (numberp value) (>= value 0))
-      (ellm-tools--error "timeout must be a non-negative number"))
+      (ellm-tools--error "Timeout must be a non-negative number"))
     (when (> value ellm-tools-maximum-timeout)
       (ellm-tools--error "I can't run a tool for more than %d seconds"
                          ellm-tools-maximum-timeout))
@@ -576,7 +576,7 @@ DETAIL describes the displayed preview when it is useful to the model."
          (options (cond ((vectorp raw-options) (append raw-options nil))
                         ((listp raw-options) raw-options)
                         ((null raw-options) nil)
-                        (t (ellm-tools--error "ask options must be an array"))))
+                        (t (ellm-tools--error "Ask options must be an array"))))
          (multiple (not (ellm--false-value-p
                          (ellm--plistish-get question :multiple))))
          (custom-value (ellm--plistish-get question :custom))
@@ -584,11 +584,11 @@ DETAIL describes the displayed preview when it is useful to the model."
                      t
                    (not (ellm--false-value-p custom-value)))))
     (unless (and (stringp text) (not (string-empty-p text)))
-      (ellm-tools--error "ask question must be a non-empty string"))
+      (ellm-tools--error "Ask question must be a non-empty string"))
     (unless (cl-every #'stringp options)
-      (ellm-tools--error "ask options must contain only strings"))
+      (ellm-tools--error "Ask options must contain only strings"))
     (when (and multiple (null options))
-      (ellm-tools--error "ask multiple selection requires options"))
+      (ellm-tools--error "Ask multiple selection requires options"))
     (list :question text :options options :multiple multiple :custom custom)))
 
 (defun ellm-tools--format-ask-result (questions answers)
@@ -626,16 +626,16 @@ Each question has a required non-empty `question` string.  It may have an
 for free-form text.  Do not add an \"Other\" option: custom input is handled
 by the user interface."
   (unless (derived-mode-p 'ellm-mode)
-    (ellm-tools--error "ask must run in an ellm conversation buffer"))
+    (ellm-tools--error "Ask must run in an ellm conversation buffer"))
   (unless ellm--active-request
-    (ellm-tools--error "ask requires an active ellm request"))
+    (ellm-tools--error "Ask requires an active ellm request"))
   (let* ((raw-questions (if (vectorp questions) (append questions nil) questions))
          (normalized (mapcar #'ellm-tools--ask-question raw-questions))
          (answers (make-vector (length normalized) nil))
          (remaining (length normalized))
          cancelled)
     (unless normalized
-      (ellm-tools--error "ask requires at least one question"))
+      (ellm-tools--error "Ask requires at least one question"))
     (let ((ellm--inhibit-user-prompt-activation t))
       (cl-loop for question in normalized
                for index from 0
@@ -816,12 +816,12 @@ standard input in the conversation working directory."
                                   (and start-line "start-line")
                                   (and end-line "end-line"))))
        (cons limit (append '("ls-files") path-arguments)))
-      (_ (ellm-tools--error "unsupported git operation: %s" operation)))))
+      (_ (ellm-tools--error "Unsupported git operation: %s" operation)))))
 
 (defun ellm-tools--format-git-result (operation limit exit-code stdout stderr)
   "Format a bounded result from Git OPERATION."
   (if (not (zerop exit-code))
-      (ellm-tools--format-command-error "git" exit-code stdout stderr)
+      (ellm-tools--format-command-error "Git" exit-code stdout stderr)
     (let* ((lines (split-string (string-trim-right stdout) "\n" t))
            (total (length lines))
            (shown (seq-take lines limit)))
@@ -848,7 +848,7 @@ standard input in the conversation working directory."
   "Inspect Git state and history using a fixed read-only operation.
 The tool rejects unsupported operations and arbitrary Git arguments."
   (unless (member operation '("status" "diff" "log" "show" "blame" "ls-files"))
-    (ellm-tools--error "unsupported git operation: %s" operation))
+    (ellm-tools--error "Unsupported git operation: %s" operation))
   (pcase-let* ((`(,limit . ,arguments)
                 (ellm-tools--git-command operation revision base paths start-line end-line
                                          max-results))
@@ -898,7 +898,7 @@ files searched."
   (when glob
     (ellm-tools--validate-pattern glob "glob")
     (unless ellm-tools-grep-glob-options
-      (ellm-tools--error "the configured grep program does not support path globs")))
+      (ellm-tools--error "The configured grep program does not support path globs")))
   (let* ((default-directory (ellm-tools--default-directory))
          (search-path (ellm-tools--search-path path))
          (limit (ellm-tools--normalized-limit
@@ -935,7 +935,7 @@ For a non-text file, return metadata without reading its contents."
             (not (and (numberp start-line) (numberp end-line)))
             (< start-line 1)
             (< end-line start-line))
-    (ellm-tools--error "invalid input"))
+    (ellm-tools--error "Invalid input"))
   (let ((default-directory (ellm-tools--default-directory)))
     (ellm-tools--start-read-file-lines
      (expand-file-name file-path) start-line end-line callback)))
@@ -953,7 +953,7 @@ is non-nil, in which case all occurrences are replaced."
   (when (or (not (stringp buffer-name))
             (string-empty-p buffer-name)
             (not (get-buffer buffer-name)))
-    (ellm-tools--error "invalid buffer name"))
+    (ellm-tools--error "Invalid buffer name"))
   (ellm-tools--edit-tool (get-buffer buffer-name)
                          old-string new-string callback replace-all))
 
@@ -1025,7 +1025,7 @@ Act directly on buffers if you know the name already, without listing."
 (defun ellm-tools--search-buffer (buffer pattern regexp case-sensitive)
   "Return bounded matches for PATTERN in BUFFER."
   (unless (buffer-live-p buffer)
-    (ellm-tools--error "invalid buffer"))
+    (ellm-tools--error "Invalid buffer"))
   (when (s-blank? pattern)
     (ellm-tools--error "search pattern is empty"))
   (with-current-buffer buffer
@@ -1059,7 +1059,7 @@ Act directly on buffers if you know the name already, without listing."
    (case-sensitive :boolean "If true, search is case-sensitive. By default does a case-insensitive search." &optional))
   "Return matching lines with line numbers."
   (when (or (not (stringp buffer-name)) (string-empty-p buffer-name))
-    (ellm-tools--error "invalid buffer name"))
+    (ellm-tools--error "Invalid buffer name"))
   (ellm-tools--search-buffer (get-buffer buffer-name) pattern regexp case-sensitive))
 
 (ellm-deftool tool-outputs/search-output ()
@@ -1084,7 +1084,7 @@ Each issue is returned as line-range:type:message."
   (when (or (not (stringp buffer))
             (string-empty-p buffer)
             (not (get-buffer buffer)))
-    (ellm-tools--error "invalid buffer name"))
+    (ellm-tools--error "Invalid buffer name"))
   (require 'flymake)
   (with-current-buffer (get-buffer buffer)
     (let ((issues (flymake-diagnostics)))
@@ -1815,7 +1815,7 @@ whose documentation contains all QUERY words are included as well."
 FORMATTER is called with EXIT-CODE, STDOUT and STDERR, and its return value
 is passed to CALLBACK.  Return a cancellation function."
   (unless (and (stringp program) (not (s-blank? program)))
-    (ellm-tools--error "invalid command program"))
+    (ellm-tools--error "Invalid command program"))
   (unless (executable-find program)
     (ellm-tools--error "program not found: %s" program))
   (dolist (arg args)
@@ -2864,7 +2864,7 @@ Return a plist containing `:title', `:content', and `:readable'."
 The return value is a cons of body and whether it was truncated."
   (goto-char (point-min))
   (unless (re-search-forward "\r?\n\r?\n" nil t)
-    (error "malformed HTTP response"))
+    (error "Malformed HTTP response"))
   (let* ((start (point))
          (available (- (position-bytes (point-max))
                        (position-bytes start)))
@@ -2893,13 +2893,13 @@ The return value is a cons of body and whether it was truncated."
             (with-current-buffer buffer
               (goto-char (point-min))
               (unless (looking-at "HTTP/[0-9.]+[ \t]+\\([0-9]+\\)")
-                (error "malformed HTTP status line"))
+                (error "Malformed HTTP status line"))
               (let ((status (string-to-number (match-string 1))))
                 (unless (<= 200 status 299)
                   (error "HTTP request failed with status %d" status))
                 (save-excursion
                   (unless (re-search-forward "\r?\n\r?\n" nil t)
-                    (error "malformed HTTP response"))
+                    (error "Malformed HTTP response"))
                   (let* ((header-end (point))
                          (content-type-header
                           (ellm-tools--webfetch-header
@@ -2933,7 +2933,7 @@ The return value is a cons of body and whether it was truncated."
                                 body (or content-type-header
                                          content-type))))))
                      (t
-                      (error "unsupported content type: %s" content-type)))
+                      (error "Unsupported content type: %s" content-type)))
                     (let* ((content (or (plist-get rendered :content) ""))
                            (output-truncated (> (length content)
                                                 character-limit)))
@@ -2962,7 +2962,7 @@ The return value is a cons of body and whether it was truncated."
 (defun ellm-tools--decode-webfetch-result (encoded)
   "Decode an ENCODED child webfetch result."
   (unless (stringp encoded)
-    (error "child Emacs returned an invalid result"))
+    (error "Child Emacs returned an invalid result"))
   (car (read-from-string
         (decode-coding-string (base64-decode-string encoded)
                               'utf-8-emacs-unix))))
@@ -3073,7 +3073,7 @@ The return value is a cons of body and whether it was truncated."
         (with-current-buffer buffer
           (goto-char (point-min))
           (unless (re-search-forward "\r?\n\r?\n" nil t)
-            (error "malformed HTTP response"))
+            (error "Malformed HTTP response"))
           (ellm-tools--format-websearch-results
            query
            (ellm-tools--parse-duckduckgo-html
@@ -3511,7 +3511,7 @@ receives the edit result after configured post-edit checkers have finished.
 If REPLACE-ALL is non-nil, replace all occurrences; otherwise replace
 exactly one occurrence."
   (unless buffer-or-file
-    (ellm-tools--error "invalid target"))
+    (ellm-tools--error "Invalid target"))
   (unless (stringp old-string)
     (ellm-tools--error "`old_string' must be a string"))
   (unless (stringp new-string)
