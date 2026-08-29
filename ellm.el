@@ -3325,7 +3325,7 @@ keeps its resolved prompt; clearing the cache only affects future requests."
   (interactive nil ellm-mode)
   (unless (derived-mode-p 'ellm-mode)
     (user-error "ellm: not in an ellm buffer"))
-  (let* ((frontmatter (ellm--parse-frontmatter))
+  (let* ((frontmatter (ellm--effective-frontmatter))
          (turns (ellm--parse-turns))
          (leading (and turns
                        (equal (ellm-turn-role (car turns)) "system")))
