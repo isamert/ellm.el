@@ -20,13 +20,52 @@ cleanly.
 
 <img width="1155" height="749" alt="image" src="https://github.com/user-attachments/assets/9ec8152f-e90a-4e54-ac36-376c0464d27e" />
 
-## Basics
+---
+
+<!-- markdown-toc start - Don't edit this section. Run M-x markdown-toc-refresh-toc -->
+**Table of Contents**
+
+- [ellm.el](#ellmel)
+- [Basics](#basics)
+- [Installation](#installation)
+- [Usage](#usage)
+  - [Profiles and system prompts](#profiles-and-system-prompts)
+    - [Default system prompt](#default-system-prompt)
+    - [System prompt templating and code execution](#system-prompt-templating-and-code-execution)
+    - [System prompt cache](#system-prompt-cache)
+  - [Tools](#tools)
+    - [Permissions](#permissions)
+    - [Defining/replacing tools](#definingreplacing-tools)
+    - [Tool customization and extras](#tool-customization-and-extras)
+  - [Utilities](#utilities)
+    - [`ellm-comment`](#ellm-comment)
+    - [`ellm-compose`](#ellm-compose)
+    - [`ellm-set-config`](#ellm-set-config)
+  - [Managing multiple agents & subagents](#managing-multiple-agents--subagents)
+  - [In buffer controls](#in-buffer-controls)
+  - [Persistence](#persistence)
+  - [MCPs](#mcps)
+- [Configuration](#configuration)
+  - [`ellm-new-buffer-default-configuration-function`](#ellm-new-buffer-default-configuration-function)
+  - [Visuals and the header line](#visuals-and-the-header-line)
+  - [Notifications](#notifications)
+  - [Lifecycle hooks](#lifecycle-hooks)
+- [Configuring providers](#configuring-providers)
+  - [API providers using `llm.el`](#api-providers-using-llmel)
+  - [Codex](#codex)
+  - [ACP](#acp)
+- [Rationale](#rationale)
+- [Prior art](#prior-art)
+
+<!-- markdown-toc end -->
+
+# Basics
 
 `ellm-mode` is a major mode for plain-text LLM conversations. A buffer
 is a Markdown-like file with YAML frontmatter and turn delimiters.  A
 simple conversation looks like this, without any formatting:
 
-~~~markdown
+~~~ markdown
 ---
 provider: personal-deepseek
 model: deepseek-v4-pro
@@ -466,7 +505,7 @@ of your next input. This can be called from any buffer:
   If you select a code to comment from another buffer for example, and
   commented on it, this is inserted to your prompt:
 
-  ~~~markdown
+  ~~~ markdown
   ``` emacs-lisp ellm.el:1347:1350
   (replace-regexp-in-string
      (ellm-tools--escaped-tool-body-prefix-regexp)
