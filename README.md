@@ -337,7 +337,7 @@ tools+: ["@agents", web_search] # Added all @agents category of tools and web_se
 ---
 ```
 
-**Permissions**
+### Permissions
 
 When enabled, tools can be run directly without any user
 approval. They also do not have any kind of sandboxing. However you
@@ -352,7 +352,7 @@ tool-permissions:
 ---
 ```
 
-**Defining/replacing tools**
+### Defining/replacing tools
 
 There is a public API to define tools, `ellm-deftools`. Here is an
 example tool definition from my dotfiles. This one, when evalled,
@@ -394,6 +394,29 @@ into `gptel` tools if you want. For the opposite direction, converting
 `gptel` tools into ellm tools, see the variable `ellm-tools-list`, but
 I still recommend using `ellm-deftool` macro which comes with it's own
 bells and whistles.
+
+### Tool customization and extras
+
+Some of the tools comes with their configurations and extensions. For
+example you can edit `ellm-tools-glob-options` to change the behavior
+of the glob tool etc. Do `M-x customize-group ellm-tools` to learn
+more about these.
+
+There are also extra functionalities some tools offer. For example, if
+`file/edit` tool realizes it's editing a lisp file, then it'll do a
+parenthesis check after the edit automatically and report back to the
+ellm if it finds and unmatched parenthesis:
+
+```
+Successfully edited file ellm-test.el
+Post-edit checks reported:
+- Emacs Lisp has an unmatched delimiter near line 8364, column 0: Unmatched bracket or quote
+```
+
+Extras like these saves a few roundtrips and quite useful. They
+generally do not report anything extra if everything goes well. You
+can edit the `ellm-tools-file-edit-checkers` defcustom to change which
+checkers run with `file/edit` or define yours too.
 
 ## Utilities
 
@@ -542,6 +565,8 @@ outputs, and reasoning state are saved alongside them.
 (`.ellm`) in each project.  `M-x ellm-open-session` opens a saved main
 conversation.
 
+<TODO: IMAGE HERE>
+
 You can also use the `ellm-save` command to save the current
 conversation and its live subagents/tool-outputs/encrypted reasonings
 etc. even when automatic persistence is disabled; use a prefix
@@ -652,6 +677,53 @@ fallback when a buffer does not name one.  `ellm-profiles` contains reusable
 frontmatter defaults such as tools, system prompts, and model choices.  See
 [Profiles and system prompts](#profiles-and-system-prompts) for profile
 examples.
+
+## `ellm-new-buffer-default-configuration-function`
+
+This is a function that you can define to decide what the
+configuration for a new ellm buffer would be. For example, I have
+something along the lines of:
+
+```elisp
+(setq
+   ellm-new-buffer-default-configuration-function
+   #'(lambda ()
+       (let ((work-project? (f-ancestor-of? "~/Workspace/projects/work" default-directory))
+             (elisp-project? (f-ancestor-of? "~/.emacs.d/elpaca" default-directory))
+             (provider (cond
+                         (work-project?
+                          (intern (completing-read "Which one? " '("internal-llm-gateway" "cursor"))))
+                         (t "codex"))))
+         (list
+          :provider provider
+          :model (ellm-provider-default-model provider)
+          :profile
+          (cond
+           ((eq 'cursor provider) nil)
+           ((or work-project? elisp-project?) "agent")
+           (t "explore"))
+          :tools+
+          (cond
+           (elisp-project? '("@emacs")))))))
+```
+
+This what it roughly does:
+- Checks if the current project is a work project or an Elisp project.
+- Sets the default profile to "explore" if we are not in a project at all.
+- For work and Elisp projects, uses the "agent" profile.
+- For Elisp projects, enables the "@emacs" category of tools.
+
+The harness is one of the most important parts of these kind of
+workflows. Hence, having a project-appropriate harness selected
+automatically for you is quite useful. I also realized this was taking
+more than necessary time to configure and found this customization to
+be utterly useful.
+
+You can add/remove tools based on the path, the language of the
+project, you can check how much credit you have in your subscription
+and depending on that, you can select a different provider etc. Or you
+can do a small synchronous LLM call to determine all of these
+automatically. The sky is the limit here.
 
 ## Visuals and the header line
 
