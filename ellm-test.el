@@ -1475,6 +1475,31 @@
                      'font-lock-keyword-face)))
       (should-not ellm--fence-positions))))
 
+(ert-deftest ellm-test-markdown-tables-are-fontified-in-prose-only ()
+  "Conventional pipe tables should be fontified only in Markdown prose."
+  (let ((ellm-fold-tool-calls nil))
+    (with-temp-buffer
+      (insert ">-| assistant\n"
+              "| Name | Value |\n"
+              "| --- | --- |\n"
+              "| prose | table |\n"
+              "```text\n"
+              "| code | table |\n"
+              "```\n"
+              ">>-| tool-result | Shell\n"
+              "| raw | table |\n"
+              ">-| user\n"
+              "| next | table |\n")
+      (ellm-mode)
+      (font-lock-ensure)
+      (dolist (text '("| Name | Value |" "| --- | --- |"
+                      "| prose | table |" "| next | table |"))
+        (should (ellm-test--face-includes-p
+                 (ellm-test--face-at-text text) 'ellm-table)))
+      (dolist (text '("| code | table |" "| raw | table |"))
+        (should-not (ellm-test--face-includes-p
+                     (ellm-test--face-at-text text) 'ellm-table))))))
+
 (ert-deftest ellm-test-streamed-raw-bodies-disable-markup-fontification ()
   "Text streamed at the start of tool/reasoning bodies should remain raw."
   (let ((ellm-fold-tool-calls nil)

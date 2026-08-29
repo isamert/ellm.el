@@ -1135,6 +1135,24 @@ and `set-face-attribute' calls safe in non-graphical contexts."
   "Face for list markers (-, *, numbered)."
   :group 'ellm)
 
+(defface ellm-table
+  '((((class color) (min-colors 88) (background light))
+     (:inherit fixed-pitch :foreground "Blue1"))
+    (((class color) (min-colors 88) (background dark))
+     (:inherit fixed-pitch :foreground "LightSkyBlue"))
+    (((class color) (min-colors 16) (background light))
+     (:inherit fixed-pitch :foreground "Blue"))
+    (((class color) (min-colors 16) (background dark))
+     (:inherit fixed-pitch :foreground "LightSkyBlue"))
+    (((class color) (min-colors 8) (background light))
+     (:inherit fixed-pitch :foreground "blue"))
+    (((class color) (min-colors 8) (background dark))
+     (:inherit fixed-pitch))
+    (t (:inherit fixed-pitch)))
+  "Face for Markdown table rows.
+The colors match `org-table' while preserving fixed-pitch alignment."
+  :group 'ellm)
+
 (defface ellm-block
   `((t :inherit fixed-pitch :background ,(ellm--alt-bg) :extend t))
   "Face used for raw text inside tool turns."
@@ -1575,6 +1593,8 @@ Matches outside Markdown prose regions are ignored."
     (,(ellm--make-markdown-matcher "^###### .*$") (0 'ellm-heading-6 t))
     ;; Blockquotes
     (,(ellm--make-markdown-matcher "^> .*$") (0 'ellm-blockquote t))
+    ;; Conventional pipe-table rows
+    (,(ellm--make-markdown-matcher "^[ \t]*|.*|[ \t]*$") (0 'ellm-table t))
     ;; List markers
     (,(ellm--make-markdown-matcher "^\\s-*\\([-*]\\|[0-9]+\\.\\) ") (1 'ellm-list-marker t))
     ;; Turn delimiters are structural and deliberately run last.  This is a
