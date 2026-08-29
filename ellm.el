@@ -1136,7 +1136,7 @@ and `set-face-attribute' calls safe in non-graphical contexts."
   "Update calculated face backgrounds after a theme change."
   (let ((alt-bg (ellm--alt-bg)))
     (dolist (face '(ellm-block ellm-inline-code ellm-frontmatter
-                    ellm-code-block-delimiter ellm-list-group-heading))
+                               ellm-code-block-delimiter ellm-list-group-heading))
       (set-face-attribute face nil :background alt-bg)))
   (ellm--apply-heading-rescale ellm-heading-rescale))
 
@@ -2773,7 +2773,7 @@ RESOLVE accepts one selector entry and returns matching items."
   "Return profile NAME from PROFILES, or signal a useful error."
   (let ((cell (cl-find name profiles :key (lambda (entry)
                                             (ellm--profile-name (car entry)))
-                     :test #'equal)))
+                       :test #'equal)))
     (unless cell
       (user-error "ellm: profile not found: %s" name))
     (let ((map (cdr cell)))
@@ -2791,14 +2791,14 @@ RESOLVE accepts one selector entry and returns matching items."
                           (cdr entry))))
                  (ellm--frontmatter-map ellm-profiles "ellm-profiles"))))
     (dolist (entry (ellm--frontmatter-map (alist-get 'profiles frontmatter)
-                                           "frontmatter `profiles'")
-             profiles)
+                                          "frontmatter `profiles'")
+                   profiles)
       (let* ((name (ellm--profile-name (car entry)))
              (old (cl-find name profiles :key (lambda (candidate)
-                                                 (ellm--profile-name (car candidate)))
+                                                (ellm--profile-name (car candidate)))
                            :test #'equal))
              (value (ellm--frontmatter-map (cdr entry)
-                                            (format "profile `%s'" name))))
+                                           (format "profile `%s'" name))))
         (if old
             (setcdr old (ellm--merge-frontmatter-maps (cdr old) value))
           (push (cons name (ellm--normalize-frontmatter-selector-overlays value))
@@ -4487,7 +4487,7 @@ precedence over category selectors, which take precedence over `default'."
                                                         (format "%s" (car rule)))
                                   :test #'equal)
                          (cl-find "default" rules :key (lambda (rule)
-                                                          (format "%s" (car rule)))
+                                                         (format "%s" (car rule)))
                                   :test #'equal))))
          (value (if entry (format "%s" (cdr entry)) "allow")))
     (unless (or (null rules) (and (listp rules) (cl-every #'consp rules)))
@@ -4502,7 +4502,7 @@ precedence over category selectors, which take precedence over `default'."
 (defun ellm--format-tool-permission-arguments (args)
   "Return a bounded single-line representation of local tool ARGS."
   (let* ((text (replace-regexp-in-string "[[:space:]]+" " "
-                                        (prin1-to-string args)))
+                                         (prin1-to-string args)))
          (limit ellm-tool-permission-argument-limit))
     (if (> (length text) limit)
         (format "%s… (%d characters omitted)"
@@ -4515,7 +4515,7 @@ RESPOND receives `allow' or `deny'.  An `ask' policy presents run-once,
 allow-for-session, and deny choices through the core permission UI."
   (let ((policy (if request
                     (ellm--tool-permission-policy (ellm-request-frontmatter request)
-                                                   tool)
+                                                  tool)
                   'allow))
         (name (ellm-tool-name tool)))
     (cond
@@ -4713,42 +4713,42 @@ When SUPPRESS-NEXT is non-nil, do not activate the next queued prompt."
         (ellm--resolve-user-prompt prompt outcome)
       (setf (ellm-user-prompt-activated prompt) t)
       (condition-case err
-        (let* ((title (or (ellm-user-prompt-title prompt) "Input required"))
-               (message (ellm-user-prompt-message prompt))
-               (options (ellm-user-prompt-options prompt))
-               (prompt-text (format "%s%s: " title
-                                    (if message (format " — %s" message) "")))
-               outcome)
-          (setq outcome
-                (cond
-                 (noninteractive '(:status cancelled))
-                 ((ellm-user-prompt-secret prompt)
-                  (list :status 'submitted :value (read-passwd prompt-text)))
-                 ((ellm-user-prompt-multiple prompt)
-                  (let* ((candidates (ellm--user-prompt-option-candidates options))
-                         (values (completing-read-multiple
-                                  prompt-text (mapcar #'car candidates) nil
-                                  (not (ellm-user-prompt-custom prompt)))))
-                    (list :status 'selected
-                          :value (mapcar (lambda (value)
-                                           (or (cdr (assoc value candidates)) value))
-                                         values))))
-                 (options
-                  (let* ((candidates (ellm--user-prompt-option-candidates options))
-                         (choice (completing-read prompt-text (mapcar #'car candidates)
-                                                  nil (not (ellm-user-prompt-custom prompt))))
-                         (value (cdr (assoc choice candidates))))
-                    (list :status (if value 'selected 'submitted)
-                          :value (or value choice))))
-                 (t
-                  (list :status 'submitted
-                        :value (read-string prompt-text nil nil
-                                            (ellm-user-prompt-default prompt))))))
-          (ellm--resolve-user-prompt prompt outcome))
-      (quit (ellm--resolve-user-prompt prompt '(:status cancelled)))
-      (error
-       (message "ellm: user prompt error: %s" (error-message-string err))
-       (ellm--resolve-user-prompt prompt '(:status cancelled)))))))
+          (let* ((title (or (ellm-user-prompt-title prompt) "Input required"))
+                 (message (ellm-user-prompt-message prompt))
+                 (options (ellm-user-prompt-options prompt))
+                 (prompt-text (format "%s%s: " title
+                                      (if message (format " — %s" message) "")))
+                 outcome)
+            (setq outcome
+                  (cond
+                   (noninteractive '(:status cancelled))
+                   ((ellm-user-prompt-secret prompt)
+                    (list :status 'submitted :value (read-passwd prompt-text)))
+                   ((ellm-user-prompt-multiple prompt)
+                    (let* ((candidates (ellm--user-prompt-option-candidates options))
+                           (values (completing-read-multiple
+                                    prompt-text (mapcar #'car candidates) nil
+                                    (not (ellm-user-prompt-custom prompt)))))
+                      (list :status 'selected
+                            :value (mapcar (lambda (value)
+                                             (or (cdr (assoc value candidates)) value))
+                                           values))))
+                   (options
+                    (let* ((candidates (ellm--user-prompt-option-candidates options))
+                           (choice (completing-read prompt-text (mapcar #'car candidates)
+                                                    nil (not (ellm-user-prompt-custom prompt))))
+                           (value (cdr (assoc choice candidates))))
+                      (list :status (if value 'selected 'submitted)
+                            :value (or value choice))))
+                   (t
+                    (list :status 'submitted
+                          :value (read-string prompt-text nil nil
+                                              (ellm-user-prompt-default prompt))))))
+            (ellm--resolve-user-prompt prompt outcome))
+        (quit (ellm--resolve-user-prompt prompt '(:status cancelled)))
+        (error
+         (message "ellm: user prompt error: %s" (error-message-string err))
+         (ellm--resolve-user-prompt prompt '(:status cancelled)))))))
 
 (defun ellm--maybe-activate-user-prompt ()
   "Activate the queue head after the conversation buffer is selected."
@@ -4761,13 +4761,13 @@ When SUPPRESS-NEXT is non-nil, do not activate the next queued prompt."
   "Cancel and drain the current buffer's queued user prompts."
   (while ellm--active-user-prompt
     (ellm--resolve-user-prompt ellm--active-user-prompt
-                                '(:status cancelled) t))
+                               '(:status cancelled) t))
   ;; This also handles queued prompts if cancellation occurs reentrantly while
   ;; no queue head is active.
   (while ellm--user-prompt-queue
     (setq ellm--active-user-prompt (car ellm--user-prompt-queue))
     (ellm--resolve-user-prompt ellm--active-user-prompt
-                                '(:status cancelled) t)))
+                               '(:status cancelled) t)))
 
 (defun ellm-answer-prompt ()
   "Answer the active agent prompt in the current ellm buffer."
@@ -6001,11 +6001,11 @@ Returns nil when POS is outside the value region or not on a token."
                            key-beg key-end children "MCP setting")))
               (append result
                       (list :exit-function
-                            (lambda (string status)
-                              (when (and (memq status '(finished sole exact))
-                                         (assoc string children)
-                                         (not (looking-at-p ":")))
-                                (insert ": "))))))))))))
+                        (lambda (string status)
+                          (when (and (memq status '(finished sole exact))
+                                     (assoc string children)
+                                     (not (looking-at-p ":")))
+                            (insert ": "))))))))))))
 
 (defun ellm--frontmatter-capf--directory-result-at-point (pos)
   "Return file-name completion at POS for a directory-valued YAML field."
@@ -6045,69 +6045,69 @@ Completes:
         (or (ellm--frontmatter-capf--mcp-map-result-at-point orig)
             (ellm--frontmatter-capf--directory-result-at-point orig)
             (cond
-         ((looking-at "^\\([ \t]*\\)-[ \t]*\\(.*\\)$") ; - <something>
-          (let* ((indent (length (match-string-no-properties 1)))
-                 (item-beg (match-beginning 2))
-                 (item-end (match-end 2))
-                 (spec (ellm--frontmatter-capf--parent-spec indent))
-                 (items-spec (and spec (plist-get spec :items))))
-            (when (and items-spec (>= orig item-beg) (<= orig item-end))
-              ;; Find the precise token bounds at point so completion replaces
-              ;; only the word being typed, not the whole line suffix.
-              (let* ((tok (ellm--frontmatter-capf--token-bounds-at orig))
-                     (tbeg (or (car tok) orig))
-                     (tend (or (cdr tok) orig)))
-                (pcase-let ((`(,cands . ,source)
-                             (ellm--capf-resolve-values items-spec)))
-                  (ellm--frontmatter-capf--make-result
-                   tbeg tend cands "item" source))))))
-         ;; KEY: VALUE (inline) — value-side completion.
-         ;; Handles both bare values and inline arrays like ["a", "b"].
-         ((looking-at "^\\([ \t]*\\)\\(\"[^\"]+\"\\|[a-zA-Z0-9_+-]+\\):[ \t]*\\(.*?\\)[ \t]*$")
-          (let* ((indent (length (match-string-no-properties 1)))
-                 (key (match-string-no-properties 2))
-                 (vbeg (match-beginning 3))
-                 (vend (match-end 3))
-                 (spec (ellm--frontmatter-capf--key-spec key indent))
-                 (values-spec (and spec (plist-get spec :values)))
-                 (items-spec (and spec (plist-get spec :items)))
-                 (arrayp (ellm--frontmatter-capf--inline-array-p vbeg vend))
-                 (candidates-spec (if arrayp items-spec values-spec)))
-            (when candidates-spec
-              (let* ((tok (ellm--frontmatter-capf--inline-token-at orig vbeg vend))
-                     (tbeg (or (car tok) orig))
-                     (tend (or (cdr tok) orig)))
-                (when (and (>= orig vbeg) (<= orig vend))
-                  (pcase-let ((`(,cands . ,source)
-                               (ellm--capf-resolve-values candidates-spec)))
-                    (ellm--frontmatter-capf--make-result
-                     tbeg tend cands key source)))))))
-         ;; No `:' yet — key-side completion.
-         ((looking-at "^\\([ \t]*\\)\\(\"?[a-zA-Z0-9_@+-]*\"?\\)[ \t]*$")
-          (let* ((indent (length (match-string-no-properties 1)))
-                 (kbeg (match-beginning 2))
-                 (kend (match-end 2))
-                 (entries (ellm--frontmatter-capf--key-entries
-                           (ellm--frontmatter-capf--parent-spec indent))))
-            (when (and (>= orig kbeg) (<= orig kend))
-              (list kbeg kend
-                    (mapcar #'car entries)
-                    :exclusive 'no
-                    :annotation-function
-                    (lambda (cand)
-                      (when-let* ((spec (ellm--frontmatter-capf--lookup-key cand entries))
-                                  (ann (plist-get spec :ann)))
-                        (concat " " ann)))
-                    :company-doc-buffer
-                    (lambda (cand)
-                      (when-let* ((spec (ellm--frontmatter-capf--lookup-key cand entries))
-                                  (desc (plist-get spec :desc)))
-                        (ellm--frontmatter-capf--doc-buffer desc)))
-                    :exit-function
-                    (lambda (_string status)
-                      (when (and (memq status '(finished sole exact))
-                                 (not (looking-at-p ":")))
-                        (insert ": ")))))))))))))
+             ((looking-at "^\\([ \t]*\\)-[ \t]*\\(.*\\)$") ; - <something>
+              (let* ((indent (length (match-string-no-properties 1)))
+                     (item-beg (match-beginning 2))
+                     (item-end (match-end 2))
+                     (spec (ellm--frontmatter-capf--parent-spec indent))
+                     (items-spec (and spec (plist-get spec :items))))
+                (when (and items-spec (>= orig item-beg) (<= orig item-end))
+                  ;; Find the precise token bounds at point so completion replaces
+                  ;; only the word being typed, not the whole line suffix.
+                  (let* ((tok (ellm--frontmatter-capf--token-bounds-at orig))
+                         (tbeg (or (car tok) orig))
+                         (tend (or (cdr tok) orig)))
+                    (pcase-let ((`(,cands . ,source)
+                                 (ellm--capf-resolve-values items-spec)))
+                      (ellm--frontmatter-capf--make-result
+                       tbeg tend cands "item" source))))))
+             ;; KEY: VALUE (inline) — value-side completion.
+             ;; Handles both bare values and inline arrays like ["a", "b"].
+             ((looking-at "^\\([ \t]*\\)\\(\"[^\"]+\"\\|[a-zA-Z0-9_+-]+\\):[ \t]*\\(.*?\\)[ \t]*$")
+              (let* ((indent (length (match-string-no-properties 1)))
+                     (key (match-string-no-properties 2))
+                     (vbeg (match-beginning 3))
+                     (vend (match-end 3))
+                     (spec (ellm--frontmatter-capf--key-spec key indent))
+                     (values-spec (and spec (plist-get spec :values)))
+                     (items-spec (and spec (plist-get spec :items)))
+                     (arrayp (ellm--frontmatter-capf--inline-array-p vbeg vend))
+                     (candidates-spec (if arrayp items-spec values-spec)))
+                (when candidates-spec
+                  (let* ((tok (ellm--frontmatter-capf--inline-token-at orig vbeg vend))
+                         (tbeg (or (car tok) orig))
+                         (tend (or (cdr tok) orig)))
+                    (when (and (>= orig vbeg) (<= orig vend))
+                      (pcase-let ((`(,cands . ,source)
+                                   (ellm--capf-resolve-values candidates-spec)))
+                        (ellm--frontmatter-capf--make-result
+                         tbeg tend cands key source)))))))
+             ;; No `:' yet — key-side completion.
+             ((looking-at "^\\([ \t]*\\)\\(\"?[a-zA-Z0-9_@+-]*\"?\\)[ \t]*$")
+              (let* ((indent (length (match-string-no-properties 1)))
+                     (kbeg (match-beginning 2))
+                     (kend (match-end 2))
+                     (entries (ellm--frontmatter-capf--key-entries
+                               (ellm--frontmatter-capf--parent-spec indent))))
+                (when (and (>= orig kbeg) (<= orig kend))
+                  (list kbeg kend
+                        (mapcar #'car entries)
+                        :exclusive 'no
+                        :annotation-function
+                        (lambda (cand)
+                          (when-let* ((spec (ellm--frontmatter-capf--lookup-key cand entries))
+                                      (ann (plist-get spec :ann)))
+                            (concat " " ann)))
+                        :company-doc-buffer
+                        (lambda (cand)
+                          (when-let* ((spec (ellm--frontmatter-capf--lookup-key cand entries))
+                                      (desc (plist-get spec :desc)))
+                            (ellm--frontmatter-capf--doc-buffer desc)))
+                        :exit-function
+                        (lambda (_string status)
+                          (when (and (memq status '(finished sole exact))
+                                     (not (looking-at-p ":")))
+                            (insert ": ")))))))))))))
 
 (defun ellm--turn-at-point ()
   "Return parsed turn containing point, or nil."
@@ -8275,9 +8275,9 @@ Subagents whose parent cannot be found remain top-level records."
         (plist-put parent-record :children
                    (cons record (plist-get parent-record :children)))))
     (cl-labels ((sort-children (record)
-                  (when-let* ((children (plist-get record :children)))
-                    (plist-put record :children (sort children #'ellm-list--record-less-p))
-                    (mapc #'sort-children children))))
+                               (when-let* ((children (plist-get record :children)))
+                                 (plist-put record :children (sort children #'ellm-list--record-less-p))
+                                 (mapc #'sort-children children))))
       (mapc #'sort-children records))
     (cl-remove-if (lambda (record) (plist-get record :parent)) records)))
 

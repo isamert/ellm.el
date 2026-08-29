@@ -603,7 +603,8 @@ DETAIL describes the displayed preview when it is useful to the model."
    "\n\n"))
 
 (ellm-deftool user/ask (:async t :timeout nil)
-  ((questions :array "Questions to ask."
+  ((questions
+    :array "Questions to ask."
     :items
     (:type object
      :properties
@@ -640,30 +641,30 @@ by the user interface."
                for index from 0
                do (let ((index index))
                     (ellm--request-user-prompt
-                   ellm--active-request
-                   (list :kind 'question
-                         :title "Agent question"
-                         :message (plist-get question :question)
-                         :options (mapcar (lambda (option)
-                                            (list :id option :label option))
-                                          (plist-get question :options))
-                         :multiple (plist-get question :multiple)
-                         :custom (plist-get question :custom))
-                   (lambda (outcome)
-                     (when (eq (plist-get outcome :status) 'cancelled)
-                       (setq cancelled t))
-                     (aset answers index
-                           (let ((value (plist-get outcome :value)))
-                             (if (listp value) value (list value))))
-                     (cl-decf remaining)
-                     (when (zerop remaining)
-                       (funcall callback
-                                (if cancelled
-                                    "The user cancelled the questions."
-                                  (ellm-tools--format-ask-result
-                                   normalized (append answers nil)))))))))
-    (ellm--activate-next-user-prompt))
-  nil))
+                     ellm--active-request
+                     (list :kind 'question
+                           :title "Agent question"
+                           :message (plist-get question :question)
+                           :options (mapcar (lambda (option)
+                                              (list :id option :label option))
+                                            (plist-get question :options))
+                           :multiple (plist-get question :multiple)
+                           :custom (plist-get question :custom))
+                     (lambda (outcome)
+                       (when (eq (plist-get outcome :status) 'cancelled)
+                         (setq cancelled t))
+                       (aset answers index
+                             (let ((value (plist-get outcome :value)))
+                               (if (listp value) value (list value))))
+                       (cl-decf remaining)
+                       (when (zerop remaining)
+                         (funcall callback
+                                  (if cancelled
+                                      "The user cancelled the questions."
+                                    (ellm-tools--format-ask-result
+                                     normalized (append answers nil)))))))))
+      (ellm--activate-next-user-prompt))
+    nil))
 
 ;;;;; Shell
 
@@ -709,23 +710,23 @@ standard input in the conversation working directory."
            (lambda (process _event)
              (with-current-buffer conversation
                (when (memq (process-status process) '(exit signal))
-               (let* ((tail (or (process-get process 'ellm-output) ""))
-                      (total (or (process-get process 'ellm-total) 0))
-                      (output
-                       (if (process-get process 'ellm-truncated)
-                           (let ((marker
-                                  (ellm-tools--truncation-marker
-                                   "bash"
-                                   (with-current-buffer full-buffer (buffer-string))
-                                   (format "%d characters omitted; showing beginning and end"
-                                           (- total head-limit tail-limit)))))
-                             (kill-buffer full-buffer)
-                             (concat (process-get process 'ellm-head) marker "\n" tail))
-                         (kill-buffer full-buffer)
-                         tail)))
-                 (funcall callback
-                          (format "Exit code: %d\n%s"
-                                  (process-exit-status process) output)))))))))
+                 (let* ((tail (or (process-get process 'ellm-output) ""))
+                        (total (or (process-get process 'ellm-total) 0))
+                        (output
+                         (if (process-get process 'ellm-truncated)
+                             (let ((marker
+                                    (ellm-tools--truncation-marker
+                                     "bash"
+                                     (with-current-buffer full-buffer (buffer-string))
+                                     (format "%d characters omitted; showing beginning and end"
+                                             (- total head-limit tail-limit)))))
+                               (kill-buffer full-buffer)
+                               (concat (process-get process 'ellm-head) marker "\n" tail))
+                           (kill-buffer full-buffer)
+                           tail)))
+                   (funcall callback
+                            (format "Exit code: %d\n%s"
+                                    (process-exit-status process) output)))))))))
     (lambda ()
       (when (process-live-p proc)
         (kill-process proc))
@@ -769,13 +770,13 @@ standard input in the conversation working directory."
       ("status"
        (ellm-tools--git-unused-arguments
         operation (delq nil (list (and revision "revision") (and base "base")
-                                   (and paths "paths") (and start-line "start-line")
-                                   (and end-line "end-line"))))
+                                  (and paths "paths") (and start-line "start-line")
+                                  (and end-line "end-line"))))
        (cons limit '("status" "--porcelain=v1" "--branch" "--untracked-files=normal")))
       ("diff"
        (ellm-tools--git-unused-arguments
         operation (delq nil (list (and start-line "start-line")
-                                   (and end-line "end-line"))))
+                                  (and end-line "end-line"))))
        (cons limit
              (append '("diff" "--no-ext-diff" "--no-textconv")
                      (cond ((and base revision) (list base revision))
@@ -786,14 +787,14 @@ standard input in the conversation working directory."
       ("log"
        (ellm-tools--git-unused-arguments
         operation (delq nil (list (and base "base") (and start-line "start-line")
-                                   (and end-line "end-line"))))
+                                  (and end-line "end-line"))))
        (cons limit
              (append (list "log" "--no-decorate" (format "--max-count=%d" limit))
                      (and revision (list revision)) path-arguments)))
       ("show"
        (ellm-tools--git-unused-arguments
         operation (delq nil (list (and base "base") (and start-line "start-line")
-                                   (and end-line "end-line"))))
+                                  (and end-line "end-line"))))
        (cons limit
              (append '("show" "--no-ext-diff" "--no-textconv" "--format=fuller")
                      (list (or revision "HEAD")) path-arguments)))
@@ -812,8 +813,8 @@ standard input in the conversation working directory."
       ("ls-files"
        (ellm-tools--git-unused-arguments
         operation (delq nil (list (and revision "revision") (and base "base")
-                                   (and start-line "start-line")
-                                   (and end-line "end-line"))))
+                                  (and start-line "start-line")
+                                  (and end-line "end-line"))))
        (cons limit (append '("ls-files") path-arguments)))
       (_ (ellm-tools--error "unsupported git operation: %s" operation)))))
 
@@ -850,7 +851,7 @@ The tool rejects unsupported operations and arbitrary Git arguments."
     (ellm-tools--error "unsupported git operation: %s" operation))
   (pcase-let* ((`(,limit . ,arguments)
                 (ellm-tools--git-command operation revision base paths start-line end-line
-                                          max-results))
+                                         max-results))
                (process-environment
                 (cons "GIT_TERMINAL_PROMPT=0"
                       (cons "GIT_OPTIONAL_LOCKS=0" process-environment))))
@@ -2043,7 +2044,7 @@ lines or non-text file metadata.  Return a cancellation function."
                     (plist-get todo :status)
                     (plist-get todo :priority)
                     (plist-get todo :content)))
-           todos
+          todos
           "\n")
        "No todos.")
      "\n</todo_list>")))
@@ -2569,10 +2570,10 @@ SUBAGENT may be a remembered id or a live buffer name."
                    (setq done t)
                    (cleanup)
                    (let ((content (ellm-tools--last-assistant-content buffer)))
-           (funcall callback
-                    (or content
-                        (format "Subagent %s has no assistant response available."
-                                (plist-get target :id))))))))
+                     (funcall callback
+                              (or content
+                                  (format "Subagent %s has no assistant response available."
+                                          (plist-get target :id))))))))
       (setq listener (lambda (_request _outcome) (finish)))
       (if (running-p)
           (with-current-buffer buffer
@@ -2989,7 +2990,7 @@ The return value is a cons of body and whether it was truncated."
        (concat
         (if output-truncated
             (concat (substring content 0 (min (length content)
-                                             ellm-tools-webfetch-character-limit))
+                                              ellm-tools-webfetch-character-limit))
                     (ellm-tools--truncation-marker
                      "webfetch" content
                      (format "showing first %d characters"
@@ -3464,32 +3465,32 @@ cancels the checker currently in progress."
         diagnostics active)
     (cl-labels
         ((run-next ()
-           (if-let ((checker (pop checkers)))
-               (let (called checker-callback)
-                 (setq checker-callback
-                       (lambda (diagnostic)
-                         (unless called
-                           (setq called t)
-                           (when diagnostic
-                             (unless (stringp diagnostic)
-                               (setq diagnostic
-                                     (format "Post-edit checker %S returned a non-string diagnostic: %S"
-                                             checker diagnostic)))
-                             (push diagnostic diagnostics))
-                           (run-next))))
-                 (let ((handle
-                        (condition-case err
-                            (funcall checker file-path buffer checker-callback)
-                          (error
-                           (funcall checker-callback
-                                    (format "Post-edit checker %S failed: %s"
-                                            checker (error-message-string err)))
-                           nil))))
-                   ;; A synchronous checker has already advanced the pipeline;
-                   ;; preserve the cancellation handle of a later checker.
-                   (unless called
-                     (setq active handle))))
-             (funcall callback (nreverse diagnostics)))))
+                   (if-let ((checker (pop checkers)))
+                       (let (called checker-callback)
+                         (setq checker-callback
+                               (lambda (diagnostic)
+                                 (unless called
+                                   (setq called t)
+                                   (when diagnostic
+                                     (unless (stringp diagnostic)
+                                       (setq diagnostic
+                                             (format "Post-edit checker %S returned a non-string diagnostic: %S"
+                                                     checker diagnostic)))
+                                     (push diagnostic diagnostics))
+                                   (run-next))))
+                         (let ((handle
+                                (condition-case err
+                                    (funcall checker file-path buffer checker-callback)
+                                  (error
+                                   (funcall checker-callback
+                                            (format "Post-edit checker %S failed: %s"
+                                                    checker (error-message-string err)))
+                                   nil))))
+                           ;; A synchronous checker has already advanced the pipeline;
+                           ;; preserve the cancellation handle of a later checker.
+                           (unless called
+                             (setq active handle))))
+                     (funcall callback (nreverse diagnostics)))))
       (run-next)
       (lambda ()
         (ellm-tools--cancel-async-handle active)))))
@@ -3503,7 +3504,7 @@ cancels the checker currently in progress."
     result))
 
 (defun ellm-tools--edit-tool (buffer-or-file old-string new-string callback
-                                              &optional replace-all)
+                                             &optional replace-all)
   "Replace occurrence(s) of OLD-STRING with NEW-STRING.
 BUFFER-OR-FILE is either a buffer object or a file path string.  CALLBACK
 receives the edit result after configured post-edit checkers have finished.
@@ -3523,20 +3524,20 @@ exactly one occurrence."
                         (expand-file-name buffer-or-file)
                       (buffer-local-value 'buffer-file-name buffer-or-file))))
     (cl-labels ((finish (result buffer &optional kill-buffer)
-                  (let ((cancel
-                         (ellm-tools--run-file-edit-checkers
-                          file-path buffer
-                          (lambda (diagnostics)
-                            (unwind-protect
-                                (funcall callback
-                                         (ellm-tools--format-file-edit-result
-                                          result diagnostics))
-                              (when (and kill-buffer (buffer-live-p buffer))
-                                (kill-buffer buffer)))))))
-                    (lambda ()
-                      (funcall cancel)
-                      (when (and kill-buffer (buffer-live-p buffer))
-                        (kill-buffer buffer))))))
+                        (let ((cancel
+                               (ellm-tools--run-file-edit-checkers
+                                file-path buffer
+                                (lambda (diagnostics)
+                                  (unwind-protect
+                                      (funcall callback
+                                               (ellm-tools--format-file-edit-result
+                                                result diagnostics))
+                                    (when (and kill-buffer (buffer-live-p buffer))
+                                      (kill-buffer buffer)))))))
+                          (lambda ()
+                            (funcall cancel)
+                            (when (and kill-buffer (buffer-live-p buffer))
+                              (kill-buffer buffer))))))
       (cond
        ((string-empty-p old-string)
         (unless is-file?
@@ -3572,7 +3573,7 @@ exactly one occurrence."
 
 (defun ellm-tools--prepare-visiting-buffer-for-file-write (file-path)
   "Prepare FILE-PATH's visiting buffer for a direct disk write."
-  (when-let ((buffer (find-buffer-visiting file-path)))
+  (when-let* ((buffer (find-buffer-visiting file-path)))
     (with-current-buffer buffer
       (if (buffer-modified-p)
           ;; Suppress the supersession check for this intentional disk write.
@@ -3582,7 +3583,7 @@ exactly one occurrence."
 
 (defun ellm-tools--refresh-clean-visiting-buffer (file-path)
   "Refresh FILE-PATH's clean visiting buffer and mark others stale."
-  (when-let ((buffer (find-buffer-visiting file-path)))
+  (when-let* ((buffer (find-buffer-visiting file-path)))
     (with-current-buffer buffer
       (if (buffer-modified-p)
           ;; Ensure a later save detects the disk edit even on filesystems
