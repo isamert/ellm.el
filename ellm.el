@@ -669,7 +669,8 @@ as soon as the agent asks."
   :type 'boolean
   :group 'ellm)
 
-(defcustom ellm-notification-events '(permission-requested request-finished)
+(defcustom ellm-notification-events
+  '(permission-requested user-input-requested request-finished)
   "Events for which ellm may send attention notifications."
   :type '(repeat (choice (const permission-requested)
                          (const request-finished)
