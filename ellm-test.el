@@ -5772,6 +5772,9 @@
                     (effective (ellm--effective-frontmatter)))
                 (should (equal (alist-get 'profile fm) "explore"))
                 (should-not (alist-get 'provider fm))
+                (should-not (alist-get 'tools fm))
+                (should-not (alist-get 'mcp fm))
+                (should-not (alist-get 'tool-permissions fm))
                 (should (equal (alist-get 'provider effective) "explore"))
                 (should (equal (alist-get 'model effective) "explore-model"))
                 (should (equal (alist-get 'system effective) "Local explore child"))
@@ -5780,8 +5783,26 @@
         (when (buffer-live-p child-buffer)
           (kill-buffer child-buffer))))))
 
+(ert-deftest ellm-test-subagent-sanitization-removes-session-state ()
+  "A child must not inherit provider-specific session state."
+  (let ((frontmatter
+         (ellm-tools--sanitize-subagent-frontmatter
+          '((ellm . ((session-id . "ellm-session") (role . "main")))
+            (codex . ((prompt-cache-key . "cache-key") (cache . t)))
+            (acp . ((session-id . "acp-session") (title . "Title")))
+            (provider . "codex")))))
+    ;; The ellm session id identifies this child as part of its persisted
+    ;; session tree; unlike provider session state, it must be inherited.
+    (should (equal (ellm--alist-get-nested frontmatter '(ellm session-id))
+                   "ellm-session"))
+    (should-not (ellm--alist-get-nested frontmatter '(ellm role)))
+    (should-not (ellm--alist-get-nested frontmatter '(codex prompt-cache-key)))
+    (should (eq (ellm--alist-get-nested frontmatter '(codex cache)) t))
+    (should-not (ellm--alist-get-nested frontmatter '(acp session-id)))
+    (should (equal (alist-get 'provider frontmatter) "codex"))))
+
 (ert-deftest ellm-test-subagent-capabilities-do-not-exceed-parent ()
-  "A selected child profile is clamped to its parent's capabilities."
+  "A selected child profile receives only restrictions beyond its parent."
   (let* ((provider (make-ellm-test-sync-provider))
          (ellm-provider provider)
          (ellm-subagent-max-depth nil)
@@ -5806,10 +5827,21 @@
             (setq child
                   (get-buffer (plist-get (car ellm-subagent-history) :buffer-name)))
             (with-current-buffer child
-              (let ((frontmatter (ellm--effective-frontmatter)))
-                (should (equal (mapcar #'ellm-tool-name
-                                       (ellm--resolve-tools frontmatter))
-                               '("read" "launch_subagent")))
+              (let ((raw (ellm--parse-frontmatter))
+                    (frontmatter (ellm--effective-frontmatter)))
+                ;; Keep the selected profile intact; persist only its deltas
+                ;; from the parent's capabilities.
+                (should (equal (alist-get 'profile raw) "child"))
+                (should-not (alist-get 'tools raw))
+                (should-not (alist-get 'mcp raw))
+                (should (equal (alist-get 'tools- raw) '("edit")))
+                (should (equal (alist-get 'mcp- raw) '("extra")))
+                (should (equal (alist-get 'tool-permissions raw)
+                               '((read . "ask"))))
+                (should (equal (sort (mapcar #'ellm-tool-name
+                                      (ellm--resolve-tools frontmatter))
+                                     #'string<)
+                               '("launch_subagent" "read")))
                 (should (eq (ellm--tool-permission-policy
                              frontmatter
                              (cl-find "read"

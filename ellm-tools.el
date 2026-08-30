@@ -2196,6 +2196,7 @@ FALLBACK-PROVIDER is used when FRONTMATTER has no `provider:' key."
                     (title)
                     (acp updated-at)
                     (ellm role)
+                    (codex prompt-cache-key)
                     (subagent)))
       (setq result (ellm--alist-delete-nested result path)))
     result))
@@ -2221,48 +2222,57 @@ from their live parent when possible."
       left
     right))
 
-(defun ellm-tools--clamp-subagent-frontmatter (parent child)
-  "Restrict CHILD's resolved capabilities to those available to PARENT."
+(defun ellm-tools--add-subagent-selector-exclusions (frontmatter key entries)
+  "Add selector ENTRIES to FRONTMATTER's exclusions for KEY."
+  (if (null entries)
+      frontmatter
+    (let* ((exclusions (ellm--frontmatter-selector-entry-list
+                        key (alist-get (ellm--frontmatter-selector-key key ?-)
+                                       frontmatter)))
+           (updated (delete-dups (append exclusions entries))))
+      (ellm-tools--frontmatter-set
+       frontmatter (ellm--frontmatter-selector-key key ?-) updated))))
+
+(defun ellm-tools--restrict-subagent-frontmatter (parent child)
+  "Add minimal restrictions preventing CHILD from exceeding PARENT.
+
+The restrictions deliberately preserve CHILD's profile reference and its
+configuration.  They constrain only capabilities that are currently broader
+than PARENT; profiles therefore remain live configuration baselines."
   (let* ((parent (ellm--effective-frontmatter parent))
          (child-effective (ellm--effective-frontmatter child))
          (parent-tools (ellm--resolve-tools parent))
-         (child-tools
-          (cl-remove-if-not
-           (lambda (tool)
-             (memq tool parent-tools))
-           (ellm--resolve-tools child-effective)))
+         (child-tools (ellm--resolve-tools child-effective))
+         (excluded-tools
+          (mapcar #'ellm-tool-name
+                  (cl-remove-if (lambda (tool) (memq tool parent-tools))
+                                child-tools)))
          (parent-mcp (ellm--resolve-mcp-servers parent))
-         (child-mcp
-          (cl-remove-if-not
-           (lambda (server)
-             (cl-find (car server) parent-mcp :key #'car :test #'equal))
-           (ellm--resolve-mcp-servers child-effective)))
-         (permissions
-          (mapcar
-           (lambda (tool)
-             (let ((permission
-                    (ellm-tools--more-restrictive-permission
-                     (ellm--tool-permission-policy parent tool)
-                     (ellm--tool-permission-policy child-effective tool))))
-               (cons (ellm-tool-name tool) (symbol-name permission))))
-           child-tools)))
-    ;; Explicit resolved selections prevent a profile from adding capabilities
-    ;; after the parent ceiling has been applied.
-    (dolist (key '(tools+ tools- mcp+ mcp-))
-      (setq child (ellm-tools--alist-delete-nested child key)))
-    (setq child
-          (ellm-tools--frontmatter-set
-           child 'tools (mapcar #'ellm-tool-name child-tools)))
-    (setq child
-          (ellm-tools--frontmatter-set
-           child 'mcp
-           (mapcar (lambda (server)
-                     (let ((config (cdr server)))
-                       (if (ellm--mcp-inline-server-p config)
-                           (copy-tree config)
-                         (car server))))
-                   child-mcp)))
-    (ellm-tools--frontmatter-set child 'tool-permissions permissions)))
+         (excluded-mcp
+          (mapcar #'car
+                  (cl-remove-if
+                   (lambda (server)
+                     (cl-find (car server) parent-mcp :key #'car :test #'equal))
+                   (ellm--resolve-mcp-servers child-effective))))
+         permissions)
+    (setq child (ellm-tools--add-subagent-selector-exclusions
+                 child 'tools excluded-tools))
+    (setq child (ellm-tools--add-subagent-selector-exclusions
+                 child 'mcp excluded-mcp))
+    (dolist (tool child-tools)
+      (let* ((parent-policy (ellm--tool-permission-policy parent tool))
+             (child-policy (ellm--tool-permission-policy child-effective tool))
+             (policy (ellm-tools--more-restrictive-permission
+                      parent-policy child-policy)))
+        (unless (eq policy child-policy)
+          (push (cons (ellm-tool-name tool) (symbol-name policy)) permissions))))
+    (when permissions
+      (setq child
+            (ellm-tools--frontmatter-set
+             child 'tool-permissions
+             (ellm--merge-frontmatter-maps
+              (alist-get 'tool-permissions child) permissions t))))
+    child))
 
 (defun ellm-tools--disable-subagent-tools (frontmatter)
   "Remove agent-management tools from FRONTMATTER's enabled tools."
@@ -2308,7 +2318,7 @@ from their live parent when possible."
                        (and profile-name (cons 'profile profile-name))
                        (cons 'prompt (ellm-tools--prompt-summary prompt))))))
     (setq frontmatter
-          (ellm-tools--clamp-subagent-frontmatter parent-frontmatter frontmatter))
+          (ellm-tools--restrict-subagent-frontmatter parent-frontmatter frontmatter))
     (when (and ellm-subagent-max-depth
                (>= depth ellm-subagent-max-depth))
       (setq frontmatter (ellm-tools--disable-subagent-tools frontmatter)))
