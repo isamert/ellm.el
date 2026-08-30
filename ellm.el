@@ -4671,6 +4671,21 @@ keep protocol-specific mutable state there, but lifecycle state lives here."
   (last-stream-key nil
                    :type (or null cons)
                    :documentation "Channel and message ID of the last append stream.")
+  (open-stream-role nil
+                    :type (or null string)
+                    :documentation "Role of the final turn open for append rendering.")
+  (open-stream-key nil
+                   :type (or null cons)
+                   :documentation "Channel and message ID rendered in the open stream turn.")
+  (open-stream-start nil
+                     :type (or null marker)
+                     :documentation "Marker at the header of the open stream turn.")
+  (open-stream-end nil
+                   :type (or null marker)
+                   :documentation "Insertion marker at the end of the open stream turn.")
+  (open-stream-empty-p nil
+                       :type boolean
+                       :documentation "Whether the open stream turn has an empty body.")
   (usage nil
          :type list
          :documentation "Accumulated normalized token-usage property list."))
@@ -5227,6 +5242,29 @@ represented by the pending-input indicator in the same conversation."
                     :message ,(format "request idle for %s seconds"
                                       timeout))))))))))
 
+(defun ellm--request-clear-open-stream-turn (request)
+  "Detach REQUEST's cached final stream-turn markers."
+  (when-let* ((marker (ellm-request-open-stream-start request)))
+    (set-marker marker nil))
+  (when-let* ((marker (ellm-request-open-stream-end request)))
+    (set-marker marker nil))
+  (setf (ellm-request-open-stream-role request) nil
+        (ellm-request-open-stream-key request) nil
+        (ellm-request-open-stream-start request) nil
+        (ellm-request-open-stream-end request) nil
+        (ellm-request-open-stream-empty-p request) nil))
+
+(defun ellm--request-set-open-stream-turn (request role key start end &optional empty)
+  "Record REQUEST's final stream turn with ROLE, KEY, START, and END.
+START and END name the turn header and its live insertion point.  EMPTY says
+that the turn body is empty."
+  (ellm--request-clear-open-stream-turn request)
+  (setf (ellm-request-open-stream-role request) role
+        (ellm-request-open-stream-key request) key
+        (ellm-request-open-stream-start request) (copy-marker start nil)
+        (ellm-request-open-stream-end request) (copy-marker end t)
+        (ellm-request-open-stream-empty-p request) empty))
+
 (defun ellm--request-release-streams (request)
   "Detach all rendered stream markers owned by REQUEST."
   (when-let* ((streams (ellm-request-streams request)))
@@ -5235,7 +5273,8 @@ represented by the pending-input indicator in the same conversation."
        (set-marker (ellm-stream-region-start region) nil)
        (set-marker (ellm-stream-region-end region) nil))
      streams)
-    (setf (ellm-request-streams request) nil)))
+    (setf (ellm-request-streams request) nil))
+  (ellm--request-clear-open-stream-turn request))
 
 (defun ellm--request-stream-region (request id)
   "Return REQUEST's stream region named ID, creating it at buffer end."
@@ -5274,6 +5313,7 @@ represented by the pending-input indicator in the same conversation."
 
 (defun ellm--request-render-snapshot (request event)
   "Render cumulative stream snapshot EVENT for REQUEST."
+  (ellm--request-clear-open-stream-turn request)
   (let* ((id (or (plist-get event :id) (ellm-request-attempt request)))
          (reasoning-state (plist-get event :reasoning-state))
          (region (ellm--request-stream-region request id))
@@ -5313,29 +5353,48 @@ represented by the pending-input indicator in the same conversation."
                                (not (string-empty-p content)))
                           (and (eq (car entry) 'reasoning) reasoning-state))))
                   (reverse (plist-get event :channels)))))
-      (setf (ellm-request-last-stream-key request)
-            (cons (if (symbolp (car entry))
+      (let ((role (if (symbolp (car entry))
                       (symbol-name (car entry))
-                    (car entry))
-                  id)))))
+                    (car entry)))
+            last-header)
+        ;; This searches the snapshot string, not the transcript.  The final
+        ;; header is the turn an append event must extend after a snapshot.
+        (save-match-data
+          (let ((offset 0))
+            (while (string-match ellm-turn-regexp new-text offset)
+              (setq last-header (match-beginning 0)
+                    offset (match-end 0)))))
+        (setf (ellm-request-last-stream-key request) (cons role id))
+        (when last-header
+          (ellm--request-set-open-stream-turn
+           request role (ellm-request-last-stream-key request)
+           (+ start last-header) end))))))
 
-(defun ellm--request-last-turn-role ()
-  "Return the final turn role without parsing the whole buffer."
+(defun ellm--request-find-final-stream-turn (request)
+  "Cache REQUEST's final turn when append state was not initialized.
+This compatibility fallback is only needed for manually constructed requests;
+normal requests initialize the cache when their assistant turn is inserted."
   (save-excursion
     (save-match-data
       (goto-char (point-max))
       (when (re-search-backward ellm-turn-regexp nil t)
-        (match-string-no-properties 2)))))
+        (let ((role (match-string-no-properties 2))
+              (start (point))
+              empty)
+          (goto-char (min (1+ (line-end-position)) (point-max)))
+          (skip-chars-forward " \t\n\r")
+          (setq empty (eobp))
+          (ellm--request-set-open-stream-turn
+           request role (ellm-request-last-stream-key request)
+           start (point-max) empty))))))
 
-(defun ellm--request-last-turn-body-empty-p ()
-  "Return non-nil when the final turn body contains only whitespace."
-  (save-excursion
-    (save-match-data
-      (goto-char (point-max))
-      (when (re-search-backward ellm-turn-regexp nil t)
-        (goto-char (min (1+ (line-end-position)) (point-max)))
-        (skip-chars-forward " \t\n\r")
-        (eobp)))))
+(defun ellm--request-open-stream-turn-p (request)
+  "Return non-nil when REQUEST has a final cached stream turn."
+  (let ((start (ellm-request-open-stream-start request))
+        (end (ellm-request-open-stream-end request)))
+    (and (markerp start) (eq (marker-buffer start) (current-buffer))
+         (markerp end) (eq (marker-buffer end) (current-buffer))
+         (= end (point-max)))))
 
 (defun ellm--request-render-chunk (request event)
   "Append normalized streaming chunk EVENT for REQUEST."
@@ -5347,6 +5406,8 @@ represented by the pending-input indicator in the same conversation."
          (last-key (ellm-request-last-stream-key request)))
     (when (and (stringp content) (not (string-empty-p content)))
       (goto-char (point-max))
+      (unless (ellm--request-open-stream-turn-p request)
+        (ellm--request-find-final-stream-turn request))
       ;; Snapshots add a final newline so their turn remains well-formed.
       ;; A backend can mark a following delta to replace that synthetic
       ;; separator when its prior snapshot did not contain one.
@@ -5355,20 +5416,25 @@ represented by the pending-input indicator in the same conversation."
                  (eq (char-before) ?\n))
         (delete-char -1))
       (unless
-          (and (equal (ellm--request-last-turn-role) role)
+          (and (equal (ellm-request-open-stream-role request) role)
                (or (not message-id)
                    (if last-key
                        (equal last-key key)
-                     (ellm--request-last-turn-body-empty-p))))
-        (apply
-         #'ellm--insert-turn role
-         (append
-          (when (and (not (equal role "user"))
-                     (not (and (equal role "assistant")
-                               (equal (ellm--request-last-turn-role) "user"))))
-            (list :continuation t))
-          (when message-id (list :message-id message-id)))))
-      (setf (ellm-request-last-stream-key request) key)
+                     (ellm-request-open-stream-empty-p request))))
+        (let ((previous-role (ellm-request-open-stream-role request))
+              (start (point)))
+          (apply
+           #'ellm--insert-turn role
+           (append
+            (when (and (not (equal role "user"))
+                       (not (and (equal role "assistant")
+                                 (equal previous-role "user"))))
+              (list :continuation t))
+            (when message-id (list :message-id message-id))))
+          (ellm--request-set-open-stream-turn request role key start (point))))
+      (setf (ellm-request-last-stream-key request) key
+            (ellm-request-open-stream-key request) key
+            (ellm-request-open-stream-empty-p request) nil)
       (if (not (member role '("assistant" "reasoning")))
           (insert content)
         (let ((beg (copy-marker (point) nil))
@@ -5509,6 +5575,7 @@ MESSAGE-TEXT is reported after cleanup when non-nil."
               ((or 'tool-call 'tool-update 'tool-result)
                (setf (ellm-request-state request) 'tool-loop
                      (ellm-request-last-stream-key request) nil)
+               (ellm--request-clear-open-stream-turn request)
                (ellm--request-observe-tool-events request event)
                (ellm-backend-render-event
                 (ellm-request-backend request) event request))
@@ -5526,6 +5593,7 @@ MESSAGE-TEXT is reported after cleanup when non-nil."
                (setf (ellm-request-retries request) 0
                      (ellm-request-state request) 'starting
                      (ellm-request-last-stream-key request) nil)
+               (ellm--request-clear-open-stream-turn request)
                (ellm--persistence-checkpoint)
                (ellm--request-start-backend request))
               ('complete
@@ -7444,6 +7512,8 @@ Errors during streaming are signalled normally."
               (let ((marker (point-marker)))
                 (set-marker-insertion-type marker nil)
                 marker)))
+      (ellm--request-set-open-stream-turn
+       request "assistant" nil ellm--request-assistant-marker (point-max) t)
       (ellm--set-active-request request)
       (condition-case err
           (progn
