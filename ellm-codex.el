@@ -4,7 +4,7 @@
 
 ;; Author: Isa Mert Gurbuz <isamertgurbuz@gmail.com>
 ;; URL: https://github.com/isamert/ellm.el
-;; Version: 0.0.1
+;; Version: 0.0.2
 ;; Package-Requires: ((emacs "29.1") (llm "0.31.1") (plz "0.9"))
 ;; Keywords: llm, codex
 
