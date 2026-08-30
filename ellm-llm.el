@@ -610,8 +610,8 @@ Return a function that stops the heartbeat."
               (delq timer (ellm-llm-driver-tool-activity-timers driver)))))))
 
 (defun ellm-llm--emit-tool-observation (driver observation)
-  "Emit OBSERVATION as a non-rendering tool update for DRIVER."
-  (ellm-llm--emit driver `(:type tool-update :observations (,observation))))
+  "Emit OBSERVATION as a non-rendering tool lifecycle event for DRIVER."
+  (ellm-llm--emit driver `(:type tool-observation :observations (,observation))))
 
 (defun ellm-llm--instrument-tool-activity (driver)
   "Make DRIVER's llm.el tools report their actual execution lifetime."

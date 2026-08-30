@@ -628,7 +628,8 @@ are reported without interrupting cancellation."
 (defcustom ellm-tool-call-hook nil
   "Hook run for a normalized backend-observed tool invocation.
 Each function receives REQUEST and EVENT.  EVENT contains `:type' `tool-call'
-and backend-normalized tool metadata."
+and backend-normalized tool metadata.  Hook functions must not modify the
+conversation buffer."
   :type 'hook
   :group 'ellm)
 
@@ -637,7 +638,8 @@ and backend-normalized tool metadata."
 Each function receives REQUEST and EVENT.  EVENT contains `:type'
 `tool-finished' and `:outcome', which is `completed' or `failed'.  For llm.el,
 `completed' means a result was returned to the model; it does not necessarily
-mean that the local tool succeeded."
+mean that the local tool succeeded.  Hook functions must not modify the
+conversation buffer."
   :type 'hook
   :group 'ellm)
 
@@ -4858,15 +4860,16 @@ allow-for-session, and deny choices through the core permission UI."
   "Terminal values of `ellm-request-state'.")
 
 (defconst ellm-backend-event-types
-  '(stream usage tool-call tool-update tool-result extension
+  '(stream usage tool-call tool-update tool-observation tool-result extension
            operation continue complete failure)
   "Event types accepted by the core request reducer.
 
 `stream' uses `:mode' `append' with `:channel', `:text', and optional `:id',
 or `snapshot' with an ordered `:channels' alist and stable `:id'.  `usage'
 accepts normalized token, context, and cost fields.  Tool events may carry
-`:observations', a list of normalized `tool-call' or `tool-finished' plists;
-tool and `extension' events are rendered through `ellm-backend-render-event'.
+`:observations', a list of normalized `tool-call' or `tool-finished' plists.
+`tool-observation' is lifecycle-only and is not rendered; tool and `extension'
+events are rendered through `ellm-backend-render-event'.
 `operation' resets
 the retry budget after a backend phase succeeds; `continue' starts the next
 tool-loop leg.  `complete' and `failure' are terminal unless a failure is
@@ -5632,6 +5635,67 @@ MESSAGE-TEXT is reported after cleanup when non-nil."
          (ellm--run-observer-hook 'ellm-tool-finished-hook
                                   request observation))))))
 
+(defun ellm--request-event-preserves-user-position-p (event)
+  "Return non-nil when handling EVENT can edit the conversation buffer.
+Lifecycle-only events, including `tool-observation', must not modify the
+conversation buffer, including from their observer hooks."
+  (not (memq (plist-get event :type)
+             '(activity usage tool-observation operation continue))))
+
+(defun ellm--request-reduce-event (request event)
+  "Reduce current backend EVENT for REQUEST."
+  (pcase (plist-get event :type)
+    ('activity nil)
+    ('stream
+     (setf (ellm-request-state request) 'streaming)
+     (pcase (plist-get event :mode)
+       ('snapshot (ellm--request-render-snapshot request event))
+       ('append (ellm--request-render-chunk request event))
+       (_ (error "ellm: Invalid stream event mode: %S"
+                 (plist-get event :mode)))))
+    ('usage
+     (ellm--request-merge-usage request event))
+    ('tool-observation
+     (setf (ellm-request-state request) 'tool-loop
+           (ellm-request-last-stream-key request) nil)
+     (ellm--request-clear-open-stream-turn request)
+     (ellm--request-observe-tool-events request event))
+    ((or 'tool-call 'tool-update 'tool-result)
+     (setf (ellm-request-state request) 'tool-loop
+           (ellm-request-last-stream-key request) nil)
+     (ellm--request-clear-open-stream-turn request)
+     (ellm--request-observe-tool-events request event)
+     (ellm-backend-render-event
+      (ellm-request-backend request) event request))
+    ('extension
+     (if (eq (plist-get event :kind) 'title)
+         (ellm-set-session-title (plist-get event :title))
+       (ellm-backend-render-event
+        (ellm-request-backend request) event request))
+     (when (plist-get event :checkpoint)
+       (ellm--persistence-checkpoint)))
+    ('operation
+     (setf (ellm-request-retries request) 0
+           (ellm-request-state request) 'starting))
+    ('continue
+     (setf (ellm-request-retries request) 0
+           (ellm-request-state request) 'starting
+           (ellm-request-last-stream-key request) nil)
+     (ellm--request-clear-open-stream-turn request)
+     (ellm--persistence-checkpoint)
+     (ellm--request-start-backend request))
+    ('complete
+     (ellm--request-terminal-transition request 'completed))
+    ('failure
+     (let ((text (or (plist-get event :message) "request failed")))
+       (if (and (plist-get event :retryable)
+                (< (ellm-request-retries request)
+                   ellm-request-retries))
+           (ellm--request-schedule-retry request text)
+         (ellm--request-terminal-transition request 'failed text))))
+    (_
+     (error "ellm: Unknown backend event: %S" event))))
+
 (defun ellm--request-handle-event (request attempt event)
   "Reduce backend EVENT for REQUEST ATTEMPT."
   (when (ellm--request-event-current-p request attempt)
@@ -5639,53 +5703,10 @@ MESSAGE-TEXT is reported after cleanup when non-nil."
     (with-current-buffer (ellm-request-buffer request)
       (ellm--touch-activity)
       (condition-case err
-          (ellm--preserve-user-position
-            (pcase (plist-get event :type)
-              ('activity nil)
-              ('stream
-               (setf (ellm-request-state request) 'streaming)
-               (pcase (plist-get event :mode)
-                 ('snapshot (ellm--request-render-snapshot request event))
-                 ('append (ellm--request-render-chunk request event))
-                 (_ (error "ellm: Invalid stream event mode: %S"
-                           (plist-get event :mode)))))
-              ('usage
-               (ellm--request-merge-usage request event))
-              ((or 'tool-call 'tool-update 'tool-result)
-               (setf (ellm-request-state request) 'tool-loop
-                     (ellm-request-last-stream-key request) nil)
-               (ellm--request-clear-open-stream-turn request)
-               (ellm--request-observe-tool-events request event)
-               (ellm-backend-render-event
-                (ellm-request-backend request) event request))
-              ('extension
-               (if (eq (plist-get event :kind) 'title)
-                   (ellm-set-session-title (plist-get event :title))
-                 (ellm-backend-render-event
-                  (ellm-request-backend request) event request))
-               (when (plist-get event :checkpoint)
-                 (ellm--persistence-checkpoint)))
-              ('operation
-               (setf (ellm-request-retries request) 0
-                     (ellm-request-state request) 'starting))
-              ('continue
-               (setf (ellm-request-retries request) 0
-                     (ellm-request-state request) 'starting
-                     (ellm-request-last-stream-key request) nil)
-               (ellm--request-clear-open-stream-turn request)
-               (ellm--persistence-checkpoint)
-               (ellm--request-start-backend request))
-              ('complete
-               (ellm--request-terminal-transition request 'completed))
-              ('failure
-               (let ((text (or (plist-get event :message) "request failed")))
-                 (if (and (plist-get event :retryable)
-                          (< (ellm-request-retries request)
-                             ellm-request-retries))
-                     (ellm--request-schedule-retry request text)
-                   (ellm--request-terminal-transition request 'failed text))))
-              (_
-               (error "ellm: Unknown backend event: %S" event))))
+          (if (ellm--request-event-preserves-user-position-p event)
+              (ellm--preserve-user-position
+                (ellm--request-reduce-event request event))
+            (ellm--request-reduce-event request event))
         (error
          (ellm--request-terminal-transition
           request 'failed (error-message-string err)))))))

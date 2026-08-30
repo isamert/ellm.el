@@ -8862,19 +8862,33 @@ The parent provider remains buffer-local fallback only when the profile omits on
                       :emit (lambda (event) (push event events)))))
         (ellm-llm--instrument-tool-activity driver)
         (should (equal (funcall (llm-tool-function tool)) "ok"))
-        (let ((observations
-               (mapcar (lambda (event) (car (plist-get event :observations)))
-                       (seq-filter (lambda (event)
-                                     (plist-get event :observations))
-                                   (nreverse events)))))
+        (let* ((observation-events
+                (seq-filter (lambda (event) (plist-get event :observations))
+                            (nreverse events)))
+               (observations
+                (mapcar (lambda (event) (car (plist-get event :observations)))
+                        observation-events)))
           (should (equal (mapcar (lambda (event) (plist-get event :type))
                                  observations)
                          '(tool-call tool-finished)))
+          (should (seq-every-p
+                   (lambda (event)
+                     (eq (plist-get event :type) 'tool-observation))
+                   observation-events))
           (should (equal (mapcar (lambda (event) (plist-get event :name))
                                  observations)
                          '("Shell" "Shell")))
           (should-not (plist-member (car observations) :id))
           (should-not (plist-member (cadr observations) :id)))))))
+
+(ert-deftest ellm-test-tool-observation-does-not-preserve-user-position ()
+  "Lifecycle-only tool observations do not require window preservation."
+  (should-not
+   (ellm--request-event-preserves-user-position-p
+    '(:type tool-observation :observations ((:type tool-call)))))
+  (should
+   (ellm--request-event-preserves-user-position-p
+    '(:type tool-update :update (:status "completed")))))
 
 (ert-deftest ellm-test-acp-terminal-tool-observation-uses-call-title ()
   "ACP terminal updates retain the invocation title when updates omit it."
