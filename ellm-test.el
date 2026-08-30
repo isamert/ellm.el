@@ -1749,6 +1749,64 @@
       (search-forward "# User heading")
       (should-not (ellm--in-code-block-p (match-beginning 0))))))
 
+(ert-deftest ellm-test-streaming-open-code-block-fontification-is-deferred ()
+  "An open final fence defers syntax faces but retains its block styling."
+  (let ((ellm-streaming-code-fontification-delay 60))
+    (with-temp-buffer
+      (insert ">-| assistant\n```elisp\n(defvar deferred-value 1)\n")
+      (ellm-mode)
+      (setq-local ellm--active-request (ellm--make-request :state 'running))
+      (font-lock-ensure)
+      (should (timerp ellm--deferred-code-fontification-timer))
+      (should (ellm-test--face-includes-p
+               (ellm-test--face-at-text "defvar deferred-value") 'ellm-block))
+      (should-not (ellm-test--face-includes-p
+                   (ellm-test--face-at-text "defvar deferred-value")
+                   'font-lock-keyword-face))
+      ;; The idle callback performs the eventual full embedded-language pass.
+      (ellm--flush-deferred-code-fontification)
+      (should-not ellm--deferred-code-fontification-timer)
+      (should (ellm-test--face-includes-p
+               (ellm-test--face-at-text "defvar deferred-value")
+               'font-lock-keyword-face))
+      (setq-local ellm--active-request nil))))
+
+(ert-deftest ellm-test-request-completion-flushes-open-code-fontification ()
+  "Request completion must not leave an open fence with deferred syntax faces."
+  (let ((ellm-streaming-code-fontification-delay 60))
+    (with-temp-buffer
+      (insert ">-| assistant\n```elisp\n(defvar completed-value 1)\n")
+      (ellm-mode)
+      (let ((request (ellm--make-request :buffer (current-buffer)
+                                         :state 'streaming)))
+        (ellm--set-active-request request)
+        (let ((inhibit-read-only t))
+          (font-lock-ensure))
+        (should (timerp ellm--deferred-code-fontification-timer))
+        (ellm--request-terminal-transition request 'completed)
+        (should-not ellm--deferred-code-fontification-timer)
+        (should (ellm-test--face-includes-p
+                 (ellm-test--face-at-text "defvar completed-value")
+                 'font-lock-keyword-face))))))
+
+(ert-deftest ellm-test-streaming-code-fence-close-fontifies-immediately ()
+  "Closing a deferred streamed fence flushes its syntax faces immediately."
+  (let ((ellm-streaming-code-fontification-delay 60))
+    (with-temp-buffer
+      (insert ">-| assistant\n```elisp\n(defvar closing-value 1)\n")
+      (ellm-mode)
+      (setq-local ellm--active-request (ellm--make-request :state 'running))
+      (font-lock-ensure)
+      (should (timerp ellm--deferred-code-fontification-timer))
+      (goto-char (point-max))
+      (insert "```\n")
+      (font-lock-ensure)
+      (should-not ellm--deferred-code-fontification-timer)
+      (should (ellm-test--face-includes-p
+               (ellm-test--face-at-text "defvar closing-value")
+               'font-lock-keyword-face))
+      (setq-local ellm--active-request nil))))
+
 (ert-deftest ellm-test-editing-turn-boundary-updates-live-code-block ()
   "Turn delimiter edits should update faces after an open fence."
   (with-temp-buffer

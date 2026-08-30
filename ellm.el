@@ -168,6 +168,14 @@ Backends decide which failures and operations are safe to retry."
   :type 'number
   :group 'ellm)
 
+(defcustom ellm-streaming-code-fontification-delay 1
+  "Seconds to wait before fontifying an open streamed code block.
+While a request is active, embedded-language fontification of an unfinished
+final fenced block is deferred and coalesced on an idle timer.  Markdown and
+turn styling remains synchronous."
+  :type 'number
+  :group 'ellm)
+
 (defcustom ellm-prompt-interpolation-policy 'ask
   "Policy for evaluating Lisp interpolation in system prompts.
 `ask' confirms before evaluating each new or modified prompt template.
@@ -1225,10 +1233,71 @@ The colors match `org-table' while preserving fixed-pitch alignment."
 
 (defvar ellm--fence-positions)
 (defvar ellm--fence-positions-vector)
+(defvar ellm--active-request)
 (defvar ellm--turn-body-cache-vector)
 
 (defvar ellm--lang-mode-cache (make-hash-table :test 'equal)
   "Cache mapping language name to major mode symbol.")
+
+(defvar-local ellm--deferred-code-fontification-timer nil
+  "Idle timer for deferred embedded-language fontification.")
+
+(defvar-local ellm--deferred-code-fontification-marker nil
+  "Marker at the body start of the deferred open fenced block.")
+
+(defvar ellm--force-code-block-fontification nil
+  "Non-nil while flushing deferred embedded-language fontification.")
+
+(defun ellm--cancel-deferred-code-fontification ()
+  "Cancel and discard deferred embedded-language fontification."
+  (when (timerp ellm--deferred-code-fontification-timer)
+    (cancel-timer ellm--deferred-code-fontification-timer))
+  (setq ellm--deferred-code-fontification-timer nil)
+  (when (markerp ellm--deferred-code-fontification-marker)
+    (set-marker ellm--deferred-code-fontification-marker nil))
+  (setq ellm--deferred-code-fontification-marker nil))
+
+(defun ellm--flush-deferred-code-fontification ()
+  "Synchronously fontify the deferred open fenced block, if any."
+  (when-let* ((marker ellm--deferred-code-fontification-marker)
+              ((marker-buffer marker)))
+    (let ((beg (marker-position marker)))
+      (ellm--cancel-deferred-code-fontification)
+      (when (and beg (< beg (point-max)) (ellm--in-code-block-p beg))
+        (let ((ellm--force-code-block-fontification t)
+              ;; A live request makes its conversation buffer read-only.
+              ;; Fontification only changes text properties, but that still
+              ;; observes `buffer-read-only' unless explicitly inhibited.
+              (inhibit-read-only t))
+          (font-lock-flush beg (point-max))
+          (font-lock-ensure beg (point-max)))))))
+
+(defun ellm--run-deferred-code-fontification (buffer)
+  "Run BUFFER's deferred embedded-language fontification after idle time."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (ellm--flush-deferred-code-fontification))))
+
+(defun ellm--defer-code-fontification (body-beg)
+  "Coalesce fontification of the open code block beginning at BODY-BEG."
+  (unless (and (markerp ellm--deferred-code-fontification-marker)
+               (= (marker-position ellm--deferred-code-fontification-marker)
+                  body-beg))
+    (ellm--cancel-deferred-code-fontification)
+    (setq ellm--deferred-code-fontification-marker (copy-marker body-beg)))
+  (when (timerp ellm--deferred-code-fontification-timer)
+    (cancel-timer ellm--deferred-code-fontification-timer))
+  (setq ellm--deferred-code-fontification-timer
+        (run-with-idle-timer ellm-streaming-code-fontification-delay nil
+                             #'ellm--run-deferred-code-fontification
+                             (current-buffer))))
+
+(defun ellm--defer-open-streamed-code-fontification-p (close body-end)
+  "Return non-nil when an unfinished final block should be deferred."
+  (and (not ellm--force-code-block-fontification)
+       ellm--active-request
+       (not close)
+       (= body-end (point-max))))
 
 (defvar ellm--special-lang-name-alist
   '(("elisp" . emacs-lisp-mode))
@@ -1367,7 +1436,14 @@ Also fontifies YAML frontmatter if present and overlaps the region."
                      (body-beg (match-end 0))
                      (mode (ellm--code-block-mode lang header)))
                 (when mode
-                  (ellm--fontify-region-as mode body-beg body-end))
+                  (if (ellm--defer-open-streamed-code-fontification-p
+                       close body-end)
+                      (ellm--defer-code-fontification body-beg)
+                    (when (and (markerp ellm--deferred-code-fontification-marker)
+                               (= (marker-position ellm--deferred-code-fontification-marker)
+                                  body-beg))
+                      (ellm--cancel-deferred-code-fontification))
+                    (ellm--fontify-region-as mode body-beg body-end)))
                 (font-lock-append-text-property
                  body-beg body-end 'face 'ellm-block))))
           (cl-incf index (if close 2 1)))))))
@@ -5501,6 +5577,9 @@ MESSAGE-TEXT is reported after cleanup when non-nil."
           (ellm--preserve-user-position
             (ellm--request-record-usage request)
             (ellm--cancel-pending-user-prompt)
+            ;; The last streamed fence may still be open.  Do not leave its
+            ;; embedded-language faces deferred after the request finishes.
+            (ellm--flush-deferred-code-fontification)
             (ellm--set-active-request nil)
             (ellm--ensure-next-user-turn)
             (ellm--commit-composer-draft)
@@ -9081,6 +9160,7 @@ conversation state only when such updates were skipped."
   (add-hook 'before-change-functions #'ellm--before-change-function nil t)
   (add-hook 'after-change-functions #'ellm--after-change-function nil t)
   (add-hook 'kill-buffer-hook #'ellm--kill-composer nil t)
+  (add-hook 'kill-buffer-hook #'ellm--cancel-deferred-code-fontification nil t)
   (ellm--configure-turn-rules t)
   (add-hook 'post-command-hook #'ellm--reveal-separator-at-point nil t)
   (add-hook 'post-command-hook #'ellm--maybe-activate-user-prompt nil t)
