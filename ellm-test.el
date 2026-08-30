@@ -2213,16 +2213,132 @@
     (should (string-match-p "ok" contents))
     (should (string-match-p "\n>-| user\n\\'" contents))))
 
-(ert-deftest ellm-test-llm-stream-events-are-snapshots ()
-  "LLM partials are normalized as snapshots for the current tool-loop leg."
-  (let* ((driver (ellm-llm--make-driver :leg 3))
-         (event (ellm-llm--stream-event
-                 driver '(:text "answer" :reasoning "thinking") "state")))
-    (should (equal (plist-get event :id) '(llm . 3)))
-    (should (eq (plist-get event :mode) 'snapshot))
-    (should (equal (plist-get event :channels)
-                   '((reasoning . "thinking") (assistant . "answer"))))
-    (should (equal (plist-get event :reasoning-state) "state"))))
+(ert-deftest ellm-test-llm-stream-events-append-cumulative-partials ()
+  "LLM cumulative assistant partials emit only their appended text."
+  (let ((driver (ellm-llm--make-driver :leg 3)))
+    (let ((event (car (ellm-llm--stream-events
+                       driver '(:text "answer" :reasoning "thinking") "state"))))
+      (should (equal (plist-get event :id) '(llm . 3)))
+      (should (eq (plist-get event :mode) 'snapshot))
+      (should (equal (plist-get event :channels)
+                     '((reasoning . "thinking") (assistant . "answer"))))
+      (should (equal (plist-get event :reasoning-state) "state")))
+    (should
+     (equal (ellm-llm--stream-events
+             driver '(:text "answer more" :reasoning "thinking") "state")
+            '((:type stream :mode append :id (llm . 3)
+               :channel assistant :text " more" :join t))))))
+
+(ert-deftest ellm-test-llm-stream-events-trusted-partials-skip-prefix-validation ()
+  "Trusted cumulative partials derive deltas from length without prefix scans."
+  (let ((driver (ellm-llm--make-driver :leg 1))
+        (ellm-llm-trust-cumulative-partials t))
+    (ellm-llm--stream-events driver '(:text "answer") nil)
+    (cl-letf (((symbol-function 'string-prefix-p)
+               (lambda (&rest _) (error "unexpected prefix validation"))))
+      (should
+       (equal (ellm-llm--stream-events driver '(:text "answer more") nil)
+              '((:type stream :mode append :id (llm . 1)
+                 :channel assistant :text " more" :join t)))))))
+
+(ert-deftest ellm-test-llm-stream-events-trusted-shortening-uses-snapshot ()
+  "Trusted partials still replace a shorter assistant snapshot."
+  (let ((driver (ellm-llm--make-driver :leg 1))
+        (ellm-llm-trust-cumulative-partials t))
+    (ellm-llm--stream-events driver '(:text "long answer") nil)
+    (let ((event (car (ellm-llm--stream-events driver '(:text "short") nil))))
+      (should (eq (plist-get event :mode) 'snapshot))
+      (should (equal (plist-get event :channels)
+                     '((reasoning) (assistant . "short")))))))
+
+(ert-deftest ellm-test-llm-stream-events-trusted-equal-and-non-monotonic-input ()
+  "Trusted partials advance by length even when a provider revises content."
+  (let ((driver (ellm-llm--make-driver :leg 1))
+        (ellm-llm-trust-cumulative-partials t))
+    (ellm-llm--stream-events driver '(:text "abc") nil)
+    ;; Equal-length input produces no delta, but establishes the new baseline.
+    (should-not (ellm-llm--stream-events driver '(:text "xyz") nil))
+    ;; A later longer revision emits only text after that baseline's length.
+    (should (equal (ellm-llm--stream-events driver '(:text "xyZZ") nil)
+                   '((:type stream :mode append :id (llm . 1)
+                      :channel assistant :text "Z" :join t))))))
+
+(ert-deftest ellm-test-llm-stream-events-validated-same-length-revision-snapshots ()
+  "Validated partials replace same-length assistant revisions."
+  (let ((driver (ellm-llm--make-driver :leg 1))
+        (ellm-llm-trust-cumulative-partials nil))
+    (ellm-llm--stream-events driver '(:text "abc") nil)
+    (let ((event (car (ellm-llm--stream-events driver '(:text "xyz") nil))))
+      (should (eq (plist-get event :mode) 'snapshot))
+      (should (equal (plist-get event :channels)
+                     '((reasoning) (assistant . "xyz")))))))
+
+(ert-deftest ellm-test-llm-stream-events-handle-absent-channels ()
+  "Absent assistant and reasoning channels safely replace or append streams."
+  (let ((driver (ellm-llm--make-driver :leg 1))
+        (ellm-llm-trust-cumulative-partials t))
+    (ellm-llm--stream-events driver '(:text "answer" :reasoning nil) nil)
+    ;; A missing reasoning key is equivalent to its previous nil value.
+    (should (equal (ellm-llm--stream-events driver '(:text "answer more") nil)
+                   '((:type stream :mode append :id (llm . 1)
+                      :channel assistant :text " more" :join t))))
+    ;; Introducing and then omitting reasoning replaces the ordered snapshot.
+    (should (eq (plist-get (car (ellm-llm--stream-events
+                                 driver '(:text "answer more" :reasoning "why") nil))
+                           :mode)
+                'snapshot))
+    (should (eq (plist-get (car (ellm-llm--stream-events
+                                 driver '(:text "answer more") nil))
+                           :mode)
+                'snapshot))
+    ;; A missing assistant value after text is also a replacement snapshot.
+    (ellm-llm--reset-stream driver)
+    (ellm-llm--stream-events driver '(:text "answer") nil)
+    (let ((event (car (ellm-llm--stream-events driver nil nil))))
+      (should (eq (plist-get event :mode) 'snapshot))
+      (should (equal (plist-get event :channels)
+                     '((reasoning) (assistant)))))))
+
+(ert-deftest ellm-test-llm-cumulative-events-render-as-one-assistant-response ()
+  "Core rendering appends llm.el assistant deltas without duplicating text."
+  (let ((ellm-provider (make-ellm-test-pending-provider))
+        (stream-driver (ellm-llm--make-driver :leg 0))
+        (ellm-llm-trust-cumulative-partials t))
+    (with-temp-buffer
+      (ellm-mode)
+      (ellm--insert-turn "user")
+      (insert "hi\n")
+      (ellm-send)
+      (let* ((request ellm--active-request)
+             (emit (ellm-test-pending-request-emit
+                    (ellm-request-backend request))))
+        (dolist (event (ellm-llm--stream-events stream-driver '(:text "answer") nil))
+          (funcall emit event))
+        (dolist (event (ellm-llm--stream-events stream-driver '(:text "answer more") nil))
+          (funcall emit event))
+        (funcall emit '(:type complete)))
+      (should (string-match-p (regexp-quote "answer more") (buffer-string)))
+      (should-not (string-match-p "answeranswer" (buffer-string))))))
+
+(ert-deftest ellm-test-llm-stream-events-snapshot-revisions-and-tool-legs ()
+  "Validated LLM revisions fall back to snapshots and tool legs reset baselines."
+  (let ((driver (ellm-llm--make-driver :leg 1))
+        (ellm-llm-trust-cumulative-partials nil))
+    (ellm-llm--stream-events driver '(:text "complete" :reasoning "why") nil)
+    (let ((event (car (ellm-llm--stream-events
+                       driver '(:text "complete" :reasoning "why more") nil))))
+      (should (eq (plist-get event :mode) 'snapshot)))
+    (let ((event (car (ellm-llm--stream-events
+                       driver '(:text "short" :reasoning "why more") nil))))
+      (should (eq (plist-get event :mode) 'snapshot))
+      (should (equal (plist-get event :channels)
+                     '((reasoning . "why more") (assistant . "short")))))
+    (cl-incf (ellm-llm-driver-leg driver))
+    (ellm-llm--reset-stream driver)
+    (let ((event (car (ellm-llm--stream-events
+                       driver '(:text "next leg") nil))))
+      (should (eq (plist-get event :mode) 'snapshot))
+      (should (equal (plist-get event :id) '(llm . 2))))))
 
 (ert-deftest ellm-test-kagi-minimal-headers-and-payload ()
   "Kagi requests should use cookie auth without browser-only headers."

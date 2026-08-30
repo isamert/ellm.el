@@ -5275,6 +5275,7 @@ represented by the pending-input indicator in the same conversation."
 (defun ellm--request-render-snapshot (request event)
   "Render cumulative stream snapshot EVENT for REQUEST."
   (let* ((id (or (plist-get event :id) (ellm-request-attempt request)))
+         (reasoning-state (plist-get event :reasoning-state))
          (region (ellm--request-stream-region request id))
          (start (ellm-stream-region-start region))
          (end (ellm-stream-region-end region))
@@ -5301,7 +5302,22 @@ represented by the pending-input indicator in the same conversation."
                        (ellm--turn-header-prefix-regexp ellm-turn-header-2)
                        "reasoning\\b")
                end t)
-          (ellm--fold-subtree-at (match-beginning 0)))))))
+          (ellm--fold-subtree-at (match-beginning 0)))))
+    ;; A backend may continue a snapshot stream with append events.  Record
+    ;; its final rendered channel so the first append extends that turn.
+    (when-let* ((entry
+                 (seq-find
+                  (lambda (entry)
+                    (let ((content (cdr entry)))
+                      (or (and (stringp content)
+                               (not (string-empty-p content)))
+                          (and (eq (car entry) 'reasoning) reasoning-state))))
+                  (reverse (plist-get event :channels)))))
+      (setf (ellm-request-last-stream-key request)
+            (cons (if (symbolp (car entry))
+                      (symbol-name (car entry))
+                    (car entry))
+                  id)))))
 
 (defun ellm--request-last-turn-role ()
   "Return the final turn role without parsing the whole buffer."
@@ -5331,6 +5347,13 @@ represented by the pending-input indicator in the same conversation."
          (last-key (ellm-request-last-stream-key request)))
     (when (and (stringp content) (not (string-empty-p content)))
       (goto-char (point-max))
+      ;; Snapshots add a final newline so their turn remains well-formed.
+      ;; A backend can mark a following delta to replace that synthetic
+      ;; separator when its prior snapshot did not contain one.
+      (when (and (plist-get event :join)
+                 last-key (equal last-key key)
+                 (eq (char-before) ?\n))
+        (delete-char -1))
       (unless
           (and (equal (ellm--request-last-turn-role) role)
                (or (not message-id)
