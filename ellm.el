@@ -8838,10 +8838,10 @@ Return non-nil when BUFFER has a row in the current list."
     (ellm-list-refresh-buffer buffer)))
 
 (defun ellm-list-answer-prompt ()
-  "Answer the pending prompt for the conversation at point."
+  "Answer the pending prompt for the conversation at point.
+Keep the session list selected while reading the answer."
   (interactive nil ellm-list-mode)
-  (let ((buffer (ellm-list--buffer-at-point)))
-    (pop-to-buffer buffer)
+  (with-current-buffer (ellm-list--buffer-at-point)
     (ellm-answer-prompt)))
 
 (defun ellm-list-new ()

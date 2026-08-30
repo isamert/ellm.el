@@ -9284,6 +9284,26 @@ The parent provider remains buffer-local fallback only when the profile omits on
       (delete-directory project t)
       (delete-directory outside t))))
 
+(ert-deftest ellm-test-list-answer-prompt-keeps-list-selected ()
+  "Answer prompts from the session list without visiting the conversation."
+  (let ((conversation (generate-new-buffer "ellm list prompt"))
+        answered-buffer)
+    (unwind-protect
+        (save-window-excursion
+          (with-current-buffer conversation
+            (ellm-mode))
+          (ellm-list)
+          (with-current-buffer "*ellm sessions*"
+            (ellm-list--goto-buffer conversation)
+            (cl-letf (((symbol-function 'ellm-answer-prompt)
+                       (lambda () (setq answered-buffer (current-buffer)))))
+              (ellm-list-answer-prompt))
+            (should (eq answered-buffer conversation))
+            (should (eq (window-buffer (selected-window)) (current-buffer)))))
+      (dolist (buffer (list conversation (get-buffer "*ellm sessions*")))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
 (ert-deftest ellm-test-request-events-refresh-their-conversation-list-row ()
   "Backend callbacks refresh the owning conversation, not their current buffer."
   (let ((conversation (generate-new-buffer " *ellm list conversation*"))
