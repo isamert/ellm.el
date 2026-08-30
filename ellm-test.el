@@ -5209,8 +5209,8 @@
         (should (equal (buffer-string) before))
         (should-not ellm--active-request)))))
 
-(ert-deftest ellm-test-core-stream-events-do-not-parse-conversation ()
-  "Core append and snapshot rendering should use cached stream state."
+(ert-deftest ellm-test-core-append-stream-events-do-not-scan-backward ()
+  "Normal core append rendering should use its cached final turn."
   (let ((ellm-provider (make-ellm-test-pending-provider)))
     (with-temp-buffer
       (ellm-mode)
@@ -5219,22 +5219,112 @@
       (ellm-send)
       (let* ((request ellm--active-request)
              (driver (ellm-request-backend request))
-             (emit (ellm-test-pending-request-emit driver)))
-        (cl-letf (((symbol-function 'ellm--parse-turns)
-                   (lambda () (error "unexpected parse"))))
+             (emit (ellm-test-pending-request-emit driver))
+             (backward-scans 0))
+        (cl-letf (((symbol-function 're-search-backward)
+                   (lambda (&rest _)
+                     (cl-incf backward-scans)
+                     (error "unexpected backward scan"))))
           (funcall emit
                    '(:type stream :mode append :channel assistant
                      :id first :text "one"))
           (funcall emit
                    '(:type stream :mode append :channel assistant
                      :id first :text " two"))
-          (funcall emit
-                   '(:type stream :mode snapshot :id second
-                     :channels ((reasoning . "why")
-                                (assistant . "answer")))))
+          (should (= backward-scans 0)))
         (ellm-cancel t)
-        (should (string-match-p "one two" (buffer-string)))
-        (should (string-match-p "answer" (buffer-string)))))))
+        (should (string-match-p "one two" (buffer-string)))))))
+
+(ert-deftest ellm-test-core-append-stream-tracking-preserves-channel-transcript ()
+  "Append stream tracking keeps channel switches and split delimiters intact."
+  (let ((ellm-provider (make-ellm-test-pending-provider)))
+    (with-temp-buffer
+      (ellm-mode)
+      (ellm--insert-turn "user")
+      (insert "hi\n")
+      (ellm-send)
+      (let* ((request ellm--active-request)
+             (emit (ellm-test-pending-request-emit
+                    (ellm-request-backend request))))
+        (funcall emit '(:type stream :mode append :channel assistant
+                        :text "answer"))
+        (funcall emit '(:type stream :mode append :channel reasoning
+                        :text "think\n>-| user"))
+        (funcall emit '(:type stream :mode append :channel assistant
+                        :text " final"))
+        (funcall emit '(:type complete))
+        (should (equal (mapcar #'ellm-turn-role (ellm--parse-turns))
+                       '("user" "assistant" "reasoning" "assistant" "user")))
+        (should (string-match-p (regexp-quote "answer\n>>-| reasoning\nthink\n\\>-| user\n>>-| assistant\n final")
+                                (buffer-string)))
+        (should-not (ellm-request-open-stream-start request))
+        (should-not (ellm-request-open-stream-end request))))))
+
+(ert-deftest ellm-test-core-snapshot-append-join-keeps-open-turn ()
+  "An append joined to a snapshot extends its final turn without a scan."
+  (with-temp-buffer
+    (ellm-mode)
+    (let ((request (ellm--make-request :buffer (current-buffer))))
+      (ellm--request-render-snapshot
+       request '(:type stream :mode snapshot :id response
+                 :channels ((assistant . "answer"))))
+      (let ((backward-scans 0))
+        (cl-letf (((symbol-function 're-search-backward)
+                   (lambda (&rest _)
+                     (cl-incf backward-scans)
+                     (error "unexpected backward scan"))))
+          (ellm--request-render-chunk
+           request '(:type stream :mode append :channel assistant
+                     :id response :join t :text " more"))
+          (should (= backward-scans 0))))
+      (should (equal (buffer-string) ">>-| assistant\nanswer more"))
+      (ellm--request-release-streams request))))
+
+(ert-deftest ellm-test-core-append-stream-key-transitions-preserve-turns ()
+  "No-ID appends extend a stream, while a new ID starts a continuation."
+  (with-temp-buffer
+    (ellm-mode)
+    (ellm--insert-turn "assistant")
+    (let ((request (ellm--make-request :buffer (current-buffer))))
+      (ellm--request-set-open-stream-turn
+       request "assistant" nil (point-min) (point-max) t)
+      (dolist (event '((:type stream :mode append :channel assistant
+                          :id first :text "one")
+                       (:type stream :mode append :channel assistant
+                          :text " two")
+                       (:type stream :mode append :channel assistant
+                          :id second :text "three")
+                       (:type stream :mode append :channel assistant
+                          :id second :text " four")))
+        (ellm--request-render-chunk request event))
+      (should (equal (mapcar #'ellm-turn-role (ellm--parse-turns))
+                     '("assistant" "assistant")))
+      (should (equal (buffer-string)
+                     ">-| assistant\none two\n>>-| assistant :message-id second\nthree four"))
+      (ellm--request-release-streams request))))
+
+(ert-deftest ellm-test-core-tool-event-invalidates-open-append-turn ()
+  "A tool event makes the following append establish a new continuation."
+  (let ((ellm-provider (make-ellm-test-pending-provider)))
+    (with-temp-buffer
+      (ellm-mode)
+      (ellm--insert-turn "user")
+      (insert "hi\n")
+      (ellm-send)
+      (let* ((request ellm--active-request)
+             (emit (ellm-test-pending-request-emit
+                    (ellm-request-backend request))))
+        (funcall emit '(:type stream :mode append :channel assistant
+                        :id first :text "one"))
+        (funcall emit '(:type tool-call :id tool-1))
+        (should-not (ellm-request-open-stream-start request))
+        ;; The tool invalidates the cached stream turn, so the next append must
+        ;; establish a new continuation from the final rendered turn.
+        (funcall emit '(:type stream :mode append :channel assistant
+                        :id second :text "two"))
+        (should (equal (mapcar #'ellm-turn-role (ellm--parse-turns))
+                       '("user" "assistant" "assistant")))
+        (ellm-cancel t)))))
 
 (ert-deftest ellm-test-core-request-owns-retry-scheduling ()
   "Retryable backend events should be restarted only by the core reducer."
