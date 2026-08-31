@@ -242,12 +242,42 @@ into implementation work.")
   (list ellm--agent-system-prompt ellm--explore-system-prompt)
   "Built-in prompt templates whose interpolation may run without confirmation.")
 
+(defcustom ellm-default-tool-permission 'ask
+  "Permission policy used when no `tool-permissions' rule matches.
+
+A matching tool, category, or `default' rule in a profile or buffer's
+frontmatter takes precedence.  Valid values are `allow', `ask', and `deny'."
+  :type '(choice (const :tag "Allow" allow)
+                 (const :tag "Ask" ask)
+                 (const :tag "Deny" deny))
+  :group 'ellm)
+
 (defcustom ellm-profiles
   `((agent . ((description . "Autonomous coding agent with local tools and optional delegation.")
               (tools . ("@files" "@shell" "@web" "@tasks" "@agents" "@user" "@tool-outputs"))
+              (tool-permissions . (("@files" . "allow")
+                                   ("@tasks" . "allow")
+                                   ("@user" . "allow")
+                                   ("@tool-outputs" . "allow")
+                                   ("@shell" . "ask")
+                                   ("@agents" . "ask")
+                                   (web_search . "allow")
+                                   (web_fetch . "ask")
+                                   ("@acp/read" . "allow")
+                                   ("@acp/search" . "allow")
+                                   ("@acp/edit" . "ask")))
               (system . ,ellm--agent-system-prompt)))
     (explore . ((description . "Read-only codebase exploration, change analysis, and external research.")
                 (tools . ("glob" "grep" "read" "web_search" "web_fetch" "git" "@tool-outputs"))
+                (tool-permissions . (("@files" . "allow")
+                                     (git . "allow")
+                                     ("@tool-outputs" . "allow")
+                                     (web_search . "allow")
+                                     (web_fetch . "ask")
+                                     ("@acp/read" . "allow")
+                                     ("@acp/search" . "allow")
+                                     ("@acp/edit" . "deny")
+                                     ("@acp/execute" . "deny")))
                 (system . ,ellm--explore-system-prompt))))
   "Global reusable conversation profiles.
 Each entry maps a profile name to frontmatter defaults.  Buffer-local
@@ -4820,7 +4850,9 @@ KEYS are ordered from most to least specific and are followed by `default'."
                                                :key (lambda (rule)
                                                       (format "%s" (car rule)))
                                                :test #'equal))))
-         (value (if entry (format "%s" (cdr entry)) "allow")))
+         (value (if entry
+                    (format "%s" (cdr entry))
+                  (symbol-name ellm-default-tool-permission))))
     (unless (or (null rules) (and (listp rules) (cl-every #'consp rules)))
       (user-error "ellm: Tool-permissions must be a map"))
     (pcase value

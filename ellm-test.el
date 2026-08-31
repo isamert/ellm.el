@@ -5160,7 +5160,7 @@
       (ellm-mode)
       (setq-local ellm-request-finished-hook
                   (list (lambda (_request value) (setq outcome value))))
-      (insert "---\ntools: [e2e_idle]\n---\n\n>-| user\nrun it\n")
+      (insert "---\ntools: [e2e_idle]\ntool-permissions:\n  e2e_idle: allow\n---\n\n>-| user\nrun it\n")
       (cl-letf (((symbol-function 'llm-chat-streaming)
                  (lambda (_provider prompt _partial final _error
                                     &optional _multi-output)
@@ -9082,6 +9082,48 @@ The parent provider remains buffer-local fallback only when the profile omits on
                                         ("@files" . "ask"))))
                  tool)
                 'ask))))
+
+(ert-deftest ellm-test-default-tool-permission ()
+  "Unmatched permissions use `ellm-default-tool-permission'."
+  (let ((tool (ellm-make-tool :name "edit" :category "files")))
+    (dolist (policy '(ask allow deny))
+      (let ((ellm-default-tool-permission policy))
+        (should (eq (ellm--tool-permission-policy nil tool) policy))))))
+
+(ert-deftest ellm-test-built-in-profile-tool-permissions ()
+  "Built-in profiles provide local and ACP permission defaults."
+  (let ((files-tool (ellm-make-tool :name "edit" :category "files"))
+        (shell-tool (ellm-make-tool :name "bash" :category "shell"))
+        (web-search (ellm-make-tool :name "web_search" :category "web"))
+        (web-fetch (ellm-make-tool :name "web_fetch" :category "web")))
+    (with-temp-buffer
+      (insert "---\nprofile: agent\n---\n")
+      (ellm-mode)
+      (let ((frontmatter (ellm--effective-frontmatter)))
+        (should (eq (ellm--tool-permission-policy frontmatter files-tool) 'allow))
+        (should (eq (ellm--tool-permission-policy frontmatter shell-tool) 'ask))
+        (should (eq (ellm--tool-permission-policy frontmatter web-search) 'allow))
+        (should (eq (ellm--tool-permission-policy frontmatter web-fetch) 'ask))
+        (should (eq (ellm--tool-permission-policy-for-keys frontmatter
+                                                            '("@acp/read"))
+                    'allow))
+        (should (eq (ellm--tool-permission-policy-for-keys frontmatter
+                                                            '("@acp/edit"))
+                    'ask))
+        (let ((ellm-default-tool-permission 'deny))
+          (should (eq (ellm--tool-permission-policy-for-keys frontmatter
+                                                              '("@acp/other"))
+                      'deny)))))
+    (with-temp-buffer
+      (insert "---\nprofile: explore\n---\n")
+      (ellm-mode)
+      (let ((frontmatter (ellm--effective-frontmatter)))
+        (should (eq (ellm--tool-permission-policy frontmatter files-tool) 'allow))
+        (should (eq (ellm--tool-permission-policy frontmatter web-search) 'allow))
+        (should (eq (ellm--tool-permission-policy frontmatter web-fetch) 'ask))
+        (should (eq (ellm--tool-permission-policy-for-keys frontmatter
+                                                            '("@acp/edit"))
+                    'deny))))))
 
 (ert-deftest ellm-test-tool-permission-prompt-truncates-arguments ()
   "Local tool permission prompts bound long argument displays."

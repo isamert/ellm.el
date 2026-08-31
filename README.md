@@ -386,9 +386,10 @@ tools+: ["@agents", web_search] # Added all @agents category of tools and web_se
 
 ### Permissions
 
-When enabled, tools can be run directly without any user
-approval. They also do not have any kind of sandboxing. However you
-can change this with `tool-permissions`:
+Enabled tools are available to the model, but unmatched permission rules ask
+for approval by default (`ellm-default-tool-permission`).  Tools do not have
+any kind of sandboxing.  Profiles can provide permission defaults, and you can
+override them for a buffer with `tool-permissions`:
 
 ```markdown
 ---
