@@ -166,7 +166,7 @@ an optional list of model candidates used for frontmatter completion."
 
 (cl-defstruct (ellm-acp-rendered-tool (:constructor ellm-acp--make-rendered-tool))
   "Marker state for one rendered ACP tool call/result pair."
-  id call-title header-params result-title result-summary
+  id kind call-title header-params result-title result-summary
   call-beg params-beg params-end result-beg result-body-beg result-end)
 
 (cl-defstruct (ellm-acp-request (:constructor ellm-acp--make-request))
@@ -2123,6 +2123,8 @@ When CONNECTION is non-nil, remember marker ranges for incremental updates."
         (unless (ellm-acp-rendered-tool-call-title state)
           (setf (ellm-acp-rendered-tool-call-title state)
                 (plist-get update :title)))
+        (when-let* ((kind (plist-get update :kind)))
+          (setf (ellm-acp-rendered-tool-kind state) kind))
         (when (plist-member update :rawInput)
           (setf (ellm-acp-rendered-tool-header-params state)
                 header-params))
@@ -2658,13 +2660,49 @@ If the matched turn has nested child turns, delete those children too."
        (equal (ellm-acp--method-name (plist-get message :method))
               "session/request_permission")))
 
-(defun ellm-acp--normalized-permission (tool-call options)
+(defun ellm-acp--permission-tool-kind (connection tool-call)
+  "Return ACP TOOL-CALL's advertised kind from CONNECTION, if available."
+  (or (plist-get tool-call :kind)
+      (when-let* ((id (plist-get tool-call :toolCallId))
+                  (state (ellm-acp--tool-state connection id)))
+        (ellm-acp-rendered-tool-kind state))))
+
+(defun ellm-acp--permission-policy (request connection tool-call)
+  "Return the current policy for ACP TOOL-CALL advertised by CONNECTION.
+ACP kinds are agent-provided display categories rather than definitive tool
+identities, so an unavailable kind falls back to `default'.  Parse the live
+frontmatter for each permission request so edits take effect during a session."
+  (let ((kind (ellm-acp--permission-tool-kind connection tool-call))
+        (frontmatter
+         (ellm-acp-call-with-buffer connection #'ellm--parse-frontmatter)))
+    (ellm--tool-permission-policy-for-keys
+     (or frontmatter (ellm-request-frontmatter request))
+     (when kind
+       (list (format "@acp/%s" kind))))))
+
+(defun ellm-acp--permission-automatic-outcome (policy options)
+  "Return an automatic core outcome for ACP POLICY and OPTIONS, or nil.
+Only one-shot ACP choices are selected: persistent agent-side permission
+choices would prevent later frontmatter changes from taking effect."
+  (when-let* ((kind (pcase policy
+                      ('allow "allow_once")
+                      ('deny "reject_once")))
+              (option (cl-find kind options :key (lambda (item)
+                                                   (plist-get item :kind))
+                               :test #'equal)))
+    `(:status selected :value ,(plist-get option :optionId))))
+
+(defun ellm-acp--normalized-permission (request connection tool-call options)
   "Return core permission data normalized from ACP TOOL-CALL and OPTIONS."
-  (list :backend 'acp :tool-call tool-call
-        :options (mapcar (lambda (option)
-                           (let ((copy (copy-sequence option)))
-                             (plist-put copy :id (plist-get option :optionId))))
-                         options)))
+  (let ((policy (ellm-acp--permission-policy request connection tool-call)))
+    (list :backend 'acp :tool-call tool-call
+          :options (mapcar (lambda (option)
+                             (let ((copy (copy-sequence option)))
+                               (plist-put copy :id (plist-get option :optionId))))
+                           options)
+          :automatic-outcome
+          (lambda ()
+            (ellm-acp--permission-automatic-outcome policy options)))))
 
 (defun ellm-acp--permission-outcome (option-id)
   "Return the ACP permission outcome for OPTION-ID."
@@ -2679,8 +2717,7 @@ If the matched turn has nested child turns, delete those children too."
          (tool-call (plist-get params :toolCall))
          (options (plist-get params :options))
          (buffer (ellm-acp--connection-buffer connection))
-         (backend-request (ellm-acp--connection-current-request connection))
-         (permission (ellm-acp--normalized-permission tool-call options)))
+         (backend-request (ellm-acp--connection-current-request connection)))
     (if (not (buffer-live-p buffer))
         (jsonrpc-connection-send connection :id id
                                  :result (ellm-acp--permission-outcome nil))
@@ -2688,7 +2725,8 @@ If the matched turn has nested child turns, delete those children too."
         (if-let* ((request ellm--active-request)
                   ((eq (ellm-request-backend request) backend-request)))
             (ellm--request-permission
-             request permission
+             request
+             (ellm-acp--normalized-permission request connection tool-call options)
              (lambda (option-id)
                (when (jsonrpc-running-p connection)
                  (jsonrpc-connection-send

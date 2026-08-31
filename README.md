@@ -399,6 +399,33 @@ tool-permissions:
 ---
 ```
 
+ACP agents own their tools, so their tool names are not available to
+ellm.  When an ACP agent asks for permission, ellm applies `default`
+to the offered one-shot allow/reject choices; `ask` retains the
+agent's permission prompt.  It never automatically selects an ACP
+“always” choice, so frontmatter changes continue to affect later
+requests.
+
+ACP agents may advertise a broad tool kind.  You can use it as a
+best-effort selector, for example:
+
+```markdown
+---
+tool-permissions:
+  default: ask
+  "@acp/read": allow
+  "@acp/search": allow
+  "@acp/edit": ask
+  "@acp/execute": deny
+---
+```
+
+These advertised kinds (`read`, `edit`, `delete`, `move`, `search`,
+`execute`, `think`, `fetch`, and `other`) are not definitive tool
+identities: they are optional agent-provided categories and may be
+absent or inaccurate.  When no kind is available, ACP permission
+handling falls back to `default`.
+
 ### Defining/replacing tools
 
 There is a public API to define tools, `ellm-deftools`. Here is an

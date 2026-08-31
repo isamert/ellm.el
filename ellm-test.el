@@ -5654,6 +5654,7 @@
       (should (member "default" keys))
       (should (member "edit" keys))
       (should (member "\"@files\"" keys))
+      (should (member "\"@acp/execute\"" keys))
       (should (member "\"@files\""
                       (nth 2 (ellm-test--frontmatter-capf-at-marker
                               "---\ntool-permissions:\n  \"@fi|\n---\n")))))
@@ -9059,6 +9060,28 @@ The parent provider remains buffer-local fallback only when the profile omits on
       (ellm--cancel-pending-user-prompt)
       (should-not decision)
       (should (equal events '(cancelled before))))))
+
+(ert-deftest ellm-test-acp-permission-policy ()
+  "ACP permissions use advertised kinds and only automate one-shot choices."
+  (with-temp-buffer
+    (ellm-mode)
+    (let ((connection (ellm-acp-connection :name "test" :buffer (current-buffer)))
+          (request (ellm--make-request
+                    :frontmatter '((tool-permissions .
+                                     ((default . "allow")
+                                      ("@acp/execute" . "deny")))))))
+      (should (eq (ellm-acp--permission-policy
+                   request connection '(:kind "execute"))
+                  'deny))
+      (should (eq (ellm-acp--permission-policy request connection '()) 'allow))
+      (should (equal
+               (ellm-acp--permission-automatic-outcome
+                'allow '((:optionId "once" :kind "allow_once")
+                         (:optionId "always" :kind "allow_always")))
+               '(:status selected :value "once")))
+      (should-not
+       (ellm-acp--permission-automatic-outcome
+        'allow '((:optionId "always" :kind "allow_always")))))))
 
 (ert-deftest ellm-test-acp-permission-uses-core-request-and-hooks ()
   "ACP permission requests defer their reply until core input resolves."

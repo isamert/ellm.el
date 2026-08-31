@@ -4777,24 +4777,16 @@ keep protocol-specific mutable state there, but lifecycle state lives here."
        :type marker
        :documentation "Insertion-type marker at the end of the rendered stream."))
 
-(defun ellm--tool-permission-policy (frontmatter tool)
-  "Return the permission policy for TOOL in FRONTMATTER.
-The `tool-permissions' map accepts `allow', `ask', and `deny' values under
-`default', exact tool names, or `@CATEGORY' selectors.  Exact tool names take
-precedence over category selectors, which take precedence over `default'."
+(defun ellm--tool-permission-policy-for-keys (frontmatter keys)
+  "Return the permission policy in FRONTMATTER for the first matching KEYS.
+KEYS are ordered from most to least specific and are followed by `default'."
   (let* ((rules (alist-get 'tool-permissions frontmatter))
-         (name (ellm-tool-name tool))
-         (category (concat "@" (or (ellm-tool-category tool) "")))
          (entry (and rules
-                     (or (cl-find name rules :key (lambda (rule)
-                                                    (format "%s" (car rule)))
-                                  :test #'equal)
-                         (cl-find category rules :key (lambda (rule)
-                                                        (format "%s" (car rule)))
-                                  :test #'equal)
-                         (cl-find "default" rules :key (lambda (rule)
-                                                         (format "%s" (car rule)))
-                                  :test #'equal))))
+                     (cl-loop for key in (append keys '("default"))
+                              thereis (cl-find key rules
+                                               :key (lambda (rule)
+                                                      (format "%s" (car rule)))
+                                               :test #'equal))))
          (value (if entry (format "%s" (cdr entry)) "allow")))
     (unless (or (null rules) (and (listp rules) (cl-every #'consp rules)))
       (user-error "ellm: Tool-permissions must be a map"))
@@ -4804,6 +4796,16 @@ precedence over category selectors, which take precedence over `default'."
       ("deny" 'deny)
       (_ (user-error "ellm: Invalid tool permission policy for `%s': %s"
                      (if entry (car entry) "default") value)))))
+
+(defun ellm--tool-permission-policy (frontmatter tool)
+  "Return the permission policy for TOOL in FRONTMATTER.
+The `tool-permissions' map accepts `allow', `ask', and `deny' values under
+`default', exact tool names, or `@CATEGORY' selectors.  Exact tool names take
+precedence over category selectors, which take precedence over `default'."
+  (ellm--tool-permission-policy-for-keys
+   frontmatter
+   (list (ellm-tool-name tool)
+         (concat "@" (or (ellm-tool-category tool) "")))))
 
 (defun ellm--format-tool-permission-arguments (args)
   "Return a bounded single-line representation of local tool ARGS."
@@ -5864,7 +5866,7 @@ Return non-nil when delivery succeeds."
      :desc "Exclude tools from the inherited `tools:' selection."
      :items ellm--capf-tool-candidates)
     ("tool-permissions" :ann "map"
-     :desc "Local tool permission policies by default, tool name, or @CATEGORY."
+     :desc "Permission policies by default, local tool name/category, or advertised ACP kind."
      :children ellm--capf-tool-permission-entries)
     ("mcp"         :ann "list|true"
      :desc "MCP servers enabled for this buffer; true means all, names come from `ellm-mcp-servers', and `@CATEGORY' expands categories."
@@ -6141,7 +6143,14 @@ distinct `category' slot of `ellm-tool' entries."
                                  category)
                    :values '("allow" "ask" "deny")))
            (delete-dups
-            (delq nil (mapcar #'ellm-tool-category ellm-tools-list))))))
+            (delq nil (mapcar #'ellm-tool-category ellm-tools-list))))
+   (mapcar (lambda (kind)
+             (list (format "\"@acp/%s\"" kind) :ann "allow|ask|deny"
+                   :desc (format "Policy for ACP tool calls advertised as %s; agent-provided and non-definitive."
+                                 kind)
+                   :values '("allow" "ask" "deny")))
+           '("read" "edit" "delete" "move" "search" "execute" "think"
+             "fetch" "other"))))
 
 (defun ellm--capf-frontmatter-provider-name ()
   "Return `provider:' from frontmatter using a cheap line scan.
