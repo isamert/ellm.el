@@ -1480,23 +1480,29 @@
   (let ((ellm-fold-tool-calls nil))
     (with-temp-buffer
       (insert ">-| assistant\n"
+              "+-------+-------+\n"
               "| Name | Value |\n"
               "| --- | --- |\n"
               "| prose | table |\n"
+              "+-------+-------+\n"
               "```text\n"
               "| code | table |\n"
+              "+------+-------+\n"
               "```\n"
               ">>-| tool-result | Shell\n"
               "| raw | table |\n"
+              "+-----+-------+\n"
               ">-| user\n"
               "| next | table |\n")
       (ellm-mode)
       (font-lock-ensure)
-      (dolist (text '("| Name | Value |" "| --- | --- |"
-                      "| prose | table |" "| next | table |"))
+      (dolist (text '("+-------+-------+" "| Name | Value |"
+                      "| --- | --- |" "| prose | table |"
+                      "| next | table |"))
         (should (ellm-test--face-includes-p
                  (ellm-test--face-at-text text) 'ellm-table)))
-      (dolist (text '("| code | table |" "| raw | table |"))
+      (dolist (text '("| code | table |" "+------+-------+"
+                      "| raw | table |" "+-----+-------+"))
         (should-not (ellm-test--face-includes-p
                      (ellm-test--face-at-text text) 'ellm-table))))))
 

@@ -1671,8 +1671,9 @@ Matches outside Markdown prose regions are ignored."
     (,(ellm--make-markdown-matcher "^###### .*$") (0 'ellm-heading-6 t))
     ;; Blockquotes
     (,(ellm--make-markdown-matcher "^> .*$") (0 'ellm-blockquote t))
-    ;; Conventional pipe-table rows
+    ;; Conventional pipe-table rows and table.el horizontal borders
     (,(ellm--make-markdown-matcher "^[ \t]*|.*|[ \t]*$") (0 'ellm-table t))
+    (,(ellm--make-markdown-matcher "^[ \t]*+[-+]+[ \t]*$") (0 'ellm-table t))
     ;; List markers
     (,(ellm--make-markdown-matcher "^\\s-*\\([-*]\\|[0-9]+\\.\\) ") (1 'ellm-list-marker t))
     ;; Turn delimiters are structural and deliberately run last.  This is a
