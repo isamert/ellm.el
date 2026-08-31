@@ -687,9 +687,9 @@ mcp: [filesystem]
 
 ellm automatically starts and waits for the MCP server to become
 online, then adds each MCP tool to current sessions tool list. Tools
-are named `mcp-SERVER/TOOL`, which keeps tool calls from different
-servers distinct. (ACP backend does not require mcp.el, it directly
-takes the list of MCPs)
+are named `mcp_SERVER_TOOL` (hyphens and slashes become underscores),
+which keeps tool calls from different servers distinct. (ACP backend
+does not require mcp.el, it directly takes the list of MCPs)
 
 `mcp: true` enables every configured server.  `@CATEGORY` selects a
 category, and inline server maps are also supported by frontmatter:
@@ -731,8 +731,8 @@ tools: ["@mcp-filesystem"]
 
 # You can also selectively enable them:
 tools:
-  - mcp-filesystem/read_file
-  - mcp-github/create_issue
+  - mcp_filesystem_read_file
+  - mcp_github_create_issue
 ---
 ```
 

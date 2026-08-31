@@ -49,10 +49,16 @@ symbols.  Types may occur in nested `:items' and `:properties' schemas too."
     (vconcat (mapcar #'ellm-mcp--normalize-schema schema)))
    (t schema)))
 
+(defun ellm-mcp--tool-name (category name)
+  "Return an exposed MCP tool name from CATEGORY and NAME.
+MCP tool names use underscores instead of hyphens and slashes so providers
+that require `^[a-zA-Z0-9_\\.-]+$' names can accept them."
+  (replace-regexp-in-string "[-/]" "_" (format "%s_%s" category name)))
+
 (defun ellm-mcp--make-tool (tool)
   "Convert mcp.el TOOL plist to an `ellm-tool'."
   (let* ((category (or (plist-get tool :category) "mcp"))
-         (name (format "%s/%s" category (plist-get tool :name))))
+         (name (ellm-mcp--tool-name category (plist-get tool :name))))
     (ellm-make-tool
      :name name
      :description (plist-get tool :description)

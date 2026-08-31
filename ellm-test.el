@@ -8652,6 +8652,11 @@ The parent provider remains buffer-local fallback only when the profile omits on
         (kill-buffer loaded-buffer))
       (delete-file agent-file))))
 
+(ert-deftest ellm-test-mcp-tool-name-normalization ()
+  "MCP exposed tool names replace hyphens and slashes with underscores."
+  (should (equal (ellm-mcp--tool-name "mcp-filesystem" "read/file")
+                 "mcp_filesystem_read_file")))
+
 (ert-deftest ellm-test-mcp-tool-schema-normalization ()
   "MCP JSON Schema types should work with llm.el tool serialization."
   (let* ((args '((:name "files" :type "array"
