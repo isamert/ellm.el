@@ -7698,7 +7698,8 @@ The parent provider remains buffer-local fallback only when the profile omits on
 
 (ert-deftest ellm-test-acp-tool-call-raw-input-params ()
   "ACP rawInput values should render as nested tool-param turns."
-  (let ((ellm-acp-tool-detail-limit nil))
+  (let ((ellm-acp-tool-detail-level 'full)
+        (ellm-acp-tool-detail-limit nil))
     (with-temp-buffer
       (ellm-mode)
       (ellm-acp--insert-tool-call
@@ -7716,7 +7717,8 @@ The parent provider remains buffer-local fallback only when the profile omits on
 
 (ert-deftest ellm-test-acp-tool-call-raw-input-list-of-objects ()
   "ACP rawInput arrays of objects should render without plist confusion."
-  (let ((ellm-acp-tool-detail-limit nil)
+  (let ((ellm-acp-tool-detail-level 'full)
+        (ellm-acp-tool-detail-limit nil)
         (connection (ellm-acp-connection
                       :name "test"
                       :process (start-process "ellm-acp-test-sleep" nil "sleep" "10")
@@ -7992,7 +7994,8 @@ The parent provider remains buffer-local fallback only when the profile omits on
 
 (ert-deftest ellm-test-acp-tool-updates-fill-params-and-output ()
   "ACP tool updates should enrich calls with params and render output text."
-  (let ((ellm-acp-tool-detail-limit nil)
+  (let ((ellm-acp-tool-detail-level 'full)
+        (ellm-acp-tool-detail-limit nil)
         (connection (ellm-acp-connection
                       :name "test"
                       :process (start-process "ellm-acp-test-sleep" nil "sleep" "10")
@@ -8038,9 +8041,9 @@ The parent provider remains buffer-local fallback only when the profile omits on
                       ">>-| tool-result | read filePath=/tmp/ellm :id call_1 :status completed"
                       contents))
             (should (string-match-p "human readable output" contents))
-            (should-not (string-match-p "<path>/tmp/ellm</path>" contents))
-            (should-not (string-match-p "<type>directory</type>" contents))
-            (should-not (string-match-p "Raw output:" contents))
+            (should (string-match-p "<path>/tmp/ellm</path>" contents))
+            (should (string-match-p "<type>directory</type>" contents))
+            (should (string-match-p "Raw output:" contents))
             (should-not (string-match-p "Status: completed" contents))
             (should (= 1 (cl-count-if
                           (lambda (turn)
@@ -8054,7 +8057,8 @@ The parent provider remains buffer-local fallback only when the profile omits on
 
 (ert-deftest ellm-test-acp-late-tool-updates-preserve-folding ()
   "Late ACP tool updates should remain hidden in already folded turns."
-  (let ((ellm-acp-tool-detail-limit nil)
+  (let ((ellm-acp-tool-detail-level 'full)
+        (ellm-acp-tool-detail-limit nil)
         (connection (ellm-acp-connection
                       :name "test"
                       :process (start-process "ellm-acp-test-sleep" nil "sleep" "10")
@@ -8103,7 +8107,8 @@ The parent provider remains buffer-local fallback only when the profile omits on
 
 (ert-deftest ellm-test-acp-late-tool-result-update-keeps-following-turn-separated ()
   "Late ACP result updates should not concatenate with a following turn."
-  (let ((ellm-acp-tool-detail-limit nil)
+  (let ((ellm-acp-tool-detail-level 'full)
+        (ellm-acp-tool-detail-limit nil)
         (connection (ellm-acp-connection
                      :name "test"
                      :process (start-process "ellm-acp-test-sleep" nil "sleep" "10")
@@ -8146,7 +8151,8 @@ The parent provider remains buffer-local fallback only when the profile omits on
   "ACP turns should fold on first content and preserve manual expansion."
   (with-temp-buffer
     (ellm-mode)
-    (let ((ellm-acp-tool-detail-limit nil)
+    (let ((ellm-acp-tool-detail-level 'full)
+          (ellm-acp-tool-detail-limit nil)
           (connection (ellm-acp-connection
                        :name "test" :process nil :buffer (current-buffer))))
       (ellm-acp--handle-session-update
@@ -8203,7 +8209,8 @@ The parent provider remains buffer-local fallback only when the profile omits on
   "Folding a final summary result should not hide a later turn."
   (with-temp-buffer
     (ellm-mode)
-    (let ((ellm-acp-tool-detail-limit 'summary)
+    (let ((ellm-acp-tool-detail-level 'summary)
+          (ellm-acp-tool-detail-limit nil)
           (connection (ellm-acp-connection
                        :name "test" :process nil :buffer (current-buffer))))
       (ellm-acp--handle-session-update
@@ -8287,7 +8294,7 @@ The parent provider remains buffer-local fallback only when the profile omits on
 
 (ert-deftest ellm-test-acp-result-heading-retains-earlier-input ()
   "ACP result headings should reuse params omitted from completion updates."
-  (let ((ellm-acp-tool-detail-limit 0))
+  (let ((ellm-acp-tool-detail-level 'headings))
     (with-temp-buffer
       (ellm-mode)
       (let ((connection (ellm-acp-connection
@@ -8314,7 +8321,8 @@ The parent provider remains buffer-local fallback only when the profile omits on
 
 (ert-deftest ellm-test-acp-tool-text-escapes-turn-delimiters ()
   "ACP-rendered tool params/results should not become parsed turns."
-  (let ((ellm-acp-tool-detail-limit nil)
+  (let ((ellm-acp-tool-detail-level 'full)
+        (ellm-acp-tool-detail-limit nil)
         (connection (ellm-acp-connection
                       :name "test"
                       :process (start-process "ellm-acp-test-sleep" nil "sleep" "10")
@@ -8373,7 +8381,7 @@ The parent provider remains buffer-local fallback only when the profile omits on
 
 (ert-deftest ellm-test-acp-heading-only-tool-rendering ()
   "ACP compact rendering should keep parameter-aware call/result headings."
-  (let ((ellm-acp-tool-detail-limit 0)
+  (let ((ellm-acp-tool-detail-level 'headings)
         (connection (ellm-acp-connection
                      :name "test"
                      :process (start-process "ellm-acp-test-sleep" nil "sleep" "10")
@@ -8437,7 +8445,8 @@ The parent provider remains buffer-local fallback only when the profile omits on
 
 (ert-deftest ellm-test-acp-tool-detail-limit-truncates-bodies ()
   "ACP tool detail limits should truncate params and result bodies."
-  (let ((ellm-acp-tool-detail-limit 5)
+  (let ((ellm-acp-tool-detail-level 'full)
+        (ellm-acp-tool-detail-limit 5)
         (connection (ellm-acp-connection
                      :name "test"
                      :process (start-process "ellm-acp-test-sleep" nil "sleep" "10")
@@ -8459,19 +8468,28 @@ The parent provider remains buffer-local fallback only when the profile omits on
                                   :content ((:type "content"
                                              :content (:type "text"
                                                        :text "abcdefghijklmnop"))))))
+          (ellm-acp--handle-session-update
+           connection '(:update (:sessionUpdate "tool_call_update"
+                                  :toolCallId "call_1"
+                                  :status "completed")))
           (let ((contents (buffer-string)))
             (should (string-match-p "command=123456789" contents))
-            (should (string-match-p ">>>-| tool-param | command\n12345" contents))
-            (should (string-match-p "abcde" contents))
-            (should (string-match-p "\[\.\.\. truncated [0-9]+ chars\]" contents))
+            (should (string-match-p ">>>-| tool-param | command\n123" contents))
+            (should (string-match-p "89\n>>-| tool-result" contents))
+            (should (string-match-p "\nabc" contents))
+            (should (string-match-p "op\n" contents))
+            (should (string-match-p "output truncated: [0-9]+ characters omitted" contents))
+            (should (string-match-p "output-id=\"tool-output-" contents))
+            (should (= 2 (length (ellm--tool-output-ids))))
             (should-not (string-match-p "\n123456789\n" contents))
-            (should-not (string-match-p "fghijklmnop" contents))))
+            (should-not (string-match-p "defghijklmn" contents))))
       (when (jsonrpc-running-p connection)
         (jsonrpc-shutdown connection)))))
 
 (ert-deftest ellm-test-acp-tool-summary-renders-human-facing-details ()
   "ACP tool summaries should omit protocol details and retain useful text."
-  (let ((ellm-acp-tool-detail-limit 'summary)
+  (let ((ellm-acp-tool-detail-level 'summary)
+        (ellm-acp-tool-detail-limit nil)
         (connection (ellm-acp-connection
                      :name "test"
                      :process (start-process "ellm-acp-test-sleep" nil "sleep" "10")
@@ -8510,25 +8528,89 @@ The parent provider remains buffer-local fallback only when the profile omits on
             (should (string-match-p
                      "^>>-| tool-call | bash command=initial raw input :id call_1 :kind execute$"
                      contents))
-            (should (string-match-p "^git status --short$" contents))
             (should (string-match-p
                      "^>>-| tool-result | git status --short command=updated raw input :id call_1 :status completed$"
                      contents))
             (should (string-match-p "^2 modified files$" contents))
+            (should (string-match-p "^Diff: /tmp/project/a$" contents))
             (should-not (string-match-p "tool-param" contents))
             (should (string-match-p "command=initial raw input" contents))
             (should (string-match-p "command=updated raw input" contents))
             (should-not (string-match-p "first raw output" contents))
             (should-not (string-match-p "raw output detail" contents))
             (should-not (string-match-p "Locations:" contents))
-            (should-not (string-match-p "old detail" contents))
-            (should-not (string-match-p "new detail" contents))))
+            (should (string-match-p "old detail" contents))
+            (should (string-match-p "new detail" contents))))
       (when (jsonrpc-running-p connection)
         (jsonrpc-shutdown connection)))))
 
+(ert-deftest ellm-test-acp-clipped-tool-titles-are-preserved ()
+  "Every ACP detail level should preserve a title clipped by its heading."
+  (dolist (level '(headings summary full))
+    (with-temp-buffer
+      (ellm-mode)
+      (let* ((ellm-acp-tool-detail-level level)
+             (ellm-acp-tool-detail-limit nil)
+             (ellm-tool-header-summary-width 24)
+             (title "`npx prettier --check first.ts second.ts && yarn build`")
+             (connection (ellm-acp-connection
+                          :name "test" :process nil
+                          :buffer (current-buffer))))
+        (ellm-acp--handle-session-update
+         connection
+         `(:update (:sessionUpdate "tool_call"
+                    :toolCallId "call_1"
+                    :title ,title
+                    :kind "execute"
+                    :rawInput (:command "npx prettier --check first.ts second.ts && yarn build"))))
+        (ellm-acp--handle-session-update
+         connection
+         '(:update (:sessionUpdate "tool_call_update"
+                    :toolCallId "call_1"
+                    :status "completed")))
+        (let ((contents (buffer-string))
+              (regexp (regexp-quote title))
+              (start 0)
+              (count 0))
+          (while (string-match regexp contents start)
+            (setq count (1+ count)
+                  start (match-end 0)))
+          (should (= count 2))
+          (should-not (string-match-p "Full title:" contents))
+          (when (eq level 'headings)
+            (should-not (string-match-p "tool-param" contents))))))))
+
+(ert-deftest ellm-test-acp-tool-summary-generically-renders-raw-output ()
+  "ACP summaries should not assign semantics to opaque raw output keys."
+  (with-temp-buffer
+    (ellm-mode)
+    (let ((ellm-acp-tool-detail-level 'summary)
+          (ellm-acp-tool-detail-limit nil)
+          (connection (ellm-acp-connection
+                       :name "test" :process nil
+                       :buffer (current-buffer))))
+      (ellm-acp--handle-session-update
+       connection
+       '(:update (:sessionUpdate "tool_call"
+                  :toolCallId "call_1"
+                  :title "build")))
+      (ellm-acp--handle-session-update
+       connection
+       '(:update (:sessionUpdate "tool_call_update"
+                  :toolCallId "call_1"
+                  :status "completed"
+                  :locations [(:path "/tmp/project")]
+                  :rawOutput (:exitCode 0 :stdout "built\n" :stderr ""))))
+      (let ((contents (buffer-string)))
+        (should (string-match-p "Locations:\n- /tmp/project" contents))
+        (should (string-match-p "Raw output:" contents))
+        (should (string-match-p (regexp-quote "\"exitCode\":0") contents))
+        (should (string-match-p (regexp-quote "\"stdout\":\"built\\n\"") contents))
+        (should (string-match-p (regexp-quote "\"stderr\":\"\"") contents))))))
+
 (ert-deftest ellm-test-acp-heading-only-does-not-affect-llm-backend ()
   "The ACP compact rendering option should not affect the llm.el backend."
-  (let ((ellm-acp-tool-detail-limit 0))
+  (let ((ellm-acp-tool-detail-level 'headings))
     (with-temp-buffer
       (ellm-mode)
       (ellm-llm--render-tool-uses
@@ -8542,7 +8624,8 @@ The parent provider remains buffer-local fallback only when the profile omits on
 
 (ert-deftest ellm-test-acp-tool-live-updates-do-not-parse-buffer ()
   "Live ACP tool updates should use markers instead of reparsing the buffer."
-  (let ((ellm-acp-tool-detail-limit nil)
+  (let ((ellm-acp-tool-detail-level 'full)
+        (ellm-acp-tool-detail-limit nil)
         (connection (ellm-acp-connection
                       :name "test"
                       :process (start-process "ellm-acp-test-sleep" nil "sleep" "10")
@@ -9314,7 +9397,8 @@ The parent provider remains buffer-local fallback only when the profile omits on
 
 (ert-deftest ellm-test-acp-update-rendering-metadata ()
   "ACP updates should preserve message ids, plans, usage, and tool metadata."
-  (let ((ellm-acp-tool-detail-limit nil)
+  (let ((ellm-acp-tool-detail-level 'full)
+        (ellm-acp-tool-detail-limit nil)
         (connection (ellm-acp-connection
                       :name "test"
                       :process (start-process "ellm-acp-test-sleep" nil "sleep" "10")
@@ -9383,7 +9467,8 @@ The parent provider remains buffer-local fallback only when the profile omits on
                                                    nil nil #'equal)
                                         "call_1")))
                           turns)))
-            (should-not (string-match-p "Raw output" contents))
+            (should (string-match-p "Raw output" contents))
+            (should (string-match-p (regexp-quote "\"ok\":true") contents))
             (should (string-match-p "Old:" contents))))
       (when (jsonrpc-running-p connection)
         (jsonrpc-shutdown connection)))))
