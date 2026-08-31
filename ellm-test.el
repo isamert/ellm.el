@@ -6463,6 +6463,23 @@ The parent provider remains buffer-local fallback only when the profile omits on
     (goto-char (point-max))
     (should-not (key-binding (kbd "<tab>")))))
 
+(ert-deftest ellm-test-tab-toggles-prompt-tag-from-closing-tag ()
+  "TAB on a closing prompt tag should toggle its matching tag's body."
+  (with-temp-buffer
+    (insert ">-| user\n"
+            "<tag>\n"
+            "Body\n"
+            "</tag>\n")
+    (ellm-mode)
+    (goto-char (point-min))
+    (search-forward "</tag>")
+    (beginning-of-line)
+    (should (eq (key-binding (kbd "<tab>")) #'ellm-toggle-tag))
+    (call-interactively (key-binding (kbd "<tab>")))
+    (should (ellm-test--invisible-at-text "Body"))
+    (call-interactively (key-binding (kbd "<tab>")))
+    (should-not (ellm-test--invisible-at-text "Body"))))
+
 (ert-deftest ellm-test-markdown-heading-fold-stops-at-enclosing-tag ()
   "TAB should not fold content following a heading's enclosing prompt tag."
   (with-temp-buffer

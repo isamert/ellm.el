@@ -6817,46 +6817,70 @@ The tool call and result must have matching `id' attributes."
 
 ;;;; Tag navigation and folding
 
-(defun ellm--opening-tag-at-point-p ()
-  "Return non-nil when point is on a prompt opening-tag line."
+(defun ellm--tag-at-point-p ()
+  "Return non-nil when point is on a complete-line prompt tag."
   (save-excursion
     (forward-line 0)
-    (and (looking-at ellm-tag-line-regexp)
-         (string-empty-p (match-string 1)))))
+    (looking-at-p ellm-tag-line-regexp)))
+
+(defun ellm--matching-opening-tag-pos (name)
+  "Return the matching opening tag position for closing tag NAME at point.
+Only tags in the current turn are considered."
+  (when-let* ((bounds (ellm--turn-body-bounds-at (point))))
+    (let ((limit (car bounds))
+          (depth 1)
+          opening)
+      (while (and (> depth 0)
+                  (re-search-backward ellm-tag-line-regexp limit t))
+        (when (equal name (match-string-no-properties 2))
+          (if (string-empty-p (match-string 1))
+              (progn
+                (setq depth (1- depth))
+                (when (= depth 0)
+                  (setq opening (match-beginning 0))))
+            (setq depth (1+ depth)))))
+      opening)))
 
 (defun ellm--tag-fold-bounds-at-point ()
-  "Return fold bounds for the opening prompt tag on the current line.
+  "Return fold bounds for the prompt tag on the current line.
 The result is (BODY-BEG . BODY-END), and never crosses the current turn."
   (save-excursion
     (forward-line 0)
-    (when (ellm--opening-tag-at-point-p)
-      (looking-at ellm-tag-line-regexp)
-      (let* ((name (match-string-no-properties 2))
-             (body-beg (line-end-position))
-             (turn-bounds (ellm--turn-body-bounds-at (point)))
-             (limit (and turn-bounds (cdr turn-bounds)))
-             (depth 1)
-             body-end)
-        (when limit
-          (forward-line 1)
-          (while (and (> depth 0)
-                      (re-search-forward ellm-tag-line-regexp limit t))
-            (when (equal name (match-string-no-properties 2))
-              (if (string-empty-p (match-string 1))
-                  (setq depth (1+ depth))
-                (setq depth (1- depth))
-                (when (= depth 0)
-                  (setq body-end (match-beginning 0))))))
-          (and body-end (< body-beg body-end)
-               (cons body-beg body-end)))))))
+    (when (looking-at ellm-tag-line-regexp)
+      (let ((opening-pos
+             (if (string-empty-p (match-string 1))
+                 (point)
+               (ellm--matching-opening-tag-pos
+                (match-string-no-properties 2)))))
+        (when opening-pos
+          (goto-char opening-pos)
+          (looking-at ellm-tag-line-regexp)
+          (let* ((name (match-string-no-properties 2))
+                 (body-beg (line-end-position))
+                 (turn-bounds (ellm--turn-body-bounds-at (point)))
+                 (limit (and turn-bounds (cdr turn-bounds)))
+                 (depth 1)
+                 body-end)
+            (when limit
+              (forward-line 1)
+              (while (and (> depth 0)
+                          (re-search-forward ellm-tag-line-regexp limit t))
+                (when (equal name (match-string-no-properties 2))
+                  (if (string-empty-p (match-string 1))
+                      (setq depth (1+ depth))
+                    (setq depth (1- depth))
+                    (when (= depth 0)
+                      (setq body-end (match-beginning 0))))))
+              (and body-end (< body-beg body-end)
+                   (cons body-beg body-end)))))))))
 
 (defun ellm-toggle-tag ()
-  "Toggle folding of the prompt tag beginning on the current line."
+  "Toggle folding of the prompt tag on the current line."
   (interactive nil ellm-mode)
   (if-let* ((bounds (ellm--tag-fold-bounds-at-point)))
       (outline-flag-region (car bounds) (cdr bounds)
                            (not (invisible-p (car bounds))))
-    (user-error "No complete prompt tag starts on this line")))
+    (user-error "No complete prompt tag is on this line")))
 
 (defun ellm--tag-fold-regions ()
   "Return fold regions for all complete prompt tags in the buffer."
@@ -9169,7 +9193,7 @@ conversation state only when such updates were skipped."
                   :filter (lambda (command)
                             (cond
                              ((ellm--heading-at-point-p) command)
-                             ((ellm--opening-tag-at-point-p) #'ellm-toggle-tag)))))
+                             ((ellm--tag-at-point-p) #'ellm-toggle-tag)))))
     (define-key map (kbd "<backtab>") #'ellm-outline-cycle-buffer)
     (define-key map (kbd "C-c C-c")   #'ellm-send)
     (define-key map (kbd "C-c C-e")   #'ellm-compose)
