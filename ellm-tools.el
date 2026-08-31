@@ -341,18 +341,6 @@ children of children.  Without it, offer only direct children."
                          ellm-tools-maximum-timeout))
     value))
 
-;;;; Retained tool output
-
-(defun ellm-tools--truncation-marker (kind content &optional detail)
-  "Retain truncated CONTENT of KIND and return a concise marker.
-DETAIL describes the displayed preview when it is useful to the model."
-  (if (derived-mode-p 'ellm-mode)
-      (let ((id (ellm-tool-output-store kind content)))
-        (format "\n[... output truncated%s; full output available with output-id=%S ...]"
-                (if detail (concat ": " detail) "") id))
-    (format "\n[... output truncated%s ...]"
-            (if detail (concat ": " detail) ""))))
-
 ;;;; `ellm-deftool' macro
 
 (eval-and-compile
@@ -690,8 +678,6 @@ standard input in the conversation working directory."
          (limit ellm-tools-bash-output-character-limit)
          (full-buffer (generate-new-buffer " *ellm bash output*"))
          (conversation (current-buffer))
-         (head-limit (/ (+ limit 1) 2))
-         (tail-limit (/ limit 2))
          (proc
           (make-process
            :name "ellm-tools-bash"
@@ -699,46 +685,29 @@ standard input in the conversation working directory."
            :connection-type 'pipe
            :noquery t
            :filter
-           (lambda (process chunk)
-             (with-current-buffer full-buffer
-               (insert chunk))
-             (let* ((total (+ (or (process-get process 'ellm-total) 0)
-                              (length chunk)))
-                    (output (concat (or (process-get process 'ellm-output) "")
-                                    chunk)))
-               (process-put process 'ellm-total total)
-               (if (process-get process 'ellm-truncated)
-                   (process-put process 'ellm-output
-                                (substring output (max 0 (- (length output)
-                                                            tail-limit))))
-                 (if (<= total limit)
-                     (process-put process 'ellm-output output)
-                   (process-put process 'ellm-truncated t)
-                   (process-put process 'ellm-head
-                                (substring output 0 head-limit))
-                   (process-put process 'ellm-output
-                                (substring output (- tail-limit)))))))
+           (lambda (_process chunk)
+             (when (buffer-live-p full-buffer)
+               (with-current-buffer full-buffer
+                 (insert chunk))))
            :sentinel
            (lambda (process _event)
-             (with-current-buffer conversation
-               (when (memq (process-status process) '(exit signal))
-                 (let* ((tail (or (process-get process 'ellm-output) ""))
-                        (total (or (process-get process 'ellm-total) 0))
-                        (output
-                         (if (process-get process 'ellm-truncated)
-                             (let ((marker
-                                    (ellm-tools--truncation-marker
-                                     "bash"
-                                     (with-current-buffer full-buffer (buffer-string))
-                                     (format "%d characters omitted; showing beginning and end"
-                                             (- total head-limit tail-limit)))))
-                               (kill-buffer full-buffer)
-                               (concat (process-get process 'ellm-head) marker "\n" tail))
-                           (kill-buffer full-buffer)
-                           tail)))
-                   (funcall callback
-                            (format "Exit code: %d\n%s"
-                                    (process-exit-status process) output)))))))))
+             (when (memq (process-status process) '(exit signal))
+               (if (or (not (buffer-live-p conversation))
+                       (not (buffer-live-p full-buffer)))
+                   (when (buffer-live-p full-buffer)
+                     (kill-buffer full-buffer))
+                 (unwind-protect
+                     (with-current-buffer conversation
+                       (let ((output
+                              (ellm--truncate-tool-output
+                               "bash"
+                               (with-current-buffer full-buffer (buffer-string))
+                               limit)))
+                         (funcall callback
+                                  (format "Exit code: %d\n%s"
+                                          (process-exit-status process) output))))
+                   (when (buffer-live-p full-buffer)
+                     (kill-buffer full-buffer)))))))))
     (lambda ()
       (when (process-live-p proc)
         (kill-process proc))
@@ -842,7 +811,7 @@ standard input in the conversation working directory."
                (if (> total limit) " truncated=true" ""))
        (string-join shown "\n")
        (when (> total limit)
-         (ellm-tools--truncation-marker
+         (ellm--tool-output-truncation-marker
           "git" stdout (format "showing first %d of %d lines" limit total)))
        (unless (string-empty-p (string-trim stderr))
          (format "\n<warnings>\n%s\n</warnings>" (string-trim-right stderr)))
@@ -1012,7 +981,7 @@ Act directly on buffers if you know the name already, without listing."
                (if end-line (format " end-line=%d" end-line) ""))
        (string-join limited-lines "\n")
        (if truncated
-           (ellm-tools--truncation-marker
+           (ellm--tool-output-truncation-marker
             "buffer" content (format "showing first 500 of %d lines" (length lines)))
          "")
        "\n</buffer>"))))
@@ -1479,7 +1448,7 @@ whose documentation contains all QUERY words are included as well."
                  (if (cdr value) " truncated=true" "")
                  (car value)
                  (if (cdr value)
-                     (ellm-tools--truncation-marker
+                     (ellm--tool-output-truncation-marker
                       "elisp-value" (or (plist-get result :value) "nil"))
                    ""))
        (format "<error type=%S>\n%s\n</error>"
@@ -1491,7 +1460,7 @@ whose documentation contains all QUERY words are included as well."
                (if (cdr output) " truncated=true" "")
                (car output)
                (if (cdr output)
-                   (ellm-tools--truncation-marker
+                   (ellm--tool-output-truncation-marker
                     "elisp-output" (or (plist-get result :output) ""))
                  "")))
      "\n</elisp_eval>")))
@@ -3014,7 +2983,7 @@ The return value is a cons of body and whether it was truncated."
         (if output-truncated
             (concat (substring content 0 (min (length content)
                                               ellm-tools-webfetch-character-limit))
-                    (ellm-tools--truncation-marker
+                    (ellm--tool-output-truncation-marker
                      "webfetch" content
                      (format "showing first %d characters"
                              ellm-tools-webfetch-character-limit)))

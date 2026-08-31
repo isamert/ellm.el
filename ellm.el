@@ -3632,6 +3632,38 @@ output buffer."
     (add-hook 'kill-buffer-hook #'ellm--kill-tool-output-buffers t t)
     id))
 
+(defun ellm--tool-output-truncation-marker (kind content &optional detail)
+  "Retain truncated CONTENT of KIND and return a marker containing DETAIL."
+  (if (derived-mode-p 'ellm-mode)
+      (let ((id (ellm-tool-output-store kind content)))
+        (format "\n[... output truncated%s; full output available with output-id=%S ...]"
+                (if detail (concat ": " detail) "") id))
+    (format "\n[... output truncated%s ...]"
+            (if detail (concat ": " detail) ""))))
+
+(defun ellm--truncate-tool-output (kind content limit)
+  "Return CONTENT limited to its beginning and end.
+KIND names retained output when CONTENT exceeds positive integer LIMIT.  Nil
+LIMIT returns CONTENT unchanged.  In an `ellm-mode' buffer, retain the full
+content and include its output identifier in the truncation marker."
+  (cond
+   ((null limit) content)
+   ((not (and (integerp limit) (> limit 0)))
+    (error "Tool output limit must be a positive integer or nil"))
+   ((<= (length content) limit) content)
+   (t
+    (let* ((head-limit (/ (+ limit 1) 2))
+           (tail-limit (/ limit 2))
+           (omitted (- (length content) head-limit tail-limit))
+           (tail (if (zerop tail-limit)
+                     ""
+                   (substring content (- tail-limit))))
+           (marker (ellm--tool-output-truncation-marker
+                    kind content
+                    (format "%d characters omitted; showing beginning and end"
+                            omitted))))
+      (concat (substring content 0 head-limit) marker "\n" tail)))))
+
 (defun ellm-tool-output-buffer (id)
   "Return the current conversation's retained output buffer named by ID."
   (unless (and (stringp id)
