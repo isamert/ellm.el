@@ -4682,6 +4682,9 @@ preserved."
           (font-lock-flush beg (line-end-position)))
         t))))
 
+(defvar-local ellm--tool-session-permissions nil
+  "Local tool names approved for the current conversation session.")
+
 (defun ellm--clear-buffer-keeping-frontmatter ()
   "Clear the conversation, preserving frontmatter and adding an empty user turn."
   (let* ((bounds (ellm--frontmatter-bounds))
@@ -4692,6 +4695,7 @@ preserved."
     (when frontmatter
       (insert frontmatter "\n\n"))
     (ellm-update-todos nil)
+    (setq ellm--tool-session-permissions nil)
     (ellm--insert-turn "user")))
 
 (defun ellm--format-tool-param-value (value)
@@ -4788,9 +4792,6 @@ keep protocol-specific mutable state there, but lifecycle state lives here."
   (generation 0
               :type integer
               :documentation "Buffer request generation used to reject stale events.")
-  (tool-session-permissions nil
-                            :type list
-                            :documentation "Local tool names approved for this request's session.")
   (attempt 0
            :type integer
            :documentation "Monotonic backend-start attempt identifier.")
@@ -4882,6 +4883,18 @@ precedence over category selectors, which take precedence over `default'."
                 (substring text 0 limit) (- (length text) limit))
       text)))
 
+(defun ellm--tool-session-permitted-p (request name)
+  "Return non-nil when REQUEST's buffer approved local tool NAME for its session."
+  (and (buffer-live-p (ellm-request-buffer request))
+       (with-current-buffer (ellm-request-buffer request)
+         (member name ellm--tool-session-permissions))))
+
+(defun ellm--approve-tool-for-session (request name)
+  "Approve local tool NAME for the lifetime of REQUEST's conversation buffer."
+  (when (buffer-live-p (ellm-request-buffer request))
+    (with-current-buffer (ellm-request-buffer request)
+      (cl-pushnew name ellm--tool-session-permissions :test #'equal))))
+
 (defun ellm--authorize-tool-call (request tool args respond)
   "Authorize local TOOL called with ARGS for REQUEST, then call RESPOND.
 RESPOND receives `allow' or `deny'.  An `ask' policy presents run-once,
@@ -4894,7 +4907,7 @@ allow-for-session, and deny choices through the core permission UI."
     (cond
      ((eq policy 'deny) (funcall respond 'deny))
      ((or (eq policy 'allow)
-          (member name (ellm-request-tool-session-permissions request)))
+          (ellm--tool-session-permitted-p request name))
       (funcall respond 'allow))
      (t
       (with-current-buffer (ellm-request-buffer request)
@@ -4911,13 +4924,11 @@ allow-for-session, and deny choices through the core permission UI."
                           (:id "deny" :name "Deny"))
                :automatic-outcome
                (lambda ()
-                 (and (member name (ellm-request-tool-session-permissions request))
+                 (and (ellm--tool-session-permitted-p request name)
                       '(:status selected :value "allow-session"))))
          (lambda (decision)
            (when (equal decision "allow-session")
-             (setf (ellm-request-tool-session-permissions request)
-                   (cons name (delete name
-                                      (ellm-request-tool-session-permissions request)))))
+             (ellm--approve-tool-for-session request name))
            (funcall respond (if (member decision '("allow-once" "allow-session"))
                                 'allow
                               'deny)))))))))

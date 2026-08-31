@@ -1185,8 +1185,10 @@
   (with-temp-buffer
     (ellm-mode)
     (ellm-update-todos '((:content "Old task" :status "in_progress")))
+    (setq ellm--tool-session-permissions '("edit"))
     (ellm--clear-buffer-keeping-frontmatter)
     (should-not (ellm-buffer-state-todos ellm-buffer-state))
+    (should-not ellm--tool-session-permissions)
     (should-not (ellm--header-line-status))))
 
 (ert-deftest ellm-test-tools-webfetch-validates-url-schemes ()
@@ -9144,7 +9146,7 @@ The parent provider remains buffer-local fallback only when the profile omits on
           (ellm--set-active-request nil))))))
 
 (ert-deftest ellm-test-tool-permission-allow-for-session ()
-  "A local allow-for-session decision bypasses later prompts in one request."
+  "A local allow-for-session decision applies to later conversation requests."
   (with-temp-buffer
     (ellm-mode)
     (let* ((tool (ellm-make-tool :name "edit" :category "files"))
@@ -9162,12 +9164,45 @@ The parent provider remains buffer-local fallback only when the profile omits on
             (ellm--resolve-user-prompt ellm--active-user-prompt
                                         '(:status selected :value "allow-session"))
             (should (equal decisions '(allow)))
-            (should (equal (ellm-request-tool-session-permissions request)
-                           '("edit")))
+            (should (equal ellm--tool-session-permissions '("edit")))
             (ellm--authorize-tool-call
              request tool nil (lambda (decision) (push decision decisions)))
+            (let ((later-request
+                   (ellm--make-request
+                    :buffer (current-buffer)
+                    :frontmatter '((tool-permissions . ((edit . "ask")))))))
+              (ellm--authorize-tool-call
+               later-request tool nil (lambda (decision) (push decision decisions))))
             (should-not ellm--active-user-prompt)
-            (should (equal decisions '(allow allow))))
+            (should (equal decisions '(allow allow allow)))
+        (ellm--set-active-request nil))))))
+
+(ert-deftest ellm-test-llm-tool-permission-allow-for-session-survives-request ()
+  "An llm.el tool retains session approval after its request finishes."
+  (with-temp-buffer
+    (ellm-mode)
+    (let* ((tool (ellm-make-tool :name "edit" :category "files"
+                                 :function (lambda (&rest _) "done")))
+           (frontmatter '((tool-permissions . ((edit . "ask")))))
+           (request (ellm--make-request :buffer (current-buffer)
+                                        :frontmatter frontmatter))
+           (first (ellm-llm--make-llm-tool tool request))
+           results)
+      (ellm--set-active-request request)
+      (unwind-protect
+          (progn
+            (funcall (llm-tool-function first)
+                     (lambda (result) (push result results)))
+            (should ellm--active-user-prompt)
+            (ellm--resolve-user-prompt ellm--active-user-prompt
+                                        '(:status selected :value "allow-session"))
+            (let* ((later-request (ellm--make-request :buffer (current-buffer)
+                                                       :frontmatter frontmatter))
+                   (later (ellm-llm--make-llm-tool tool later-request)))
+              (funcall (llm-tool-function later)
+                       (lambda (result) (push result results))))
+            (should-not ellm--active-user-prompt)
+            (should (equal results '("done" "done"))))
         (ellm--set-active-request nil)))))
 
 (ert-deftest ellm-test-tool-permission-allow-for-session-resolves-queued-prompts ()
