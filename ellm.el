@@ -5247,12 +5247,21 @@ Return non-nil when a live top-level assistant header was updated."
   (when ellm--active-request
     (ellm--notify-request-finished ellm--active-request '(:state cancelled))))
 
+(defun ellm--permission-automatic-outcome (permission)
+  "Return PERMISSION's current automatic outcome, or nil.
+
+This is checked before notifying so a permission that will be resolved without
+user input never produces a spurious attention notification."
+  (when-let* ((automatic-outcome (plist-get permission :automatic-outcome)))
+    (funcall automatic-outcome)))
+
 (defun ellm--notify-permission-request (request permission)
   "Notify when REQUEST needs a permission decision for PERMISSION.
 
 Only the first queued prompt sends a notification; further prompts are already
 represented by the pending-input indicator in the same conversation."
-  (when (null ellm--user-prompt-queue)
+  (when (and (null ellm--user-prompt-queue)
+             (not (ellm--permission-automatic-outcome permission)))
     (let* ((buffer (ellm-request-buffer request))
            (tool-call (plist-get permission :tool-call))
            (tool-title (or (plist-get tool-call :title)

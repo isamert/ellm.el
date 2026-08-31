@@ -9169,6 +9169,26 @@ The parent provider remains buffer-local fallback only when the profile omits on
           (should (equal (plist-get (car notifications) :event)
                          'permission-requested)))))))
 
+(ert-deftest ellm-test-automatic-permission-does-not-notify ()
+  "An automatically resolved permission must not request user attention."
+  (let ((ellm-notifications-enabled t)
+        (ellm--inhibit-user-prompt-activation t)
+        notification)
+    (with-temp-buffer
+      (ellm-mode)
+      (let ((request (ellm--make-request :buffer (current-buffer))))
+        (cl-letf (((symbol-function 'ellm--request-visible-in-focused-frame-p)
+                   (lambda (_request) nil))
+                  ((symbol-value 'ellm-notification-function)
+                   (lambda (value) (setq notification value))))
+          (ellm--request-permission
+           request
+           '(:tool-call (:title "Automatic action")
+             :options ((:id "allow" :name "Allow"))
+             :automatic-outcome (lambda () '(:status selected :value "allow")))
+           #'ignore)
+          (should-not notification))))))
+
 (ert-deftest ellm-test-user-input-request-notifies-by-default ()
   "Question prompts notify when their conversation is not focused."
   (let ((ellm-notifications-enabled t)
