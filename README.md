@@ -43,6 +43,7 @@ cleanly.
     - [`ellm-set-config`](#ellm-set-config)
   - [Managing multiple agents & subagents](#managing-multiple-agents--subagents)
   - [In buffer controls](#in-buffer-controls)
+  - [Images and files](#images-and-files)
   - [Persistence](#persistence)
   - [MCPs](#mcps)
 - [Configuration](#configuration)
