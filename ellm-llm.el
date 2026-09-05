@@ -721,9 +721,37 @@ Return a function that stops the heartbeat."
             (t nil))))
       (cons args consumed))))
 
+(defun ellm-llm--user-content (provider text)
+  "Convert user TEXT to ordered content supported by PROVIDER.
+Only PNG, JPEG, GIF, WebP and PDF attachments are forwarded."
+  (let ((parts (ellm-attachment-content-parts text)))
+    (if (cl-every #'stringp parts)
+        (apply #'concat parts)
+      (apply
+       #'llm-make-multipart
+       (mapcar
+        (lambda (part)
+          (if (stringp part)
+              part
+            (let* ((mime (ellm-attachment-mime part))
+                   (capability
+                    (cond
+                     ((equal mime "application/pdf") 'pdf-input)
+                     ((member mime '("image/png" "image/jpeg" "image/gif" "image/webp"))
+                      'image-input))))
+              (unless (and capability (memq capability (llm-capabilities provider)))
+                (user-error "ellm llm: provider does not support %s attachment %s%s"
+                            mime (ellm-attachment-name part)
+                            (if capability (format " (requires %s)" capability) "")))
+              (make-llm-media :mime-type mime
+                              :data (ellm-attachment-data part)))))
+        parts)))))
+
 (defun ellm-llm--apply-turns-to-prompt (provider turns prompt)
-  "Walk TURNS and append corresponding interactions onto PROMPT."
-  (let ((rest turns))
+  "Walk TURNS and append corresponding interactions onto PROMPT.
+Read and validate each attachment only once across the entire history."
+  (let ((rest turns)
+        (ellm-attachment--request-data (make-hash-table :test #'equal)))
     (while rest
       (let* ((turn (car rest))
              (role (ellm-turn-role turn)))
@@ -780,10 +808,12 @@ Return a function that stops the heartbeat."
           (setq rest (cdr rest)))
          (t
           (let ((content
-                 (if (equal role "assistant")
-                     (ellm--unescape-turn-delimiters
-                      (ellm-turn-content turn))
-                   (ellm-turn-content turn)))
+                 (pcase role
+                   ("user" (ellm-llm--user-content
+                            provider (ellm-turn-content turn)))
+                   ("assistant" (ellm--unescape-turn-delimiters
+                                 (ellm-turn-content turn)))
+                   (_ (ellm-turn-content turn))))
                 (previous
                  (car (last (llm-chat-prompt-interactions prompt)))))
             (if (and (equal role "assistant")
