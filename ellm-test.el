@@ -4938,7 +4938,9 @@
                          (:primary_window
                           (:used_percent 96 :reset_after_seconds 673)
                           :secondary_window
-                          (:used_percent 70 :reset_after_seconds 43200)))))))
+                          (:used_percent 70 :reset_after_seconds 43200))
+                         :rate_limit_reset_credits
+                         (:available_count 3 :applicable_available_count 0))))))
       (let ((usage (ellm-codex-usage provider)))
         (should (equal (plist-get usage :plan_type) "plus"))
         (should (member '("Authorization" . "Bearer access-token")
@@ -4946,7 +4948,7 @@
         (should (member '("ChatGPT-Account-Id" . "account-id")
                         received-headers))
         (should (equal (ellm-codex--format-usage usage)
-                       "Codex usage (plus); 5-hour: 4% remaining; resets in 11m 13s; weekly: 30% remaining; resets in 12h 0m"))))))
+                       "Codex usage (plus); 5-hour: 4% remaining; resets in 11m 13s; weekly: 30% remaining; resets in 12h 0m; 3 rate-limit resets available"))))))
 
 (ert-deftest ellm-test-codex-replays-encrypted-reasoning-item ()
   "Codex should replay a valid reasoning item instead of its visible summary."

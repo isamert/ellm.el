@@ -623,7 +623,8 @@ browser callback.  Interactively, the first configured Codex provider is used."
 
 (defun ellm-codex--format-usage (usage)
   "Return a human-readable summary of Codex USAGE response data."
-  (let ((rate-limit (plist-get usage :rate_limit)))
+  (let ((rate-limit (plist-get usage :rate_limit))
+        (reset-credits (plist-get usage :rate_limit_reset_credits)))
     (string-join
      (append
       (when-let* ((plan (plist-get usage :plan_type)))
@@ -631,7 +632,10 @@ browser callback.  Interactively, the first configured Codex provider is used."
       (mapcar (lambda (entry)
                 (ellm-codex--format-usage-window
                  (plist-get rate-limit (car entry)) (cadr entry)))
-              ellm-codex--usage-windows))
+              ellm-codex--usage-windows)
+      (when-let* ((available (plist-get reset-credits :available_count)))
+        (list (format "%s rate-limit reset%s available"
+                      available (if (= available 1) "" "s")))))
      "; ")))
 
 ;;;###autoload
