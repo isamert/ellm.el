@@ -38,6 +38,7 @@
 (require 'json)
 (require 'jsonrpc)
 (require 'subr-x)
+(require 'url-util)
 (require 'ellm)
 
 (defgroup ellm-acp nil
@@ -516,7 +517,11 @@ Call ON-READY with its effect on success, or ON-ERROR on failure."
           (ellm-acp--ensure-frontmatter-config
            provider connection frontmatter
            (lambda ()
-             (ellm-acp--send-prompt connection prompt))
+             (condition-case err
+                 (ellm-acp--send-prompt connection prompt)
+               (error (ellm-acp--emit-failure
+                       request (list :message (error-message-string err)
+                                     :condition err)))))
            (lambda (error-object)
              (ellm-acp--emit-failure request error-object))))
         (lambda (error-object)
@@ -842,8 +847,10 @@ inactivity is timed centrally by ellm."
     :terminal :json-false
     :session (:configOptions (:boolean ,(make-hash-table :test 'equal)))))
 
-(defun ellm-acp--capability (connection path)
-  "Return ACP capability at PATH for CONNECTION."
+(defun ellm-acp--capability (connection path &optional boolean)
+  "Return ACP capability at PATH for CONNECTION.
+When BOOLEAN is non-nil, require an explicit JSON true value rather than
+accepting a present object-valued capability."
   (let ((value (ellm-acp--connection-agent-capabilities connection))
         (present t))
     (while (and path present)
@@ -857,7 +864,7 @@ inactivity is timed centrally by ellm."
     ;; NOTE: With plist objects and `:null-object nil', JSON `{}` and `null'
     ;; both decode as nil.  A present nil capability is intentionally treated
     ;; as supported to avoid normalizing every streamed ACP message.
-    (and present (not (eq value :json-false)))))
+    (and present (if boolean (eq value t) (not (eq value :json-false))))))
 
 (defun ellm-acp--provider-cwd (provider frontmatter)
   "Return absolute ACP cwd for PROVIDER and FRONTMATTER."
@@ -1642,10 +1649,41 @@ called with the raw response before ON-READY."
                   (list id :ann "saved" :type 'string :editable t
                         :desc "Saved ACP option not advertised by the live session.")))))))
 
+(defun ellm-acp--prompt-blocks (connection text)
+  "Convert user TEXT to ordered ACP content blocks for CONNECTION.
+Resolve attachments in the conversation buffer, not the callback buffer.
+Only PNG, JPEG, GIF, WebP and PDF attachments are forwarded."
+  (with-current-buffer (ellm-acp--connection-buffer connection)
+    (let ((ellm-attachment--request-data (make-hash-table :test #'equal)))
+      (vconcat
+       (mapcar
+        (lambda (part)
+          (if (stringp part)
+              (list :type "text" :text part)
+            (let* ((mime (ellm-attachment-mime part))
+                   (image (member mime '("image/png" "image/jpeg" "image/gif" "image/webp")))
+                   (capability (if image :image :embeddedContext)))
+              (unless (or image (equal mime "application/pdf"))
+                (user-error "ellm ACP: unsupported attachment MIME type %s (%s)"
+                            mime (ellm-attachment-name part)))
+              (unless (ellm-acp--capability
+                       connection (list 'promptCapabilities capability) t)
+                (user-error "ellm ACP: agent does not support %s attachment %s (requires %s)"
+                            mime (ellm-attachment-name part) capability))
+              (let ((data (base64-encode-string (ellm-attachment-data part) t)))
+                (if image
+                    (list :type "image" :mimeType mime :data data)
+                  (list :type "resource"
+                        :resource
+                        (list :uri (concat "ellm-attachment:"
+                                           (url-hexify-string (ellm-attachment-id part)))
+                              :mimeType mime :blob data)))))))
+        (ellm-attachment-content-parts (or text "")))))))
+
 (defun ellm-acp--send-prompt (connection text)
   "Send TEXT as the pending user prompt through CONNECTION."
   (let ((params `(:sessionId ,(ellm-acp--connection-session-id connection)
-                  :prompt [(:type "text" :text ,(or text ""))])))
+                  :prompt ,(ellm-acp--prompt-blocks connection text))))
     (ellm-acp--request
      connection :session/prompt params
      ;; Prompt progress arrives as notifications, so a JSON-RPC deadline would
