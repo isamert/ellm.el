@@ -807,10 +807,16 @@ redeeming it.  Return the parsed redemption response."
 (defun ellm-codex--content-part (part role)
   "Serialize one PART of a message with ROLE."
   (if (llm-media-p part)
-      (list :type "input_image"
-            :image_url
-            (concat "data:" (llm-media-mime-type part) ";base64,"
-                    (base64-encode-string (llm-media-data part) t)))
+      (progn
+        (unless (and (eq role 'user)
+                     (member (llm-media-mime-type part)
+                             '("image/png" "image/jpeg" "image/gif" "image/webp")))
+          (user-error "ellm Codex: unsupported %s media for %s (only user PNG/JPEG/GIF/WebP images are supported)"
+                      (llm-media-mime-type part) role))
+        (list :type "input_image"
+              :image_url
+              (concat "data:" (llm-media-mime-type part) ";base64,"
+                      (base64-encode-string (llm-media-data part) t))))
     (list :type (if (eq role 'assistant) "output_text" "input_text")
           :text part)))
 
