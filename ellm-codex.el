@@ -56,6 +56,8 @@ The file contains refresh credentials and is written with mode 0600."
   "https://chatgpt.com/backend-api/codex/responses")
 (defconst ellm-codex--usage-url
   "https://chatgpt.com/backend-api/wham/usage")
+(defconst ellm-codex--rate-limit-reset-credits-url
+  "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits")
 
 (defconst ellm-codex--usage-windows
   '((:primary_window "5-hour")
@@ -655,6 +657,75 @@ usage response, so callers can render it differently."
       (when (called-interactively-p 'interactive)
         (message "%s" (ellm-codex--format-usage usage)))
       usage)))
+
+(defun ellm-codex--rate-limit-reset-credits (provider)
+  "Return PROVIDER's rate-limit reset credits.
+Only the response's credit list is returned, regardless of whether the API
+wraps it in a JSON object."
+  (llm-provider-request-prelude provider)
+  (pcase-let ((`(,status . ,response)
+               (ellm-codex--request
+                'get ellm-codex--rate-limit-reset-credits-url
+                :headers (llm-provider-headers provider))))
+    (unless (<= 200 status 299)
+      (error "Codex reset-credit request failed (HTTP %s)" status))
+    (let ((credits (if (vectorp response)
+                       response
+                     (or (plist-get response :credits)
+                         (plist-get response :data)))))
+      (unless (vectorp credits)
+        (error "Codex reset-credit response did not contain a credit list"))
+      (append credits nil))))
+
+(defun ellm-codex--redeem-request-id ()
+  "Return a UUID suitable for identifying a reset-credit redemption."
+  (let ((hex (secure-hash 'sha256
+                          (format "%S" (list (current-time) (emacs-pid)
+                                             (random))))))
+    (format "%s-%s-4%s-8%s-%s"
+            (substring hex 0 8) (substring hex 8 12) (substring hex 13 16)
+            (substring hex 17 20) (substring hex 20 32))))
+
+;;;###autoload
+(defun ellm-codex-redeem-rate-limit-reset (&optional provider)
+  "Redeem an available ChatGPT Codex rate-limit reset credit.
+Interactively, prompt for an available credit and require confirmation before
+redeeming it.  Return the parsed redemption response."
+  (interactive)
+  (let* ((provider (ellm-codex--provider provider))
+         (credits (seq-filter (lambda (credit)
+                                (equal (plist-get credit :status) "available"))
+                              (ellm-codex--rate-limit-reset-credits provider))))
+    (unless credits
+      (user-error "No Codex rate-limit reset credits are available"))
+    (let* ((candidates
+            (mapcar
+             (lambda (credit)
+               (cons (format "%s — expires %s (%s)"
+                             (or (plist-get credit :title) "Rate-limit reset")
+                             (or (plist-get credit :expires_at) "unknown")
+                             (plist-get credit :id))
+                     credit))
+             credits))
+           (choice (completing-read "Redeem rate-limit reset: " candidates nil t))
+           (credit (alist-get choice candidates nil nil #'equal))
+           (credit-id (plist-get credit :id)))
+      (unless (y-or-n-p (format "Redeem rate-limit reset %s?" credit-id))
+        (user-error "Rate-limit reset redemption cancelled"))
+      (pcase-let ((`(,status . ,response)
+                   (ellm-codex--request
+                    'post
+                    (concat ellm-codex--rate-limit-reset-credits-url "/consume")
+                    :headers (llm-provider-headers provider)
+                    :body (json-serialize
+                           (list :credit_id credit-id
+                                 :redeem_request_id
+                                 (ellm-codex--redeem-request-id))))))
+        (unless (<= 200 status 299)
+          (error "Codex reset-credit redemption failed (HTTP %s)" status))
+        (when (called-interactively-p 'interactive)
+          (message "Codex rate-limit reset redeemed"))
+        response))))
 
 ;;;; Provider implementation
 

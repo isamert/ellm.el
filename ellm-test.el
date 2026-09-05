@@ -4950,6 +4950,38 @@
         (should (equal (ellm-codex--format-usage usage)
                        "Codex usage (plus); 5-hour: 4% remaining; resets in 11m 13s; weekly: 30% remaining; resets in 12h 0m; 3 rate-limit resets available"))))))
 
+(ert-deftest ellm-test-codex-redeems-selected-rate-limit-reset-credit ()
+  "Codex reset credits should be selected, confirmed, and redeemed."
+  (let* ((auth-file (make-temp-file "ellm-codex-reset-auth-"))
+         (provider (ellm-make-codex-provider :auth-file auth-file))
+         request-body)
+    (delete-file auth-file)
+    (setf (ellm-codex-provider-access-token provider)
+          (ellm-codex--wrap-secret "access-token")
+          (ellm-codex-provider-account-id provider) "account-id")
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (_prompt candidates &rest _) (caar candidates)))
+              ((symbol-function 'y-or-n-p) (lambda (_) t))
+              ((symbol-function 'ellm-codex--redeem-request-id)
+               (lambda () "request-id"))
+              ((symbol-function 'ellm-codex--request)
+               (lambda (method url &rest args)
+                 (cond
+                  ((eq method 'get)
+                   (should (equal url ellm-codex--rate-limit-reset-credits-url))
+                   (cons 200 [(:id "available" :title "Full reset" :status "available")
+                              (:id "used" :status "consumed")]))
+                  ((eq method 'post)
+                   (setq request-body (plist-get args :body))
+                   (should (equal url
+                                  (concat ellm-codex--rate-limit-reset-credits-url
+                                          "/consume")))
+                   (cons 200 '(:redeemed t)))))))
+      (should (equal (ellm-codex-redeem-rate-limit-reset provider)
+                     '(:redeemed t)))
+      (should (equal (ellm-codex--json-parse request-body)
+                     '(:credit_id "available" :redeem_request_id "request-id"))))))
+
 (ert-deftest ellm-test-codex-replays-encrypted-reasoning-item ()
   "Codex should replay a valid reasoning item instead of its visible summary."
   (let* ((provider (ellm-make-codex-provider))
