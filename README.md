@@ -629,7 +629,7 @@ Some other useful commands are:
 ## Images and files
 
 Ellm supports attaching images and more generally files into
-conversations. There is in buffer previews too:
+conversations. There are in buffer previews too:
 
 <img width="468" height="560" alt="image" src="https://github.com/user-attachments/assets/b3b25d2a-ae0b-48b2-9cbd-ff02f3cf09c0" />
 
