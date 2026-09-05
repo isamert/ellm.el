@@ -631,7 +631,7 @@ Some other useful commands are:
 Ellm supports attaching images and more generally files into
 conversations. There is in buffer previews too:
 
-<img width="702" height="853" alt="image" src="https://github.com/user-attachments/assets/b3b25d2a-ae0b-48b2-9cbd-ff02f3cf09c0" />
+<img width="468" height="560" alt="image" src="https://github.com/user-attachments/assets/b3b25d2a-ae0b-48b2-9cbd-ff02f3cf09c0" />
 
 Use `C-c C-f` (`ellm-attach-file`) to attach a file, or `C-c C-v`
 (`ellm-paste`) to paste a screenshot or copied files. `ellm-paste`
