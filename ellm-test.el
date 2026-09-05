@@ -3584,6 +3584,17 @@
         (ellm-update-session-title "Ignored title"))
       (should (equal (buffer-name) "*custom: Custom title*")))))
 
+(ert-deftest ellm-test-llm-title-prompt-replaces-attachments ()
+  "Title prompts must replace attachment markup with text-only context."
+  (let ((image (concat "![Screenshot](attachment:"
+                       (make-string 64 ?a) ".png)"))
+        (file (concat "[Notes](attachment:"
+                      (make-string 64 ?b) ".pdf)")))
+    (should (equal (ellm-llm--title-prompt
+                    (concat "Explain " image " and " file "."))
+                   "Explain <ATTACHMENT> and <ATTACHMENT>."))
+    (should (equal (ellm-llm--title-prompt image) "<ATTACHMENT>"))))
+
 (ert-deftest ellm-test-disabled-session-titling-skips-llm-title-request ()
   "Disabled session titling must not start an llm.el title request."
   (let ((ellm-llm-generate-title t))

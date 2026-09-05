@@ -81,6 +81,18 @@ work proportional to the accumulated response on every partial."
 (defconst ellm-llm--title-instruction
   "Create a concise 3-7 word title for the user's message. Use the message's language. Return only the title, without quotes, markdown, a 'Title:' prefix, or explanation.")
 
+(defun ellm-llm--title-prompt (text)
+  "Return title-safe textual content from user TEXT.
+Inline attachments are represented by a placeholder so title requests never
+inherit media inputs from the conversation request."
+  (let ((pos 0) parts)
+    (dolist (ref (ellm-attachment-references text))
+      (push (substring text pos (plist-get ref :beg)) parts)
+      (push "<ATTACHMENT>" parts)
+      (setq pos (plist-get ref :end)))
+    (push (substring text pos) parts)
+    (apply #'concat (nreverse parts))))
+
 (cl-defstruct (ellm-llm-driver (:constructor ellm-llm--make-driver))
   "Protocol driver for one logical `llm.el' request."
   (provider nil
@@ -1326,13 +1338,16 @@ could not be executed: %s. Retry it using an advertised tool and valid arguments
                         interactions))
            (first-user (and (= (length users) 1)
                             (not assistants)
-                            (llm-chat-prompt-interaction-content (car users)))))
+                            (seq-find (lambda (turn)
+                                        (equal (ellm-turn-role turn) "user"))
+                                      (ellm--parse-turns)))))
       (let ((driver
              (ellm-llm--make-driver
               :provider provider :buffer buffer :prompt prompt
-              :title-prompt (and (stringp first-user)
+              :title-prompt (and first-user
                                  (not (alist-get 'title frontmatter))
-                                 first-user))))
+                                 (ellm-llm--title-prompt
+                                  (ellm-turn-content first-user))))))
         (ellm-llm--instrument-tool-activity driver)
         driver))))
 
