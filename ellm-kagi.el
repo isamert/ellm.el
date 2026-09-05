@@ -43,11 +43,10 @@
 
 (defcustom ellm-kagi-models
   '("ki_quick" "kimi-k2-7-code" "kimi-k2-6-thinking" "kimi-k2-6"
-    "glm-4-7-thinking" "glm-4-7" "claude-4-8-opus-thinking"
-    "qwen-3-7-plus" "qwen-3-coder" "gpt-5-4-nano" "gpt-oss-120b"
-    "deepseek-v4-flash" "gemini-3-1-flash-lite" "gemma-4-31b" "grok-4-3"
-    "mistral-small-4" "mistral-large" "hermes-4-405b-thinking"
-    "minimax-m3")
+    "glm-5-3-flash" "claude-5-opus-thinking" "qwen-3-8-27b" "qwen-3-7-plus"
+    "gpt-5-6-luna" "gpt-oss-120b" "deepseek-v4-flash"
+    "gemini-3-1-flash-lite" "grok-4-3" "mistral-small-4" "mistral-large"
+    "hermes-4-405b-thinking" "minimax-m3")
   "Fallback Kagi Assistant model IDs offered for completion.
 Run `ellm-kagi-refresh-models' to replace a provider's configured model list
 with the currently supported models returned by Kagi's `/api/init' endpoint."
