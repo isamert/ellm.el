@@ -106,6 +106,10 @@
 (require 'subr-x)
 (require 'xdg)
 (require 'yaml)
+(require 'image)
+(require 'url-util)
+(require 'yank-media)
+(require 'mailcap)
 
 ;;;; Customization
 
@@ -377,8 +381,8 @@ return a directory name; nil means not to persist that buffer."
 (defcustom ellm-cache-directory
   (file-name-as-directory (expand-file-name "ellm" (xdg-cache-home)))
   "Directory for durable ellm state not owned by a persisted session.
-Opaque reasoning state is stored here when conversation persistence is
-disabled or the current buffer is ephemeral."
+Opaque reasoning state and attachments are stored here when conversation
+persistence is disabled or the current buffer is ephemeral."
   :type 'directory
   :group 'ellm)
 
@@ -2367,6 +2371,7 @@ re-shaded, leaving unshaded gaps at line beginnings/ends."
     (when ellm-turn-rules
       (ellm--put-turn-rules beg end))
     (ellm--put-pretty-separators beg end)
+    (ellm-attachment-ui--fontify beg end)
     `(jit-lock-bounds ,beg . ,end)))
 
 ;;;; Overlays
@@ -4008,6 +4013,7 @@ ROOT and SESSION-ID have the same meanings as in `ellm--persistence-prepare'."
     (condition-case err
         (progn
           (ellm--persistence-prepare force root session-id)
+          (ellm-attachment-localize)
           (ellm--localize-reasoning-state-files)
           (ellm--persist-tool-output-buffers)
           (when buffer-file-name
@@ -4083,7 +4089,8 @@ new session.  An existing session always keeps its current directory."
           ;; Subagents can have been launched before their parent was saved.
           ;; Give every related live buffer the newly established session first.
           (setq-local ellm--session-directory directory)
-          (ellm--persistence-flush t nil session-id)))
+          (unless (ellm--persistence-flush t nil session-id)
+            (user-error "ellm: Failed to save %s" (buffer-name buffer)))))
       (message "ellm: saved session to %s" directory))))
 
 (defun ellm--persistence-before-kill ()
@@ -7809,6 +7816,569 @@ If QUIET is non-nil, then do not print any messages."
     (unless quiet
       (message "ellm: request cancelled"))))
 
+;;;; Attachments
+
+;;;;; Attachments Core
+
+(cl-defstruct ellm-attachment
+   "A resolved, backend-neutral attachment.  FILE contains immutable bytes."
+  id name mime file size)
+
+(defvar ellm-attachment--request-data nil
+  "Dynamically bound map of attachment IDs to validated bytes, or nil.
+Backends bind a fresh map while constructing each request's content.  The
+resulting media objects retain those bytes for retries and tool loops;
+previews, persistence, and subsequent requests do not reuse the map.")
+
+(defconst ellm-attachment--id-regexp
+  "[[:xdigit:]]\\{64\\}\\.[a-z0-9]+"
+  "Grammar for a managed attachment filename.")
+
+(defconst ellm-attachment--link-regexp
+  (concat "\\(!?\\)\\[\\(\\(?:\\\\.\\|[^]\\\\\n]\\)*\\)\\](attachment:"
+          "\\(" ellm-attachment--id-regexp "\\))")
+  "Supported inline attachment syntax, with image flag, label, and ID groups.")
+
+(defun ellm-attachment--escaped-p (text pos)
+  "Return non-nil if the character at POS in TEXT is backslash-escaped."
+  (let ((count 0))
+    (while (and (> pos 0) (= (aref text (1- pos)) ?\\))
+      (cl-incf count)
+      (cl-decf pos))
+    (cl-oddp count)))
+
+(defun ellm-attachment-references (text)
+  "Parse supported attachment links in TEXT without reading their files.
+Return plists with zero-based :beg and :end offsets, :id, :name, and :image.
+Escaped links, fenced code, and matched backtick code spans are excluded.
+Only inline links with a managed ID are supported, not reference-style links
+or optional Markdown titles.  Labels may contain backslash escapes."
+  (let ((pos 0) refs
+        (tokens (concat "^[ \t]*\\(`\\{3,\\}\\|~\\{3,\\}\\)[^\n]*"
+                        "\\|`+\\|" ellm-attachment--link-regexp)))
+    (save-match-data
+      (while (string-match tokens text pos)
+        (let ((beg (match-beginning 0)) (end (match-end 0))
+              (fence (match-string 1 text))
+              ;; The fence group shifts the link groups by one.
+              (image (match-string 2 text))
+              (name (match-string 3 text))
+              (id (match-string 4 text)))
+          (setq pos end)
+          (unless (ellm-attachment--escaped-p text beg)
+            (cond
+             (fence
+              (setq pos
+                    (if (string-match
+                         (format "^[ \t]*%s\\{%d,\\}[ \t]*$"
+                                 (regexp-quote (substring fence 0 1))
+                                 (length fence)) text end)
+                        (match-end 0)
+                      (length text))))
+             (id
+              (push (list :beg beg :end end :id id
+                          :name (replace-regexp-in-string "\\\\\\(.\\)" "\\1" name)
+                          :image (equal image "!")) refs))
+             (t
+              ;; Only a matching run closes a code span.  An unmatched run
+              ;; is literal text and must not hide the rest of the message.
+              (let ((run (- end beg)) (next end) close)
+                (while (and (not close) (string-match "`+" text next))
+                  (setq next (match-end 0))
+                  (when (= (- next (match-beginning 0)) run)
+                    (setq close next)))
+                (when close (setq pos close)))))))))
+    (nreverse refs)))
+
+;;;;;; Storage
+
+(defconst ellm-attachment--mime-extensions
+  '(("image/png" . "png") ("image/jpeg" . "jpg")
+    ("image/gif" . "gif") ("image/webp" . "webp")
+    ("application/pdf" . "pdf"))
+  "Canonical extensions for native media inputs.")
+
+(defun ellm-attachment--mime (data &optional name)
+  "Identify DATA by signature, falling back to NAME's extension."
+  (cond
+   ((string-prefix-p (unibyte-string 137 80 78 71 13 10 26 10) data) "image/png")
+   ((string-prefix-p (unibyte-string 255 216 255) data) "image/jpeg")
+   ((or (string-prefix-p "GIF87a" data) (string-prefix-p "GIF89a" data)) "image/gif")
+   ((and (string-prefix-p "RIFF" data) (>= (length data) 12)
+         (equal (substring data 8 12) "WEBP")) "image/webp")
+   ((string-prefix-p "%PDF-" data) "application/pdf")
+   (t (let ((mime (and name (mailcap-extension-to-mime
+                             (or (file-name-extension name) "")))))
+        ;; Never claim native media support based only on a filename.
+        (if (and mime (not (assoc mime ellm-attachment--mime-extensions)))
+            mime
+          "application/octet-stream")))))
+
+(defun ellm-attachment--directory (&optional global)
+  "Return the session attachment directory, or GLOBAL cache directory."
+  (expand-file-name "attachments/"
+                    (if (and ellm--session-directory (not global))
+                        (expand-file-name ".state/" ellm--session-directory)
+                      ellm-cache-directory)))
+
+(defun ellm-attachment--path (id &optional global)
+  "Return the safe path for attachment ID in the current or GLOBAL store."
+  (unless (and (stringp id)
+               (string-match-p (concat "\\`" ellm-attachment--id-regexp "\\'") id))
+    (user-error "Invalid attachment ID: %s" id))
+  (let* ((directory (ellm-attachment--directory global))
+         (path (expand-file-name id directory)))
+    (when (or (file-symlink-p path)
+              (file-symlink-p (directory-file-name directory)))
+      (user-error "Unsafe attachment path: %s" path))
+    path))
+
+(defun ellm-attachment--read (file)
+  "Read FILE literally as a unibyte string."
+  (with-temp-buffer
+    (set-buffer-multibyte nil)
+    (insert-file-contents-literally file)
+    (buffer-string)))
+
+(defun ellm-attachment--write (id data &optional global)
+  "Atomically store ID's DATA in the current or GLOBAL attachment store."
+  (let* ((target (ellm-attachment--path id global))
+         (directory (file-name-directory target)))
+    (make-directory directory t)
+    (set-file-modes directory #o700)
+    (if (file-exists-p target)
+        (unless (equal data (ellm-attachment--read target))
+          (user-error "Attachment store is corrupt: %s" id))
+      (let ((temporary (make-temp-file (expand-file-name ".attachment-" directory))))
+        (unwind-protect
+            (progn
+              (let ((coding-system-for-write 'no-conversion))
+                (write-region data nil temporary nil 'silent))
+              (set-file-modes temporary #o600)
+              (rename-file temporary target nil))
+          (when (file-exists-p temporary) (delete-file temporary)))))
+    target))
+
+(defun ellm-attachment-import (data &optional mime name)
+  "Store binary DATA and return its resolved attachment.
+MIME, when supplied by a clipboard, must agree with recognized native media.
+NAME is the original display filename, not a storage path."
+  (when (multibyte-string-p data)
+    (setq data (string-to-unibyte data)))
+  (let* ((detected (ellm-attachment--mime data name))
+         (mime (or mime detected))
+         (extension (or (cdr (assoc mime ellm-attachment--mime-extensions))
+                        (and name (file-name-extension name)) "bin")))
+    (when (and (assoc mime ellm-attachment--mime-extensions)
+               (not (equal mime detected)))
+      (user-error "Attachment bytes do not match %s" mime))
+    (unless (string-match-p "\\`[a-z0-9]+\\'" extension)
+      (setq extension "bin"))
+    (let* ((id (concat (secure-hash 'sha256 data) "." extension))
+           (file (ellm-attachment--write id data)))
+      (make-ellm-attachment :id id :file file :mime mime
+                            :name (or name id) :size (length data)))))
+
+(defun ellm-attachment--validated-data (id file)
+  "Read and validate ID's FILE, reusing bytes within request construction."
+  (or (and ellm-attachment--request-data
+           (gethash id ellm-attachment--request-data))
+      (progn
+        (unless (file-regular-p file)
+          (user-error "Attachment is not a regular file: %s" id))
+        (let ((data (ellm-attachment--read file)))
+          (unless (equal (file-name-base id) (secure-hash 'sha256 data))
+            (user-error "Attachment hash mismatch: %s" id))
+          (when ellm-attachment--request-data
+            (puthash id data ellm-attachment--request-data))
+          data))))
+
+(defun ellm-attachment-resolve (id &optional name)
+  "Resolve and validate managed attachment ID, using display NAME.
+Prefer the session store, falling back to the global cache.  Missing or
+corrupt data is an error, never a silently dropped attachment."
+  (let* ((local (ellm-attachment--path id))
+         (global (ellm-attachment--path id t))
+         (file (cond ((file-exists-p local) local)
+                     ((file-exists-p global) global)
+                     (t (user-error "Missing attachment: %s" id)))))
+    (let ((data (ellm-attachment--validated-data id file)))
+      (make-ellm-attachment :id id :name (or name id) :file file
+                            :mime (ellm-attachment--mime data id)
+                            :size (length data)))))
+
+(defun ellm-attachment-data (attachment)
+  "Return validated binary bytes for ATTACHMENT.
+During request construction, reuse bytes already validated by resolution."
+  (ellm-attachment--validated-data (ellm-attachment-id attachment)
+                                   (ellm-attachment-file attachment)))
+
+;;;;;; Content and persistence
+
+(defun ellm-attachment-content-parts (text)
+  "Return ordered text strings and resolved attachments from user TEXT.
+Callers must not interpret assistant or tool output as attachment input."
+  (let ((pos 0) parts)
+    (dolist (ref (ellm-attachment-references text))
+      (when (< pos (plist-get ref :beg))
+        (push (substring text pos (plist-get ref :beg)) parts))
+      (push (ellm-attachment-resolve (plist-get ref :id) (plist-get ref :name)) parts)
+      (setq pos (plist-get ref :end)))
+    (when (< pos (length text)) (push (substring text pos) parts))
+    (or (nreverse parts) (list ""))))
+
+(defun ellm-attachment-localize ()
+  "Copy this conversation's referenced user attachments into its session.
+Run before writing the transcript, including during automatic persistence."
+  (when ellm--session-directory
+    (save-restriction
+      (widen)
+      (dolist (turn (ellm--parse-turns))
+        (when (equal (ellm-turn-role turn) "user")
+          (dolist (part (ellm-attachment-content-parts (ellm-turn-content turn)))
+            (when (ellm-attachment-p part)
+              (ellm-attachment--write (ellm-attachment-id part)
+                                      (ellm-attachment-data part)))))))))
+
+(defun ellm-attachment-before-write ()
+  "Localize attachments before an ordinary transcript write, then return nil.
+Use `write-contents-functions', not `before-save-hook': errors in the latter
+are demoted by Emacs and would allow saving dangling references.  Explicit
+persistence already localizes before binding `ellm--persistence-saving-p'."
+  (unless ellm--persistence-saving-p
+    (ellm-attachment-localize))
+  nil)
+
+;;;;;; Insertion
+
+(defun ellm-attachment-insert (data mime name)
+  "Import DATA with MIME and NAME and insert a standalone attachment link."
+  (unless (derived-mode-p 'ellm-mode)
+    (user-error "Attach files from an ellm conversation"))
+  (barf-if-buffer-read-only)
+  (let* ((attachment (ellm-attachment-import data mime name))
+         (label (replace-regexp-in-string
+                 "[][\\\\]" "\\\\\\&"
+                 (replace-regexp-in-string "[\n\r]" " " (ellm-attachment-name attachment)))))
+    (atomic-change-group
+      (unless (bolp) (insert "\n"))
+      (insert (if (string-prefix-p "image/" (ellm-attachment-mime attachment)) "!" "")
+              "[" label "](attachment:" (ellm-attachment-id attachment) ")\n"))
+    attachment))
+
+;;;###autoload
+(defun ellm-attach-file (file)
+  "Copy FILE into ellm's managed store and insert an attachment reference."
+  (interactive "fAttach file: ")
+  (unless (file-regular-p file) (user-error "Not a regular file: %s" file))
+  (ellm-attachment-insert (ellm-attachment--read file) nil
+                          (file-name-nondirectory file)))
+
+;;;;; Attachments UI
+
+(defvar ellm--turn-body-cache-vector)
+
+(defgroup ellm-attachment-ui nil
+  "Attachment clipboard and display."
+  :group 'ellm)
+
+(defcustom ellm-attachment-ui-previews t
+  "Whether to preview standalone attachments in user turns."
+  :type 'boolean)
+(defcustom ellm-attachment-ui-reveal-at-point t
+  "Whether moving point onto an attachment reveals its reference syntax.
+When nil, keep the image preview or file card visible even at point.
+Hover help and opening attachments remain available."
+  :type 'boolean)
+(defcustom ellm-attachment-ui-image-width 480
+  "Maximum preview image width in pixels." :type 'integer)
+(defcustom ellm-attachment-ui-image-height 320
+  "Maximum preview image height in pixels." :type 'integer)
+(defcustom ellm-attachment-ui-image-max-bytes (* 8 1024 1024)
+  "Maximum encoded raster size read for an automatic image preview.
+Larger images remain file cards.  This bounds the UI image read, not the
+core resolver's integrity verification or a decoder's working memory."
+  :type 'integer)
+
+(defconst ellm-attachment-ui--raster-types
+  '(("image/png" . png) ("image/jpeg" . jpeg)
+    ("image/gif" . gif) ("image/webp" . webp))
+  "Native clipboard and automatic preview raster formats.
+Never use an automatic decoder fallback, notably SVG or ImageMagick.")
+
+(defcustom ellm-clipboard-providers '(ellm-clipboard-wayland)
+  "Clipboard providers tried after native `yank-media'.
+Each zero-argument function returns nil when unavailable, or a list of
+items.  An item is either (:file LOCAL-FILE) or
+(:data UNIBYTE-STRING :mime MIME-STRING :name NAME).
+Providers must not modify the buffer.  Text-only selections return nil,
+so `ellm-paste' can fall back to normal `yank'."
+  :type '(repeat function))
+
+(defvar ellm-attachment-ui--native-handled nil)
+(defvar-local ellm-attachment-ui--revealed nil
+  "Attachment overlay whose source is currently revealed.")
+
+;;;;;; Clipboard
+
+(defun ellm-attachment-ui--uri-files (text)
+  "Return file items for a copied local URI list TEXT.
+Accept file:/// and file://localhost/ only.  Ignore comments, remote
+URIs and file-manager copy/cut markers; never move the original files."
+  (let (items)
+    (dolist (line (split-string text "[\r\n]+" t))
+      (when (string-match "\\`file://\\(?:localhost\\)?\\(/.*\\)\\'" line)
+        (let ((file (decode-coding-string
+                     (url-unhex-string (match-string 1 line)) 'utf-8)))
+          (when (and (not (string-match-p "[\0\r\n]" file))
+                     (not (file-remote-p file))
+                     (file-regular-p file) (file-readable-p file))
+            (push (list :file file) items)))))
+    (nreverse items)))
+
+(defun ellm-attachment-ui--import (items)
+  "Import clipboard ITEMS through the core API."
+  (dolist (item items)
+    (if (plist-member item :file)
+        (ellm-attach-file (plist-get item :file))
+      (ellm-attachment-insert (plist-get item :data)
+                              (plist-get item :mime)
+                              (plist-get item :name)))))
+
+(defun ellm-attachment-ui--media (mime data)
+  "Handle native clipboard MIME and DATA."
+  ;; Mark entry before import so storage errors cannot trigger a second paste.
+  (setq ellm-attachment-ui--native-handled t)
+  (let ((type (symbol-name mime)))
+    (if (string-prefix-p "image/" type)
+        (progn
+          (unless (assoc type ellm-attachment-ui--raster-types)
+            (user-error "Unsupported clipboard image: %s" type))
+          ;; The core checks that the supplied MIME agrees with the signature.
+          (ellm-attachment-insert (string-to-unibyte data) type "clipboard"))
+      (let ((items (ellm-attachment-ui--uri-files data)))
+        (unless items (user-error "Clipboard contains no readable local files"))
+        (ellm-attachment-ui--import items)))))
+
+(defun ellm-attachment-ui--wl-read (&rest args)
+  "Read binary wl-paste output for ARGS, or nil on failure."
+  (with-temp-buffer
+    (set-buffer-multibyte nil)
+    (let ((coding-system-for-read 'binary)
+          (coding-system-for-write 'binary))
+      (when (eq 0 (apply #'call-process "wl-paste" nil '(t nil) nil args))
+        (buffer-string)))))
+
+(defun ellm-clipboard-wayland ()
+  "Return image or copied local-file clipboard items using wl-paste.
+Arguments are passed directly to the executable, never through a shell."
+  (when (and (getenv "WAYLAND_DISPLAY") (executable-find "wl-paste"))
+    (let* ((types (split-string (or (ellm-attachment-ui--wl-read "--list-types") "")
+                                "[\r\n]+" t))
+           (mime (or (cl-find-if (lambda (type) (member type types))
+                                 '("text/uri-list" "x-special/gnome-copied-files"
+                                   "x-special/mate-copied-files" "image/png" "image/jpeg"))
+                     (cl-find-if (lambda (type)
+                                   (assoc type ellm-attachment-ui--raster-types))
+                                 types)))
+           (data (and mime (ellm-attachment-ui--wl-read "--no-newline" "--type" mime))))
+      (when data
+        (if (string-prefix-p "image/" mime)
+            (list (list :data data :mime mime :name "clipboard"))
+          (ellm-attachment-ui--uri-files data))))))
+
+;;;###autoload
+(defun ellm-paste ()
+  "Paste native media, provider attachments, or ordinary clipboard text."
+  (interactive)
+  (unless (derived-mode-p 'ellm-mode)
+    (user-error "Paste attachments from an ellm conversation"))
+  (let ((ellm-attachment-ui--native-handled nil))
+    (when (display-graphic-p)
+      (condition-case err
+          (yank-media)
+        (error (when ellm-attachment-ui--native-handled
+                 (signal (car err) (cdr err))))))
+    (unless ellm-attachment-ui--native-handled
+      (let ((items (run-hook-with-args-until-success 'ellm-clipboard-providers)))
+        (if items (ellm-attachment-ui--import items)
+          (call-interactively #'yank))))))
+
+;;;;;; Previews
+
+(defvar ellm-attachment-ui--map
+  (let ((map (make-sparse-keymap)))
+    (define-key map [mouse-2] #'ellm-attachment-open)
+    (define-key map (kbd "RET") #'ellm-attachment-open)
+    map))
+
+(defun ellm-attachment-ui--at-point ()
+  "Return attachment overlay at point."
+  (cl-find-if (lambda (ov) (overlay-get ov 'ellm-attachment))
+              (overlays-at (point))))
+
+(defun ellm-attachment-open (&optional event)
+  "Open the attachment at point, or mouse EVENT, with `find-file'."
+  (interactive (list last-nonmenu-event))
+  (when (mouse-event-p event) (mouse-set-point event))
+  (let* ((ov (ellm-attachment-ui--at-point))
+         (ref (and ov (overlay-get ov 'ellm-attachment))))
+    (unless ref (user-error "No attachment at point"))
+    (find-file (ellm-attachment-file
+                (ellm-attachment-resolve (plist-get ref :id)
+                                         (plist-get ref :name))))))
+
+(defun ellm-attachment-ui--reveal ()
+  "Reveal the reference at point and restore the previous preview.
+Only the current and previous overlays are inspected; no buffer scan."
+  (let ((here (and ellm-attachment-ui-reveal-at-point
+                   (ellm-attachment-ui--at-point))))
+    (unless (eq here ellm-attachment-ui--revealed)
+      (when (and ellm-attachment-ui--revealed
+                 (overlay-buffer ellm-attachment-ui--revealed))
+        (overlay-put ellm-attachment-ui--revealed 'display
+                     (overlay-get ellm-attachment-ui--revealed
+                                  'ellm-attachment-display)))
+      (setq ellm-attachment-ui--revealed here))
+    (when here (overlay-put here 'display nil))))
+
+(defun ellm-attachment-ui--image (attachment)
+  "Return a bounded, explicit raster preview for ATTACHMENT, or nil.
+Read at most the byte limit plus one, even if the file grows after stat.
+Check the bytes again and pass data, not a mutable filename, to the decoder."
+  (let ((type (cdr (assoc (ellm-attachment-mime attachment)
+                          ellm-attachment-ui--raster-types)))
+        (file (ellm-attachment-file attachment)))
+    (when (and type (display-images-p) (image-type-available-p type)
+               (<= (ellm-attachment-size attachment)
+                   ellm-attachment-ui-image-max-bytes))
+      (condition-case nil
+          (with-temp-buffer
+            (set-buffer-multibyte nil)
+            (insert-file-contents-literally
+             file nil 0 (1+ ellm-attachment-ui-image-max-bytes))
+            (let ((data (buffer-string)))
+              (when (and (<= (length data) ellm-attachment-ui-image-max-bytes)
+                         (eq (image-type-from-data data) type)
+                         (equal (secure-hash 'sha256 data)
+                                (file-name-base file)))
+                (create-image data type t
+                              :max-width ellm-attachment-ui-image-width
+                              :max-height ellm-attachment-ui-image-height))))
+        (error nil)))))
+
+(defun ellm-attachment-ui--preview (ref beg end)
+  "Display REF at BEG..END, preserving source even on resolution failure."
+  (let* ((ov (make-overlay beg end nil t nil))
+         (display
+          (condition-case err
+              (let* ((attachment (ellm-attachment-resolve
+                                  (plist-get ref :id) (plist-get ref :name)))
+                     (file (ellm-attachment-file attachment))
+                     (mime (ellm-attachment-mime attachment))
+                     (card (format "[File: %s · %s · %s]"
+                                   (ellm-attachment-name attachment) mime
+                                   (file-size-human-readable
+                                    (ellm-attachment-size attachment))))
+                     (image (and (plist-get ref :image)
+                                 (ellm-attachment-ui--image attachment))))
+                (overlay-put ov 'help-echo (concat card "\n" file "\nRET or mouse-2: open; point: reveal source"))
+                (or image card))
+            (error
+             (overlay-put ov 'help-echo (error-message-string err))
+             "[Attachment unavailable]"))))
+    (overlay-put ov 'ellm-attachment-source
+                 (buffer-substring-no-properties beg end))
+    (overlay-put ov 'help-echo
+                 (concat (overlay-get ov 'help-echo) "\n"
+                         (overlay-get ov 'ellm-attachment-source)))
+    (overlay-put ov 'ellm-attachment ref)
+    (overlay-put ov 'ellm-attachment-display display)
+    (overlay-put ov 'keymap ellm-attachment-ui--map)
+    (overlay-put ov 'mouse-face 'highlight)
+    (overlay-put ov 'evaporate t)
+    (overlay-put ov 'display display)
+    ov))
+
+(defun ellm-attachment-ui--standalone-p (beg end)
+  "Return non-nil if BEG..END occupies a line by itself."
+  (save-excursion
+    (goto-char beg)
+    (and (string-blank-p (buffer-substring-no-properties (line-beginning-position) beg))
+         (progn (goto-char end)
+                (string-blank-p (buffer-substring-no-properties end (line-end-position)))))))
+
+(defun ellm-attachment-ui--fontify (beg end)
+  "Reconcile attachment overlays in turns intersecting BEG..END.
+Parse complete user turns with the shared parser so multiline code spans
+and fences have the same meaning for display and transmission.  Reuse
+unchanged overlays: refontification does not reread or decode their files."
+  (save-excursion
+    (save-restriction
+      (widen)
+      (ellm--ensure-turn-body-cache)
+      (let* ((vec ellm--turn-body-cache-vector)
+             (idx (or (ellm--turn-body-cache-index-at beg) 0))
+             (start (if (< idx (length vec))
+                        (min beg (aref (aref vec idx) 0)) beg))
+             (limit end)
+             references)
+        (while (and (< idx (length vec)) (< (aref (aref vec idx) 0) end))
+          (let* ((entry (aref vec idx))
+                 (body (aref entry 1))
+                 (next (if (< (1+ idx) (length vec))
+                           (aref (aref vec (1+ idx)) 0) (point-max))))
+            (setq limit (max limit next))
+            (when (and ellm-attachment-ui-previews (equal (aref entry 2) "user"))
+              (dolist (ref (ellm-attachment-references
+                            (buffer-substring-no-properties body next)))
+                (let ((rb (+ body (plist-get ref :beg)))
+                      (re (+ body (plist-get ref :end))))
+                  (when (ellm-attachment-ui--standalone-p rb re)
+                    (push (list rb re ref) references)))))
+            (setq idx (1+ idx))))
+        (let ((old (make-hash-table :test #'eql)))
+          (dolist (ov (overlays-in start limit))
+            (when (overlay-get ov 'ellm-attachment)
+              (puthash (overlay-start ov) ov old)))
+          (pcase-dolist (`(,rb ,re ,ref) references)
+            (let ((ov (gethash rb old)))
+              (if (and ov (= re (overlay-end ov))
+                       (equal (overlay-get ov 'ellm-attachment-source)
+                              (buffer-substring-no-properties rb re)))
+                  (remhash rb old)
+                (ellm-attachment-ui--preview ref rb re))))
+          (maphash (lambda (_ ov) (delete-overlay ov)) old)))))
+  (ellm-attachment-ui--reveal))
+
+(defun ellm-attachment-ui--cleanup ()
+  "Remove attachment overlays when leaving the mode."
+  (save-restriction
+    (widen)
+    (dolist (ov (overlays-in (point-min) (point-max)))
+      (when (overlay-get ov 'ellm-attachment) (delete-overlay ov))))
+  (setq ellm-attachment-ui--revealed nil))
+
+;;;###autoload
+(defun ellm-attachment-ui-setup ()
+  "Set up buffer-local clipboard handlers and lazy attachment previews.
+Call from `ellm-mode'.  No global keys or hooks are changed."
+  (ellm-attachment-ui--cleanup)
+  (yank-media-handler '(image/png image/jpeg image/gif image/webp text/uri-list
+                                  x-special/gnome-copied-files x-special/mate-copied-files)
+                      #'ellm-attachment-ui--media)
+  (setq-local yank-media-autoselect-function
+              (lambda (types)
+                (or (cl-intersection '(text/uri-list x-special/gnome-copied-files
+                                                     x-special/mate-copied-files image/png image/jpeg)
+                                     types)
+                    types)))
+  (add-hook 'post-command-hook #'ellm-attachment-ui--reveal nil t)
+  (add-hook 'change-major-mode-hook #'ellm-attachment-ui--cleanup nil t)
+  (when font-lock-mode (font-lock-flush)))
+
+(provide 'ellm-attachment-ui)
+
 ;;;; Configuration
 
 (defvar-local ellm--config-in-flight nil
@@ -9301,7 +9871,7 @@ conversation state only when such updates were skipped."
       (ellm-list-refresh))
     (pop-to-buffer buffer)))
 
-;;;;; Major mode
+;;;; Major mode
 
 (defvar ellm-mode-map
   (let ((map (make-sparse-keymap)))
@@ -9322,6 +9892,8 @@ conversation state only when such updates were skipped."
     (define-key map (kbd "C-c C-l")   #'ellm-load-session)
     (define-key map (kbd "C-c C-o")   #'ellm-open-session)
     (define-key map (kbd "C-c C-m")   #'ellm-comment)
+    (define-key map (kbd "C-c C-f")   #'ellm-attach-file)
+    (define-key map (kbd "C-c C-v")   #'ellm-paste)
     map)
   "Keymap for `ellm-mode'.")
 
@@ -9339,6 +9911,7 @@ conversation state only when such updates were skipped."
   (setq-local font-lock-extend-after-change-region-function
               #'ellm--extend-after-change-region)
   (setq-local header-line-format '((:eval (ellm--header-line-status))))
+  (add-hook 'write-contents-functions #'ellm-attachment-before-write nil t)
   (add-hook 'before-change-functions #'ellm--before-change-function nil t)
   (add-hook 'after-change-functions #'ellm--after-change-function nil t)
   (add-hook 'kill-buffer-hook #'ellm--kill-composer nil t)
@@ -9383,6 +9956,7 @@ conversation state only when such updates were skipped."
   ;; without immediately reparsing and rewriting its frontmatter.
   (unless (ellm--persistence-recognize-buffer)
     (ellm--persistence-flush))
+  (ellm-attachment-ui-setup)
   (ellm--touch-activity))
 
 ;;;###autoload

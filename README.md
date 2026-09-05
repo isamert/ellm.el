@@ -627,11 +627,12 @@ Some other useful commands are:
 
 ## Persistence
 
-Conversations are plain text, so you can always save an `.ellm` file yourself
-and reopen it later.  Automatic persistence is optional.  Set
-`ellm-persistence-enabled` to non-nil and new main conversations are saved as
-`main.ellm` in their own session directories.  Their subagents, retained tool
-outputs, and reasoning state are saved alongside them.
+Conversations are plain text, so you can always save an `.ellm` file
+yourself and reopen it later.  Automatic persistence is optional.  Set
+`ellm-persistence-enabled` to non-nil and new main conversations are
+saved as `main.ellm` in their own session directories.  Their
+subagents, retained tool outputs, reasoning state, and attachments are
+saved alongside them.
 
 `ellm-persistence-location` controls where sessions go.  The default
 `global` location is `ellm-persistence-directory` (`~/ellm/`).  Set it to
