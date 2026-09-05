@@ -3578,6 +3578,12 @@ keeps its resolved prompt; clearing the cache only affects future requests."
 (defvar-local ellm--persistence-saving-p nil
   "Non-nil while ellm is assigning or saving this buffer's persistence file.")
 
+(defvar-local ellm--persistence-dirty-p nil
+  "Non-nil when a checkpoint has unsaved transcript or auxiliary state.")
+
+(defvar-local ellm--persistence-timer nil
+  "Batching or idle timer for the pending persistence checkpoint, or nil.")
+
 (defconst ellm--tool-output-id-regexp
   "\\`tool-output-\\([[:digit:]]+\\)-[[:alnum:]-]+\\'"
   "Regexp matching a retained tool output identifier.")
@@ -3908,7 +3914,7 @@ persisted ellm session."
 
 (defun ellm--persistence-prepare (&optional force root session-id)
   "Prepare the current buffer for persistence.
-FORCE and ROOT have the same meanings as in `ellm--persistence-checkpoint'.
+FORCE and ROOT have the same meanings as in `ellm--persistence-flush'.
 When SESSION-ID is non-nil, assign it to the buffer.  All persistence
 metadata is written in one frontmatter replacement."
   (when (and (or force ellm-persistence-enabled)
@@ -3955,11 +3961,48 @@ metadata is written in one frontmatter replacement."
         (ellm--apply-working-directory
          (ellm--effective-frontmatter updated))))))
 
-(defun ellm--persistence-checkpoint (&optional force root session-id)
-  "Persist the current ellm buffer at a stable conversation boundary.
+(defun ellm--persistence-cancel-timer ()
+  "Cancel the current buffer's pending persistence timer."
+  (when ellm--persistence-timer
+    (cancel-timer ellm--persistence-timer)
+    (setq ellm--persistence-timer nil)))
+
+(defun ellm--persistence-checkpoint ()
+  "Mark this transcript dirty and coalesce routine saves.
+Wait five seconds from the first checkpoint, then save once Emacs has been
+idle for three seconds.  Further checkpoints do not restart either wait."
+  (when (and ellm-persistence-enabled
+             (not ellm--persistence-ephemeral-p)
+             (not ellm--persistence-saving-p))
+    ;; A checkpoint can also represent changes to reasoning or tool output.
+    (setq ellm--persistence-dirty-p t)
+    (set-buffer-modified-p t)
+    (unless ellm--persistence-timer
+      (setq ellm--persistence-timer
+            (run-at-time
+             5 nil #'ellm--persistence-wait-for-idle (current-buffer))))))
+
+(defun ellm--persistence-wait-for-idle (buffer)
+  "After the batching delay, schedule BUFFER's save for an idle period."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (setq ellm--persistence-timer
+            (run-with-idle-timer
+             3 nil
+             (lambda (buffer)
+               (when (buffer-live-p buffer)
+                 (with-current-buffer buffer
+                   (ellm--persistence-flush))))
+             buffer)))))
+
+(defun ellm--persistence-flush (&optional force root session-id)
+  "Synchronously persist the current ellm buffer if dirty.
 When FORCE is non-nil, persist regardless of automatic-persistence settings.
 ROOT and SESSION-ID have the same meanings as in `ellm--persistence-prepare'."
-  (when (and (or force ellm-persistence-enabled)
+  (ellm--persistence-cancel-timer)
+  (when (and (or force ellm--persistence-dirty-p
+                      (buffer-modified-p) (not buffer-file-name))
+             (or force ellm-persistence-enabled)
              (or force (not ellm--persistence-ephemeral-p))
              (not ellm--persistence-saving-p))
     (condition-case err
@@ -3971,7 +4014,8 @@ ROOT and SESSION-ID have the same meanings as in `ellm--persistence-prepare'."
             (let ((ellm--persistence-saving-p t)
                   (save-silently t)
                   (inhibit-message t))
-              (save-buffer)))
+              (save-buffer)
+              (setq ellm--persistence-dirty-p nil)))
           buffer-file-name)
       (error
        (lwarn 'ellm :warning "Failed to persist conversation: %s"
@@ -4039,12 +4083,12 @@ new session.  An existing session always keeps its current directory."
           ;; Subagents can have been launched before their parent was saved.
           ;; Give every related live buffer the newly established session first.
           (setq-local ellm--session-directory directory)
-          (ellm--persistence-checkpoint t nil session-id)))
+          (ellm--persistence-flush t nil session-id)))
       (message "ellm: saved session to %s" directory))))
 
 (defun ellm--persistence-before-kill ()
   "Save the current conversation before backend session cleanup."
-  (ellm--persistence-checkpoint))
+  (ellm--persistence-flush))
 
 (cl-defstruct (ellm--persisted-session
                (:constructor ellm--persisted-session-create))
@@ -5310,10 +5354,9 @@ Return non-nil when a live top-level assistant header was updated."
 (defun ellm--notify-request-finished (request outcome)
   "Finalize REQUEST metadata and run its finished hook once with OUTCOME."
   (unless ellm--request-finished-notified-p
-    (when (ellm--finalize-request-turn)
-      ;; Backends generally checkpoint immediately before notifying.  The
-      ;; completion timestamp is added here, so persist that final mutation.
-      (ellm--persistence-checkpoint))
+    (ellm--finalize-request-turn)
+    ;; Include completion metadata in the single final save.
+    (ellm--persistence-flush)
     (ellm--flush-pending-fold)
     (setq ellm--request-finished-notified-p t)
     (ellm--run-observer-hook 'ellm-request-finished-hook request outcome)))
@@ -9339,7 +9382,7 @@ conversation state only when such updates were skipped."
   ;; A visited persisted session is already complete on disk.  Recognize it
   ;; without immediately reparsing and rewriting its frontmatter.
   (unless (ellm--persistence-recognize-buffer)
-    (ellm--persistence-checkpoint))
+    (ellm--persistence-flush))
   (ellm--touch-activity))
 
 ;;;###autoload
