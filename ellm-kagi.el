@@ -776,7 +776,11 @@ conversation's active branch and transcript come from its `init' endpoint."
   "Return the content of the most recent user turn in the current buffer."
   (let ((turn (cl-find "user" (ellm--parse-turns)
                        :key #'ellm-turn-role :test #'equal :from-end t)))
-    (and turn (string-trim (ellm-turn-content turn)))))
+    (when turn
+      (let ((parts (ellm-attachment-content-parts (ellm-turn-content turn))))
+        (unless (cl-every #'stringp parts)
+          (user-error "ellm Kagi: attachments are not supported"))
+        (string-trim (apply #'concat parts))))))
 
 (defun ellm-kagi--render-nodes (request &optional final)
   "Emit an ordered snapshot of REQUEST's main nodes.
