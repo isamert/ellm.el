@@ -625,6 +625,59 @@ Some other useful commands are:
 - `ellm-fold-all-tool-blocks`, `ellm-fold-all-reasoning-blocks`, and
   `ellm-fold-all-blocks` fold generated details.
 
+## Images and files
+
+Ellm supports attaching images and more generally files into
+conversations. There is in buffer previews too:
+
+<img width="702" height="853" alt="image" src="https://github.com/user-attachments/assets/b3b25d2a-ae0b-48b2-9cbd-ff02f3cf09c0" />
+
+Use `C-c C-f` (`ellm-attach-file`) to attach a file, or `C-c C-v`
+(`ellm-paste`) to paste a screenshot or copied files. `ellm-paste`
+tries Emacs's native `yank-media` support first, then clipboard
+providers, then normal text yank. (Also see `ellm-clipboard-providers`
+which are used if `yank-media` does not work)
+
+Attachments are ordinary text references, inserted on their own line:
+
+```markdown
+>-| user
+Compare this screenshot with the specification.
+
+![Screenshot](attachment:<sha256>.png)
+[Specification](attachment:<sha256>.pdf)
+```
+
+(Ordinary filesystem links and remote URLs are never automatically
+uploaded.  Only attachment references in **user turns** become API
+inputs.)
+
+Standalone image references preview by default when Emacs supports
+their raster format. PDFs and other files show clickable file
+cards. Move point onto a reference to reveal and edit its source;
+hover to see the reference and file details. `RET` or mouse-2 opens it
+using normal Emacs file handling.
+
+Do `M-x customize-group RET ellm-attachment-ui RET` to see and
+configure attachment related customizations.
+
+> [!NOTE]
+> **Note about where attached files go**
+>
+> Attaching copies bytes immediately, so deleting or editing the
+> original file does not change the conversation. Unsaved and
+> nonpersistent buffers use `ellm-cache-directory/attachments/`,
+> alongside the reasoning cache.  Saved sessions use
+> `.state/attachments/` inside the session directory.
+>
+> `ellm-save` and automatic persistence copy referenced user
+> attachments from the cache into the session **before saving the
+> transcript**.
+>
+> Removing a reference or killing a buffer does not delete attachment
+> bytes: undo or other conversations may still depend on them. There
+> is no automatic cache garbage collection
+
 ## Persistence
 
 Conversations are plain text, so you can always save an `.ellm` file
