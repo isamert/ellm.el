@@ -10347,4 +10347,840 @@ The parent provider remains buffer-local fallback only when the profile omits on
     (should-not (ellm-test--invisible-at-text "FIRST-TAG-BODY"))
     (should-not (ellm-test--invisible-at-text "SECOND-TAG-BODY"))))
 
+;;;; ellm-attachment-core-tests
+
+(defmacro ellm-attachment-test--store (&rest body)
+  "Evaluate BODY with private disposable cache and session roots."
+  (declare (indent 0) (debug t))
+  `(let* ((root (make-temp-file "ellm-attachment-test-" t))
+          (ellm-cache-directory (expand-file-name "cache/" root))
+          (ellm-persistence-directory (expand-file-name "sessions/" root))
+          (ellm-persistence-location 'global)
+          (ellm-persistence-enabled nil)
+          (ellm--session-directory nil))
+     (unwind-protect (progn ,@body)
+       (delete-directory root t))))
+
+(defconst ellm-attachment-test--png
+  (unibyte-string 137 80 78 71 13 10 26 10 0 255 128 10)
+  "Small binary fixture with a PNG signature, not a decodable image.")
+
+(ert-deftest ellm-attachment-test-parser-contexts ()
+  (let* ((id (concat (make-string 64 ?a) ".png"))
+         (link (concat "![A](attachment:" id ")")))
+    (should (= 1 (length (ellm-attachment-references link))))
+    (dolist (text (list (concat "`" link "`")
+                        (concat "`` ` " link " ``")
+                        (concat "```markdown\n" link "\n```\n")
+                        (concat "~~~\n" link "\n~~~~\n")
+                        (concat "```\n" link)
+                        (concat "\\" link)))
+      (should-not (ellm-attachment-references text)))
+    (should (= 1 (length (ellm-attachment-references
+                         (concat "```\n" link "\n```\n" link)))))
+    (should (= 1 (length (ellm-attachment-references (concat "` unmatched " link)))))
+    (let ((ref (car (ellm-attachment-references (concat "hi " link " end")))))
+      (should (= 3 (plist-get ref :beg)))
+      (should (= (+ 3 (length link)) (plist-get ref :end)))
+      (should (equal id (plist-get ref :id))))
+    (should-not (ellm-attachment-references "[secret](attachment:../../secret)"))))
+
+(ert-deftest ellm-attachment-test-binary-roundtrip-and-dedup ()
+  (ellm-attachment-test--store
+    (let* ((a (ellm-attachment-import ellm-attachment-test--png "image/png" "a.png"))
+           (b (ellm-attachment-import ellm-attachment-test--png "image/png" "b.png"))
+           (id (ellm-attachment-id a)))
+      (should (equal id (ellm-attachment-id b)))
+      (should (equal ellm-attachment-test--png
+                     (ellm-attachment-data (ellm-attachment-resolve id))))
+      (should-not (multibyte-string-p (ellm-attachment-data a)))
+      (should (equal "image/png" (ellm-attachment-mime a)))
+      (should (= (length ellm-attachment-test--png) (ellm-attachment-size a)))
+      (unless (eq system-type 'windows-nt)
+        (should (= #o600 (file-modes (ellm-attachment-file a))))
+        (should (= #o700 (file-modes (ellm-attachment--directory))))))))
+
+(ert-deftest ellm-attachment-test-corrupt-missing-and-unsafe ()
+  (ellm-attachment-test--store
+    (should-error (ellm-attachment-resolve "../../etc/passwd") :type 'user-error)
+    (should-error (ellm-attachment-resolve (concat (make-string 64 ?a) ".png"))
+                  :type 'user-error)
+    (let ((a (ellm-attachment-import "abc" nil "notes.txt")))
+      (with-temp-file (ellm-attachment-file a) (insert "changed"))
+      (should-error (ellm-attachment-resolve (ellm-attachment-id a)) :type 'user-error)
+      (should-error (ellm-attachment-data a) :type 'user-error))))
+
+(ert-deftest ellm-attachment-test-reject-symlinks ()
+  (skip-unless (not (eq system-type 'windows-nt)))
+  (ellm-attachment-test--store
+    (let* ((a (ellm-attachment-import "abc" nil "notes.txt"))
+           (file (ellm-attachment-file a))
+           (outside (expand-file-name "outside" root)))
+      (rename-file file outside)
+      (make-symbolic-link outside file)
+      (should-error (ellm-attachment-resolve (ellm-attachment-id a)) :type 'user-error))))
+
+(ert-deftest ellm-attachment-test-order-and-escaped-label ()
+  (ellm-attachment-test--store
+    (with-temp-buffer
+      (ellm-mode)
+      (insert ">-| user\nBefore\n")
+      (let* ((a (ellm-attachment-insert ellm-attachment-test--png "image/png" "a [b].png"))
+             (id (ellm-attachment-id a)))
+        (insert "After")
+        (let* ((content (ellm-turn-content (car (ellm--parse-turns))))
+               (parts (ellm-attachment-content-parts content)))
+          (should (= 3 (length parts)))
+          (should (equal "Before\n" (car parts)))
+          (should (equal "a [b].png" (ellm-attachment-name (nth 1 parts))))
+          (should (equal id (ellm-attachment-id (nth 1 parts))))
+          (should (equal "\nAfter" (nth 2 parts))))))))
+
+(ert-deftest ellm-attachment-test-save-move-and-reopen ()
+  (ellm-attachment-test--store
+    (let (saved-directory saved-file text id)
+      (with-temp-buffer
+        (ellm-mode)
+        (insert ">-| user\n")
+        (let ((original (expand-file-name "original.pdf" root)))
+          (with-temp-file original (insert "%PDF-1.7\nfixture"))
+          (setq id (ellm-attachment-id (ellm-attach-file original)))
+          (delete-file original))
+        (ellm-save)
+        (setq saved-directory ellm--session-directory
+              saved-file buffer-file-name text (buffer-string))
+        (should (file-exists-p (ellm-attachment--path id)))
+        (should (file-exists-p (ellm-attachment--path id t))))
+      (delete-directory ellm-cache-directory t)
+      (let* ((moved (expand-file-name "moved/" root))
+             (file (expand-file-name (file-name-nondirectory saved-file) moved)))
+        (rename-file saved-directory (directory-file-name moved))
+        (with-temp-buffer
+          (insert-file-contents file)
+          (setq buffer-file-name file)
+          (ellm-mode)
+          (should (equal text (buffer-string)))
+          (should (equal "%PDF-1.7\nfixture"
+                         (ellm-attachment-data (ellm-attachment-resolve id)))))))))
+
+(ert-deftest ellm-attachment-test-save-failure-not-success ()
+  (ellm-attachment-test--store
+    (with-temp-buffer
+      (ellm-mode)
+      (insert ">-| user\n![Missing](attachment:" (make-string 64 ?b) ".png)\n")
+      (should-error (ellm-save) :type 'user-error)
+      (should-not (file-exists-p buffer-file-name)))))
+
+(ert-deftest ellm-attachment-test-localization-only-user-input ()
+  (ellm-attachment-test--store
+    (with-temp-buffer
+      (ellm-mode)
+      (insert ">-| assistant\n![Missing](attachment:" (make-string 64 ?b) ".png)\n"
+              ">-| user\n```\n![Example](attachment:" (make-string 64 ?c) ".png)\n```\n")
+      (setq ellm--session-directory (expand-file-name "session/" root))
+      (ellm-attachment-localize)
+      (should-not (file-exists-p (ellm-attachment--directory))))))
+
+
+(ert-deftest ellm-attachment-test-ordinary-save-rejects-missing-data ()
+  (ellm-attachment-test--store
+    (with-temp-buffer
+      (ellm-mode)
+      (insert ">-| user\nHello\n")
+      (ellm-save)
+      (let ((saved (ellm-attachment--read buffer-file-name)))
+        (goto-char (point-max))
+        (insert "![Missing](attachment:" (make-string 64 ?b) ".png)\n")
+        (should-error (save-buffer) :type 'user-error)
+        (should (equal saved (ellm-attachment--read buffer-file-name)))))))
+
+(ert-deftest ellm-attachment-test-automatic-localization ()
+  (ellm-attachment-test--store
+    (with-temp-buffer
+      (ellm-mode)
+      (insert ">-| user\n")
+      (let* ((attachment (ellm-attachment-insert "%PDF-1.7\nfixture" nil "doc.pdf"))
+             (id (ellm-attachment-id attachment))
+             (ellm-persistence-enabled t))
+        ;; with-temp-buffer is intentionally ephemeral; opt in for this test.
+        (setq ellm--persistence-ephemeral-p nil)
+        (should (ellm--persistence-flush))
+        (should (file-exists-p (ellm-attachment--path id)))
+        (should (file-exists-p buffer-file-name))))))
+
+(ert-deftest ellm-attachment-test-parent-and-subagent-save ()
+  (ellm-attachment-test--store
+   (let ((parent (generate-new-buffer "ellm attachment parent"))
+         (child (generate-new-buffer "ellm attachment child"))
+         parent-id child-id)
+     (unwind-protect
+         (progn
+           (with-current-buffer parent
+             (ellm-mode)
+             (insert ">-| user\n")
+             (setq parent-id (ellm-attachment-id
+                              (ellm-attachment-insert "%PDF-1.7\nparent" nil "p.pdf"))))
+           (with-current-buffer child
+             (ellm-mode)
+             (insert "---\nsubagent:\n  id: child\n---\n\n>-| user\n")
+             (setq-local ellm-subagent-parent-buffer (buffer-name parent))
+             (setq child-id (ellm-attachment-id
+                             (ellm-attachment-insert "%PDF-1.7\nchild" nil "c.pdf"))))
+           (with-current-buffer parent (ellm-save))
+           (dolist (buffer (list parent child))
+             (with-current-buffer buffer
+               (should (file-exists-p buffer-file-name))
+               (should (file-exists-p (ellm-attachment--path parent-id)))
+               (should (file-exists-p (ellm-attachment--path child-id))))))
+       (dolist (buffer (list child parent))
+         (when (buffer-live-p buffer)
+           (with-current-buffer buffer (set-buffer-modified-p nil))
+           (kill-buffer buffer)))))))
+
+;;;; ellm-attachment-backend-test
+
+(defmacro ellm-attachment-backend-test--with-api (parts &rest body)
+  "Run BODY with the attachment API returning PARTS and plist fixtures."
+  (declare (indent 1) (debug t))
+  `(cl-letf (((symbol-function 'ellm-attachment-content-parts)
+              (lambda (_text)
+                (mapcar (lambda (part)
+                          (if (stringp part) part
+                            (make-ellm-attachment
+                             :id "sample-id" :name "sample"
+                             :mime (plist-get part :mime))))
+                        ,parts)))
+             ((symbol-function 'ellm-attachment-data)
+              (lambda (_part) (unibyte-string 0 255 42))))
+     ,@body))
+
+(ert-deftest ellm-attachment-backend-llm-capabilities-and-order ()
+  (dolist (spec '(("image/png" image-input) ("image/jpeg" image-input)
+                  ("image/gif" image-input) ("image/webp" image-input)
+                  ("application/pdf" pdf-input)))
+    (ellm-attachment-backend-test--with-api
+     (list "before" (list :mime (car spec)) "after")
+     (cl-letf (((symbol-function 'llm-capabilities) (lambda (_) (cdr spec))))
+       (let ((parts (llm-multipart-parts (ellm-llm--user-content nil "user"))))
+         (should (equal (car parts) "before"))
+         (should (equal (llm-media-mime-type (cadr parts)) (car spec)))
+         (should (equal (llm-media-data (cadr parts)) (unibyte-string 0 255 42)))
+         (should (equal (caddr parts) "after"))))
+     (cl-letf (((symbol-function 'llm-capabilities) (lambda (_) nil)))
+       (should-error (ellm-llm--user-content nil "user") :type 'user-error)))))
+
+(ert-deftest ellm-attachment-backend-llm-history-user-only ()
+  (with-temp-buffer
+    (let ((buffer (current-buffer)) seen
+          (prompt (make-llm-chat-prompt)))
+      (cl-letf (((symbol-function 'ellm-attachment-content-parts)
+                 (lambda (text)
+                   (should (eq buffer (current-buffer)))
+                   (push text seen)
+                   (list text))))
+        (ellm-llm--apply-turns-to-prompt
+         nil (mapcar (lambda (entry)
+                       (ellm-turn-create :role (car entry) :content (cdr entry)))
+                     '(("user" . "old") ("assistant" . "answer")
+                       ("system" . "system") ("user" . "new")))
+         prompt))
+      (should (equal (nreverse seen) '("old" "new")))
+      (should (equal (mapcar #'llm-chat-prompt-interaction-content
+                             (llm-chat-prompt-interactions prompt))
+                     '("old" "answer" "system" "new"))))))
+
+(ert-deftest ellm-attachment-backend-llm-unsupported-and-parser-errors ()
+  (ellm-attachment-backend-test--with-api '((:mime "application/zip"))
+                                          (should-error (ellm-llm--user-content nil "user") :type 'user-error))
+  (cl-letf (((symbol-function 'ellm-attachment-content-parts)
+             (lambda (_) (user-error "Missing attachment"))))
+    (should-error (ellm-llm--user-content nil "user") :type 'user-error)))
+
+(ert-deftest ellm-attachment-backend-acp-blocks-and-buffer ()
+  (with-temp-buffer
+    (let* ((buffer (current-buffer))
+           (connection (ellm-acp-connection :name "attachment-test" :buffer buffer)))
+      (setf (ellm-acp--connection-agent-capabilities connection)
+            '(:promptCapabilities (:image t :embeddedContext t)))
+      (ellm-attachment-backend-test--with-api
+       (progn
+         (should (eq buffer (current-buffer)))
+         '("before" (:mime "image/png") "between" (:mime "application/pdf") "after"))
+       (with-temp-buffer
+         (let* ((blocks (ellm-acp--prompt-blocks connection "user"))
+                (image (aref blocks 1))
+                (resource (plist-get (aref blocks 3) :resource)))
+           (should (equal (mapcar (lambda (block) (plist-get block :type)) blocks)
+                          '("text" "image" "text" "resource" "text")))
+           (should (equal (plist-get image :mimeType) "image/png"))
+           (should (equal (plist-get resource :mimeType) "application/pdf"))
+           (should (equal (plist-get resource :uri) "ellm-attachment:sample-id"))
+           (should (equal (base64-decode-string (plist-get resource :blob))
+                          (unibyte-string 0 255 42)))))))))
+
+(ert-deftest ellm-attachment-backend-acp-requires-capabilities ()
+  (with-temp-buffer
+    (let ((connection (ellm-acp-connection :name "attachment-test"
+                                           :buffer (current-buffer))))
+      (dolist (caps '(nil (:promptCapabilities (:image nil :embeddedContext nil))
+                          (:promptCapabilities (:image :json-false :embeddedContext :json-false))))
+        (setf (ellm-acp--connection-agent-capabilities connection) caps)
+        (dolist (mime '("image/png" "application/pdf"))
+          (ellm-attachment-backend-test--with-api (list (list :mime mime))
+                                                  (should-error (ellm-acp--prompt-blocks connection "user") :type 'user-error)))))))
+
+(ert-deftest ellm-attachment-backend-acp-send-and-missing-file ()
+  (with-temp-buffer
+    (let ((connection (ellm-acp-connection :name "attachment-test"
+                                           :buffer (current-buffer)))
+          sent)
+      (setf (ellm-acp--connection-session-id connection) "session")
+      (cl-letf (((symbol-function 'ellm-acp--request)
+                 (lambda (_connection method params &rest _)
+                   (should (eq method :session/prompt))
+                   (setq sent params))))
+        (ellm-attachment-backend-test--with-api '("plain")
+                                                (ellm-acp--send-prompt connection "user")
+                                                (should (equal sent '(:sessionId "session"
+                                                                      :prompt [(:type "text" :text "plain")]))))
+        (setq sent nil)
+        (cl-letf (((symbol-function 'ellm-attachment-content-parts)
+                   (lambda (_) (user-error "Missing attachment"))))
+          (should-error (ellm-acp--send-prompt connection "user") :type 'user-error)
+          (should-not sent))))))
+
+(ert-deftest ellm-attachment-backend-codex-images-not-pdf ()
+  (let* ((image (make-llm-media :mime-type "image/png" :data (unibyte-string 255)))
+         (message (ellm-codex--message
+                   (make-llm-chat-prompt-interaction
+                    :role 'user :content (llm-make-multipart "before" image "after")))))
+    (should (equal (plist-get (aref (plist-get message :content) 1) :image_url)
+                   "data:image/png;base64,/w=="))
+    (should-error (ellm-codex--content-part image 'assistant) :type 'user-error))
+  (should-error
+   (ellm-codex--content-part (make-llm-media :mime-type "application/pdf" :data "pdf") 'user)
+   :type 'user-error))
+
+(ert-deftest ellm-attachment-backend-kagi-rejects-attachments ()
+  (cl-letf (((symbol-function 'ellm--parse-turns)
+             (lambda () (list (ellm-turn-create :role "user" :content "user")))))
+    (ellm-attachment-backend-test--with-api '("before" (:mime "image/png"))
+                                            (should-error (ellm-kagi--last-user-content) :type 'user-error))
+    (ellm-attachment-backend-test--with-api '("plain" " text")
+                                            (should (equal (ellm-kagi--last-user-content) "plain text")))))
+
+(ert-deftest ellm-attachment-backend-pdf-errors-are-explicit ()
+  (ellm-attachment-backend-test--with-api '((:mime "application/pdf"))
+                                          (let ((err (should-error
+                                                      (ellm-llm--user-content (ellm-make-codex-provider) "pdf")
+                                                      :type 'user-error)))
+                                            (should (string-match-p "application/pdf" (error-message-string err)))
+                                            (should (string-match-p "pdf-input" (error-message-string err))))))
+
+(ert-deftest ellm-attachment-backend-acp-deferred-preflight-cleans-up ()
+  (with-temp-buffer
+    (ellm-mode)
+    (let* ((connection (ellm-acp-connection :name "attachment-test"
+                                            :buffer (current-buffer)))
+           (driver (ellm-acp--make-request :connection connection :prompt "user"))
+           (request (ellm--make-request :buffer (current-buffer) :backend driver
+                                        :generation ellm--request-generation))
+           (ellm-notifications-enabled nil)
+           ready sent failure)
+      (ellm--set-active-request request)
+      (cl-letf (((symbol-function 'ellm-acp--ensure-session)
+                 (lambda (_connection _provider _fm on-ready _on-error)
+                   (setq ready on-ready)))
+                ((symbol-function 'ellm-acp--ensure-frontmatter-model)
+                 (lambda (_connection _fm on-ready _on-error) (funcall on-ready)))
+                ((symbol-function 'ellm-acp--ensure-frontmatter-config)
+                 (lambda (_provider _connection _fm on-ready _on-error)
+                   (funcall on-ready)))
+                ((symbol-function 'ellm-acp--request)
+                 (lambda (&rest _) (setq sent t)))
+                ((symbol-function 'ellm-attachment-content-parts)
+                 (lambda (_) (user-error "Missing attachment: example")))
+                ((symbol-function 'ellm--persistence-checkpoint) #'ignore))
+        (ellm--request-start-backend request)
+        ;; Capture the event without replacing core's terminal handling.
+        (let ((emit (ellm-acp-request-emit driver)))
+          (setf (ellm-acp-request-emit driver)
+                (lambda (event) (setq failure event) (funcall emit event))))
+        ;; Run after backend-start returned, in an unrelated callback buffer.
+        (with-temp-buffer (funcall ready))
+        (should-not sent)
+        (should (equal (plist-get failure :message) "Missing attachment: example"))
+        (should (eq (ellm-request-state request) 'failed))
+        (should-not ellm--active-request)
+        (should-not (ellm-request-idle-timer request))
+        (should-not (ellm-request-transport request))
+        (should (ellm-acp-request-cancelled driver))
+        (should-not (ellm-acp-request-emit driver))))))
+
+(ert-deftest ellm-attachment-backend-sync-preflight-cleans-up ()
+  (dolist (provider (list (ellm-make-codex-provider)
+                          (ellm-make-kagi-provider :model "test")))
+    (with-temp-buffer
+      (ellm-mode)
+      (let ((ellm-provider provider)
+            (ellm-notifications-enabled nil)
+            request sent)
+        (setq-local ellm-before-request-hook
+                    (list (lambda (value _event) (setq request value))))
+        (ellm--insert-turn "user")
+        (insert "attachment")
+        (ellm-attachment-backend-test--with-api '((:mime "application/pdf"))
+                                                (cl-letf (((symbol-function 'ellm--persistence-checkpoint) #'ignore)
+                                                          ((symbol-function 'llm-chat-streaming)
+                                                           (lambda (&rest _) (setq sent t)))
+                                                          ((symbol-function 'ellm-kagi--message-payload)
+                                                           (lambda (&rest _) (setq sent t))))
+                                                  (should-error (ellm-send) :type 'user-error)))
+        (should-not sent)
+        (should (eq (ellm-request-state request) 'failed))
+        (should-not ellm--active-request)
+        (should-not (ellm-request-idle-timer request))
+        (should-not (ellm-request-transport request))))))
+
+(ert-deftest ellm-attachment-backend-real-parser-forwarding ()
+  (let ((ellm-cache-directory (make-temp-file "ellm-attachment-backend-" t))
+        (ellm--session-directory nil))
+    (unwind-protect
+        (with-temp-buffer
+          (let* ((data (encode-coding-string "%PDF-1.7\nattachment test" 'us-ascii))
+                 (attachment (ellm-attachment-import data "application/pdf" "test.pdf"))
+                 (ref (format "[test.pdf](attachment:%s)" (ellm-attachment-id attachment)))
+                 (literal (concat "`" ref "`\n```\n" ref "\n```\n"))
+                 (text (concat literal ref " after")))
+            (cl-letf (((symbol-function 'llm-capabilities) (lambda (_) '(pdf-input))))
+              (let ((parts (llm-multipart-parts (ellm-llm--user-content nil text))))
+                (should (equal (car parts) literal))
+                (should (equal (llm-media-data (cadr parts)) data))
+                (should (equal (caddr parts) " after"))))
+            (delete-file (ellm-attachment-file attachment))
+            (should-error (ellm-llm--user-content nil text) :type 'user-error)))
+      (delete-directory ellm-cache-directory t))))
+
+(ert-deftest ellm-attachment-backend-rejects-non-native-media ()
+  (with-temp-buffer
+    (let ((connection (ellm-acp-connection :name "attachment-test"
+                                           :buffer (current-buffer))))
+      (setf (ellm-acp--connection-agent-capabilities connection)
+            '(:promptCapabilities (:image t :embeddedContext t :audio t)))
+      (dolist (mime '("image/svg+xml" "image/tiff" "image/bmp"
+                      "audio/wav" "video/mp4" "application/zip"))
+        (ellm-attachment-backend-test--with-api (list (list :mime mime))
+                                                (cl-letf (((symbol-function 'llm-capabilities)
+                                                           (lambda (_) '(image-input pdf-input audio-input video-input)))
+                                                          ((symbol-function 'ellm-attachment-data)
+                                                           (lambda (_) (ert-fail "Unsupported attachment must not be read"))))
+                                                  (should-error (ellm-llm--user-content nil "user") :type 'user-error)
+                                                  (should-error (ellm-acp--prompt-blocks connection "user") :type 'user-error)))
+        (should-error
+         (ellm-codex--content-part (make-llm-media :mime-type mime :data "data") 'user)
+         :type 'user-error)))))
+
+(ert-deftest ellm-attachment-backend-native-image-formats ()
+  (with-temp-buffer
+    (let ((connection (ellm-acp-connection :name "attachment-test"
+                                           :buffer (current-buffer))))
+      (setf (ellm-acp--connection-agent-capabilities connection)
+            '(:promptCapabilities (:image t)))
+      (dolist (mime '("image/png" "image/jpeg" "image/gif" "image/webp"))
+        (ellm-attachment-backend-test--with-api (list (list :mime mime))
+                                                (should (equal (plist-get (aref (ellm-acp--prompt-blocks connection "user") 0)
+                                                                          :mimeType)
+                                                               mime)))
+        (should (equal (plist-get
+                        (ellm-codex--content-part
+                         (make-llm-media :mime-type mime :data "data") 'user)
+                        :type)
+                       "input_image"))))))
+
+;;;; ellm-attachment-ui-tests
+
+(ert-deftest ellm-attachment-ui-uri-list-local-only ()
+  (let ((file (make-temp-file "ellm clipboard ")))
+    (unwind-protect
+        (should
+         (equal (ellm-attachment-ui--uri-files
+                 (concat "copy\r\n# comment\r\nhttps://example.com/a\n"
+                         "file://remote" file "\nfile://" (replace-regexp-in-string " " "%20" file) "\r\n"))
+                (list (list :file file))))
+      (delete-file file))))
+
+(ert-deftest ellm-attachment-ui-wayland-preserves-binary ()
+  (let ((bytes (unibyte-string 137 80 78 71 0 255 10)) calls)
+    (cl-letf (((symbol-function 'getenv) (lambda (&rest _) "wayland-0"))
+              ((symbol-function 'executable-find) (lambda (_) "/usr/bin/wl-paste"))
+              ((symbol-function 'call-process)
+               (lambda (program _in _dest _display &rest args)
+                 (push (cons program args) calls)
+                 (should-not enable-multibyte-characters)
+                 (insert (if (equal args '("--list-types")) "image/png\ntext/plain\n" bytes))
+                 0)))
+      (let ((item (car (ellm-clipboard-wayland))))
+        (should (equal (plist-get item :data) bytes))
+        (should-not (multibyte-string-p (plist-get item :data)))
+        (should (equal (car calls) '("wl-paste" "--no-newline" "--type" "image/png")))))))
+
+(ert-deftest ellm-attachment-ui-paste-providers-and-text ()
+  (with-temp-buffer
+    (ellm-mode)
+    (let ((ellm-clipboard-providers (list (lambda () nil)))
+          (kill-ring '("plain text")))
+      (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) nil)))
+        (ellm-paste)
+        (should (equal (buffer-string) "plain text"))
+        (let ((ellm-clipboard-providers
+               (list (lambda () '((:data "raw" :mime "image/png" :name "clip")))))
+              imported)
+          (cl-letf (((symbol-function 'ellm-attachment-insert)
+                     (lambda (&rest args) (setq imported args))))
+            (ellm-paste)
+            (should (equal imported '("raw" "image/png" "clip")))))))))
+
+(ert-deftest ellm-attachment-ui-native-first-and-no-fallback-on-import-error ()
+  (with-temp-buffer
+    (ellm-mode)
+    (let ((ellm-clipboard-providers (list (lambda () (ert-fail "Unexpected fallback")))))
+      (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t))
+                ((symbol-function 'yank-media)
+                 (lambda (&rest _) (ellm-attachment-ui--media 'image/png "raw")))
+                ((symbol-function 'ellm-attachment-insert) (lambda (&rest _) t)))
+        (ellm-paste)
+        (cl-letf (((symbol-function 'ellm-attachment-insert)
+                   (lambda (&rest _) (error "Storage failure"))))
+          (should-error (ellm-paste) :type 'error))))))
+
+(defun ellm-attachment-ui-test--overlays ()
+  "Return the current buffer's attachment overlays."
+  (cl-remove-if-not (lambda (ov) (overlay-get ov 'ellm-attachment))
+                    (overlays-in (point-min) (point-max))))
+
+(ert-deftest ellm-attachment-ui-fontification-reuses-previews-and-reveals ()
+  (with-temp-buffer
+    (ellm-mode)
+    (let ((ref (format "[file](attachment:%s.txt)" (make-string 64 ?a)))
+          (resolves 0))
+      (insert ">-| user\n" ref "\ninline " ref "\n>-| assistant\n" ref "\n")
+      (cl-letf (((symbol-function 'ellm-attachment-resolve)
+                 (lambda (&rest _)
+                   (cl-incf resolves)
+                   (make-ellm-attachment :file "/tmp/file" :name "file"
+                                         :mime "text/plain" :size 12))))
+        ;; Exercise the real fontification entry point, without a visible window.
+        (font-lock-ensure)
+        (should (= 1 (length (ellm-attachment-ui-test--overlays))))
+        (let ((ov (car (ellm-attachment-ui-test--overlays))))
+          (font-lock-flush)
+          (font-lock-ensure)
+          (should (eq ov (car (ellm-attachment-ui-test--overlays))))
+          (should (= resolves 1))
+          (should (overlay-get ov 'display))
+          (goto-char (overlay-start ov))
+          (ellm-attachment-ui--reveal)
+          (should-not (overlay-get ov 'display))
+          (goto-char (point-max))
+          (ellm-attachment-ui--reveal)
+          (should (overlay-get ov 'display))
+          ;; Insertion before the reference shifts offsets but retains its image.
+          (goto-char (overlay-start ov))
+          (insert "\n")
+          (font-lock-ensure)
+          (should (eq ov (car (ellm-attachment-ui-test--overlays))))
+          (should (= resolves 1)))
+        (ellm-attachment-ui--cleanup)
+        (should-not (ellm-attachment-ui-test--overlays))))))
+
+(ert-deftest ellm-attachment-ui-unavailable-is-nondestructive ()
+  (with-temp-buffer
+    (insert "REF")
+    (cl-letf (((symbol-function 'ellm-attachment-resolve)
+               (lambda (&rest _) (error "Missing object"))))
+      (ellm-attachment-ui--preview '(:id "missing") 1 4)
+      (should (equal (buffer-string) "REF"))
+      (should (equal (overlay-get (car (ellm-attachment-ui-test--overlays)) 'help-echo)
+                     "Missing object\nREF")))))
+
+(ert-deftest ellm-attachment-ui-shared-parser-excludes-code ()
+  (skip-unless (require 'ellm-attachments nil t))
+  (save-window-excursion
+    (with-temp-buffer
+      (ellm-mode)
+      (let ((ref (format "[file](attachment:%s.txt)" (make-string 64 ?a))))
+        (insert ">-| user\n```\n" ref "\n```\n`" ref "`\n" ref "\n"))
+      (switch-to-buffer (current-buffer))
+      (goto-char (point-max))
+      (cl-letf (((symbol-function 'ellm-attachment-resolve)
+                 (lambda (&rest _) (error "Not stored"))))
+        (ellm-attachment-ui-setup)
+        (font-lock-flush)
+        (font-lock-ensure)
+        (should (= 1 (length (ellm-attachment-ui-test--overlays))))
+        (ellm-attachment-ui--cleanup)))))
+
+(ert-deftest ellm-attachment-ui-native-rejects-mismatched-signature ()
+  (with-temp-buffer
+    (ellm-mode)
+    (should-error (ellm-attachment-ui--media 'image/png "not a PNG")
+                  :type 'user-error)
+    (should-error (ellm-attachment-ui--media 'image/svg+xml "<svg/>")
+                  :type 'user-error)
+    (should (string-empty-p (buffer-string)))))
+
+(ert-deftest ellm-attachment-ui-raster-preview-bounded-and-explicit ()
+  (let* ((data (unibyte-string 137 80 78 71 13 10 26 10))
+         (dir (make-temp-file "ellm-preview" t))
+         (file (expand-file-name (concat (secure-hash 'sha256 data) ".png") dir))
+         (attachment (make-ellm-attachment :file file :mime "image/png"
+                                           :size (length data)))
+         (ellm-attachment-ui-image-max-bytes (length data))
+         args)
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (set-buffer-multibyte nil)
+            (insert data))
+          (cl-letf (((symbol-function 'display-images-p) (lambda () t))
+                    ((symbol-function 'image-type-available-p) (lambda (_) t))
+                    ((symbol-function 'create-image)
+                     (lambda (&rest values) (setq args values) 'preview)))
+            (should (eq (ellm-attachment-ui--image attachment) 'preview))
+            (should (equal (seq-take args 3) (list data 'png t)))
+            (should (equal (plist-get (nthcdr 3 args) :max-width)
+                           ellm-attachment-ui-image-width))
+            ;; A stale small size must not allow an oversized read/preview.
+            (write-region "extra bytes" nil file t 'silent)
+            (setq args nil)
+            (should-not (ellm-attachment-ui--image attachment))
+            (should-not args)
+            ;; SVG must not even reach the file reader, regardless of size.
+            (setf (ellm-attachment-mime attachment) "image/svg+xml")
+            (cl-letf (((symbol-function 'insert-file-contents-literally)
+                       (lambda (&rest _) (ert-fail "SVG preview read"))))
+              (should-not (ellm-attachment-ui--image attachment)))))
+      (delete-directory dir t))))
+
+(ert-deftest ellm-attachment-ui-paste-rejects-other-modes-before-clipboard ()
+  (with-temp-buffer
+    (cl-letf (((symbol-function 'yank-media)
+               (lambda (&rest _) (ert-fail "Native clipboard accessed")))
+              ((symbol-function 'display-graphic-p)
+               (lambda (&rest _) (ert-fail "Mode must be checked first"))))
+      (should-error (ellm-paste) :type 'user-error))))
+
+(ert-deftest ellm-attachment-ui-fontification-edits-context-and-undo ()
+  (with-temp-buffer
+    (ellm-mode)
+    (buffer-enable-undo)
+    (let ((ref (format "[file](attachment:%s.txt)" (make-string 64 ?a))))
+      (insert ">-| user\n" ref "\n")
+      (cl-letf (((symbol-function 'ellm-attachment-resolve)
+                 (lambda (&rest _) (error "Not stored"))))
+        (font-lock-ensure)
+        (should (= 1 (length (ellm-attachment-ui-test--overlays))))
+        (goto-char (point-min))
+        (forward-line 1)
+        (undo-boundary)
+        (insert "```\n")
+        (font-lock-ensure)
+        (should-not (ellm-attachment-ui-test--overlays))
+        (undo-boundary)
+        (undo 1)
+        (font-lock-ensure)
+        (should (= 1 (length (ellm-attachment-ui-test--overlays))))
+        ;; Tilde fences and multiline inline code use the shared parser too.
+        (goto-char (point-min))
+        (forward-line 1)
+        (insert "~~~\n")
+        (font-lock-ensure)
+        (should-not (ellm-attachment-ui-test--overlays))
+        (delete-region (line-beginning-position 0) (point))
+        (insert "`\n")
+        (goto-char (point-max))
+        (insert "`\n")
+        (font-lock-ensure)
+        (should-not (ellm-attachment-ui-test--overlays))))))
+
+(ert-deftest ellm-attachment-ui-fontification-replacement-deletion-and-disable ()
+  (with-temp-buffer
+    (ellm-mode)
+    (insert ">-| user\n[file](attachment:" (make-string 64 ?a) ".txt)\n")
+    (cl-letf (((symbol-function 'ellm-attachment-resolve)
+               (lambda (&rest _) (error "Not stored"))))
+      (font-lock-ensure)
+      (let ((old (car (ellm-attachment-ui-test--overlays))))
+        (goto-char (overlay-start old))
+        (search-forward "attachment:")
+        (delete-char 1)
+        (insert "b")
+        (font-lock-ensure)
+        (should-not (overlay-buffer old))
+        (should (= 1 (length (ellm-attachment-ui-test--overlays))))
+        (let ((ellm-attachment-ui-previews nil))
+          (font-lock-flush)
+          (font-lock-ensure)
+          (should-not (ellm-attachment-ui-test--overlays)))
+        (font-lock-flush)
+        (font-lock-ensure)
+        (let ((ov (car (ellm-attachment-ui-test--overlays))))
+          (delete-region (overlay-start ov) (overlay-end ov))
+          (should-not (overlay-buffer ov))
+          (font-lock-ensure)
+          (should-not (ellm-attachment-ui-test--overlays)))))))
+
+(ert-deftest ellm-attachment-ui-fontification-is-turn-local ()
+  (with-temp-buffer
+    (ellm-mode)
+    (insert ">-| user\n[file](attachment:" (make-string 64 ?a) ".txt)\n"
+            ">-| assistant\nNo attachments here.\n")
+    (let ((beg (line-beginning-position 0)))
+      (cl-letf (((symbol-function 'ellm-attachment-references)
+                 (lambda (_) (ert-fail "Unrelated user turn parsed"))))
+        (ellm-attachment-ui--fontify beg (point-max))))))
+
+(ert-deftest ellm-attachment-ui-image-is-direct-display-specification ()
+  "Image overlays must not nest a display property inside a replacement string."
+  (with-temp-buffer
+    (insert "REF\n")
+    (let ((image '(image :type png :data "fixture")))
+      (cl-letf (((symbol-function 'ellm-attachment-resolve)
+                 (lambda (&rest _)
+                   (make-ellm-attachment :file "/tmp/image.png" :name "Screenshot"
+                                         :mime "image/png" :size 12)))
+                ((symbol-function 'ellm-attachment-ui--image)
+                 (lambda (_) image)))
+        (ellm-attachment-ui--preview '(:id "image" :image t) 1 4)
+        (let ((ov (car (ellm-attachment-ui-test--overlays))))
+          (should (eq image (overlay-get ov 'ellm-attachment-display)))
+          (ellm-attachment-ui--reveal)
+          (should (eq image (overlay-get ov 'display)))
+          (goto-char 1)
+          (ellm-attachment-ui--reveal)
+          (should-not (overlay-get ov 'display))
+          (goto-char (point-max))
+          (ellm-attachment-ui--reveal)
+          (should (eq image (overlay-get ov 'display)))
+          (should (equal (buffer-string) "REF\n")))))))
+
+(ert-deftest ellm-attachment-ui-folding-and-narrowed-cleanup ()
+  (with-temp-buffer
+    (ellm-mode)
+    (insert ">-| user\n[file](attachment:" (make-string 64 ?a) ".txt)\n"
+            ">-| assistant\nAnswer.\n")
+    (cl-letf (((symbol-function 'ellm-attachment-resolve)
+               (lambda (&rest _) (error "Not stored"))))
+      (font-lock-ensure)
+      (let* ((ov (car (ellm-attachment-ui-test--overlays)))
+             (fold (make-overlay (overlay-start ov) (overlay-end ov))))
+        (overlay-put fold 'invisible t)
+        (font-lock-flush)
+        (font-lock-ensure)
+        (should (eq ov (car (ellm-attachment-ui-test--overlays))))
+        (should (invisible-p (overlay-start ov)))
+        (delete-overlay fold)
+        (should-not (invisible-p (overlay-start ov)))
+        (goto-char (point-max))
+        ;; Point movement must not scan the collection of attachment overlays.
+        (cl-letf (((symbol-function 'overlays-in)
+                   (lambda (&rest _) (ert-fail "Buffer scan during reveal"))))
+          (ellm-attachment-ui--reveal))
+        (narrow-to-region (overlay-end ov) (point-max))
+        (ellm-attachment-ui--cleanup)
+        (should-not (overlay-buffer ov))))))
+
+(ert-deftest ellm-attachment-ui-reveal-at-point-can-be-toggled ()
+  (with-temp-buffer
+    (insert "REF\n")
+    (cl-letf (((symbol-function 'ellm-attachment-resolve)
+               (lambda (&rest _) (error "Not stored"))))
+      (let* ((ov (ellm-attachment-ui--preview '(:id "missing") 1 4))
+             (display (overlay-get ov 'display))
+             (ellm-attachment-ui-reveal-at-point nil))
+        (goto-char 1)
+        (ellm-attachment-ui--reveal)
+        (should (equal display (overlay-get ov 'display)))
+        (should-not ellm-attachment-ui--revealed)
+        (setq ellm-attachment-ui-reveal-at-point t)
+        (ellm-attachment-ui--reveal)
+        (should-not (overlay-get ov 'display))
+        (should (eq ov ellm-attachment-ui--revealed))
+        ;; Disabling restores an already revealed preview without moving point.
+        (setq ellm-attachment-ui-reveal-at-point nil)
+        (ellm-attachment-ui--reveal)
+        (should (equal display (overlay-get ov 'display)))
+        (should-not ellm-attachment-ui--revealed)
+        (should (overlay-get ov 'help-echo))
+        (should (overlay-get ov 'keymap))))))
+
+(ert-deftest ellm-attachment-request-data-read-once-per-backend-request ()
+  "Resolution, media construction, and repeated references share validated bytes."
+  (dolist (backend '(llm acp))
+    (ellm-attachment-test--store
+      (with-temp-buffer
+        (let* ((data ellm-attachment-test--png)
+               (attachment (ellm-attachment-import data "image/png" "image.png"))
+               (id (ellm-attachment-id attachment))
+               (first (format "![First](attachment:%s)" id))
+               (second (format "![Second](attachment:%s)" id))
+               (connection (ellm-acp-connection :name "attachment-data-test"
+                                                 :buffer (current-buffer)))
+               (read-file (symbol-function 'ellm-attachment--read))
+               (hash (symbol-function 'secure-hash))
+               (reads 0) (hashes 0))
+          (setf (ellm-acp--connection-agent-capabilities connection)
+                '(:promptCapabilities (:image t)))
+          (cl-labels
+              ((build ()
+                 (if (eq backend 'acp)
+                     (ellm-acp--prompt-blocks connection (concat first "\n" second))
+                   (let ((prompt (make-llm-chat-prompt)))
+                     (ellm-llm--apply-turns-to-prompt
+                      nil (list (ellm-turn-create :role "user" :content first)
+                                (ellm-turn-create :role "user" :content second)) prompt)
+                     (let* ((interactions (llm-chat-prompt-interactions prompt))
+                            (a (car (llm-multipart-parts
+                                     (llm-chat-prompt-interaction-content (car interactions)))))
+                            (b (car (llm-multipart-parts
+                                     (llm-chat-prompt-interaction-content (cadr interactions))))))
+                       (should (eq (llm-media-data a) (llm-media-data b)))
+                       (should (equal data (llm-media-data a))))))))
+            (cl-letf (((symbol-function 'ellm-attachment--read)
+                       (lambda (file) (cl-incf reads) (funcall read-file file)))
+                      ((symbol-function 'secure-hash)
+                       (lambda (&rest args) (cl-incf hashes) (apply hash args)))
+                      ((symbol-function 'llm-capabilities) (lambda (_) '(image-input))))
+              (build)
+              (should (= reads 1))
+              (should (= hashes 1))
+              (should-not ellm-attachment--request-data)
+              (build)
+              (should (= reads 2))
+              (should (= hashes 2))
+              ;; A later request must not mask corruption or missing files.
+              (with-temp-file (ellm-attachment-file attachment) (insert "changed"))
+              (should-error (build) :type 'user-error)
+              (should (= reads 3))
+              (should (= hashes 3))
+              (should-not ellm-attachment--request-data)
+              (delete-file (ellm-attachment-file attachment))
+              (should-error (build) :type 'user-error))))))))
+
+(ert-deftest ellm-attachment-request-data-preserves-labels-and-rejects-failed-validation ()
+  (ellm-attachment-test--store
+    (let* ((attachment (ellm-attachment-import ellm-attachment-test--png "image/png" "image.png"))
+           (id (ellm-attachment-id attachment))
+           (ellm-attachment--request-data (make-hash-table :test #'equal)))
+      (should (equal "First" (ellm-attachment-name (ellm-attachment-resolve id "First"))))
+      (should (equal "Second" (ellm-attachment-name (ellm-attachment-resolve id "Second"))))
+      (should (= 1 (hash-table-count ellm-attachment--request-data)))
+      (should (eq (gethash id ellm-attachment--request-data)
+                  (ellm-attachment-data attachment)))
+      (clrhash ellm-attachment--request-data)
+      (with-temp-file (ellm-attachment-file attachment) (insert "changed"))
+      (should-error (ellm-attachment-resolve id) :type 'user-error)
+      (should (= 0 (hash-table-count ellm-attachment--request-data)))
+      (should-error (ellm-attachment-data attachment) :type 'user-error))))
+
 ;;; ellm-test.el ends here
