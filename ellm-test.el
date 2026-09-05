@@ -2426,11 +2426,10 @@
                      ("Cookie" . "kagi_session=secret")
                      ("Content-Type" . "application/json"))))
     (should (equal payload
-                   '(:message "Hello"
-                      :thinking_preset "extended"
-                     :model_name "model-1"
+                   '(:content "Hello" :model "model-1" :lens_id nil
                      :enable_search :json-false
-                     :personalization :json-false)))))
+                     :personalization :json-false
+                     :thinking_preset "extended")))))
 
 (ert-deftest ellm-test-kagi-accepts-provider-without-thinking-slot ()
   "Providers created before the thinking slot was added should remain usable."
@@ -2441,7 +2440,7 @@
     (should (equal (ellm-kagi--url provider "/api/init")
                    "https://assistant.kagi.com/api/init"))
     (should-not (plist-get payload :thinking_preset))
-    (should (equal (plist-get payload :model_name) "legacy-model"))))
+    (should (equal (plist-get payload :model) "legacy-model"))))
 
 (defun ellm-test--kagi-frontmatter-candidates (text)
   "Return completion candidates at the `|' marker in Kagi frontmatter TEXT."
@@ -2915,24 +2914,6 @@
     (should (equal (ellm-provider-model-candidates provider)
                    '("current" "available")))))
 
-(ert-deftest ellm-test-kagi-splits-cumulative-snapshots ()
-  "Kagi partial and final snapshots should separate reasoning from text."
-  (let* ((partial
-          (ellm-kagi--split-partial-html
-           (concat
-            "<details><summary>Thinking</summary><p>First thought.</p></details>"
-            "<details><summary>Searched with Kagi</summary>Sources</details>"
-            "<details><summary>Thinking</summary><p>Final thought.</p></details>"
-            "<p>Hello &amp; welcome.</p>")))
-         (final
-          (ellm-kagi--split-final-text
-           (concat "<details><summary>Thinking</summary>\n\nPlan.\n\n"
-                   "</details>\n\nFinal **answer**."))))
-    (should (string-match-p "Final thought" (car partial)))
-    (should-not (string-match-p "Sources" (car partial)))
-    (should (string-match-p "Hello & welcome" (cdr partial)))
-    (should (equal final '("Plan." . "Final **answer**.")))))
-
 (ert-deftest ellm-test-kagi-stream-filter-parses-fragmented-sse ()
   "Kagi's stream filter should skip headers and join fragmented SSE records."
   (let ((request (ellm-kagi--make-request))
@@ -2992,7 +2973,7 @@
        (lambda (_value) (ert-fail "Unexpected Kagi success"))
        (lambda (error) (setq failure error))))
     (should (= calls 1))
-    (should (ellm-kagi--transient-error-p failure))))
+    (should (plz-error-p failure))))
 
 (ert-deftest ellm-test-kagi-stream-errors-are-terminal ()
   "Kagi error and premature DONE frames should finish with diagnostics."
@@ -3005,38 +2986,27 @@
        error-request "data: {\"error\":\"quota exceeded\"}")
       (ellm-kagi--handle-sse-record done-request "data: [DONE]"))
     (should (equal (nreverse errors)
-                   '("quota exceeded" "stream ended without a final event")))))
+                   '("quota exceeded" "stream ended without turn.completed")))))
 
-(ert-deftest ellm-test-kagi-cancel-url-exists-before-message-reply ()
-  "Cancellation should target the posted branch before its reply arrives."
-  (let* ((provider (ellm-make-kagi-provider
-                    :session-token "secret"
-                    :model "model-1"))
-         (request (ellm-kagi--make-request
-                   :provider provider :branch-id "branch-1"))
-         post-success cancel-urls)
-    (cl-letf
-        (((symbol-function 'ellm-kagi--request-json)
-          (lambda (_provider _method _path _body then _else
-                   &optional _request)
-            (setq post-success then)
-            'mock-process))
-         ((symbol-function 'plz)
-          (lambda (_method url &rest _args)
-            (push url cancel-urls)
-            'cancel-process)))
-      (ellm-kagi--post-message request '(:message "Hello"))
+(ert-deftest ellm-test-kagi-cancel-before-message-reply ()
+  "A late submit reply supplies the turn ID needed for remote cancellation."
+  (let* ((provider (ellm-make-kagi-provider :session-token "secret" :model "m"))
+         (request (ellm-kagi--make-request :provider provider :branch-id "b"))
+         reply urls)
+    (cl-letf (((symbol-function 'plz)
+               (lambda (_method url &rest args)
+                 (push url urls)
+                 (when (string-suffix-p "/respond" url)
+                   (setq reply (plist-get args :then)))
+                 'mock-process)))
+      (ellm-kagi--post-message request '(:content "Hello"))
       (ellm-backend-cancel request)
-      (should (equal cancel-urls
-                     '("https://assistant.kagi.com/api/branches/branch-1/stream/cancel")))
-      (funcall post-success
-               '(:conversation (:uuid "conv-1")
-                 :branch (:uuid "branch-2")
-                 :stream_url "/api/branches/branch-2/stream"
-                 :stream_cancel_url
-                 "/api/branches/branch-2/stream/cancel")))
-    (should (equal (ellm-kagi-request-branch-id request) "branch-1"))
-    (should (= (length cancel-urls) 1))))
+      (ellm-backend-finish request 'cancelled)
+      (funcall reply
+               "{\"conversation_uuid\":\"c\",\"branch_uuid\":\"b\",\"assistant_turn_uuid\":\"t\"}"))
+    (should (equal (nreverse urls)
+                   '("https://assistant.kagi.com/api/v2/branches/b/respond"
+                     "https://assistant.kagi.com/api/v2/turns/t/cancel")))))
 
 (ert-deftest ellm-test-kagi-cancel-stops-remote-generation-once ()
   "Kagi cancellation should call the branch endpoint at most once."
@@ -3045,7 +3015,7 @@
                     :model "model-1"))
          (request (ellm-kagi--make-request
                    :provider provider
-                   :cancel-url "/api/branches/branch-1/stream/cancel"))
+                   :cancel-url "/api/v2/turns/turn-1/cancel"))
          calls)
     (cl-letf (((symbol-function 'plz)
                (lambda (method url &rest args)
@@ -3059,7 +3029,7 @@
     (pcase-let ((`(,method ,url ,args) (car calls)))
       (should (eq method 'post))
       (should (equal url
-                     "https://assistant.kagi.com/api/branches/branch-1/stream/cancel"))
+                     "https://assistant.kagi.com/api/v2/turns/turn-1/cancel"))
       (should (equal (alist-get "Cookie" (plist-get args :headers)
                                 nil nil #'equal)
                      "kagi_session=secret"))
@@ -3075,7 +3045,7 @@
          (request (ellm-kagi--make-request
                    :provider provider
                    :phase 'streaming
-                   :cancel-url "/api/branches/branch-1/stream/cancel")))
+                   :cancel-url "/api/v2/turns/turn-1/cancel")))
     (cl-letf (((symbol-function 'plz)
                (lambda (&rest _args) (error "curl unavailable"))))
       (ellm-backend-cancel request))
@@ -3096,98 +3066,155 @@
         (when (buffer-live-p buffer)
           (kill-buffer buffer))))))
 
-(ert-deftest ellm-test-kagi-backend-create-stream-smoke ()
-  "The Kagi backend should create, persist, stream, and finish a conversation."
-  (let ((provider (ellm-make-kagi-provider
-                   :session-token "secret"
-                   :model "model-1"))
-        (ellm-buffer-name-function nil)
-        requests)
-    (with-temp-buffer
-      (ellm-mode)
-      (ellm--insert-turn "user")
-      (insert "Hello.\n")
-      (let ((ellm-provider provider))
-        (cl-letf
-            (((symbol-function 'ellm-kagi--request-json)
-              (lambda (_provider method path body then _else
-                                 &optional _request)
-                (push (list method path body) requests)
-                (cond
-                 ((equal path "/api/conversations")
-                  (funcall then
-                           '(:conversation (:uuid "conv-1")
-                             :default_branch (:uuid "branch-1"))))
-                 ((equal path "/api/branches/branch-1/messages")
-                  (funcall then
-                           '(:conversation (:uuid "conv-1")
-                             :branch (:uuid "branch-1")
-                             :stream_url "/api/branches/branch-1/stream"
-                             :stream_cancel_url
-                             "/api/branches/branch-1/stream/cancel")))
-                 (t (ert-fail (format "Unexpected Kagi path: %s" path))))
-                'mock-process))
-             ((symbol-function 'ellm-kagi--start-stream)
-              (lambda (request)
-                (ellm-kagi--handle-event
-                 request '(:conversation_title "Greeting" :is_final :json-false))
-                (ellm-kagi--handle-event
-                 request
-                 '(:text "<details><summary>Thinking</summary>\nPlan.\n</details>\nAnswer."
-                   :is_final t
-                   :context_usage (:context_window 1000 :total_used 25)
-                   :usage (:cost_usd 0.01)
-                   :references
-                   ((:index 1 :title "Example" :url "https://example.com")))))))
-          (ellm-send)))
-      (setq requests (nreverse requests))
-      (should (equal (mapcar #'cadr requests)
-                     '("/api/conversations"
-                       "/api/branches/branch-1/messages")))
-      (should (equal (plist-get (nth 2 (cadr requests)) :message) "Hello."))
-      (should (equal (ellm--frontmatter-value '(kagi conversation-id)) "conv-1"))
-      (should (equal (ellm--frontmatter-value '(kagi branch-id)) "branch-1"))
-      (should (equal (ellm--frontmatter-value '(title)) "Greeting"))
-      (should (string-match-p "Plan\." (buffer-string)))
-      (should (string-match-p "Answer\." (buffer-string)))
-      (should (string-match-p
-               (regexp-quote "1. [Example](https://example.com)")
-               (buffer-string)))
-      (should (string-match-p "\n>-| user\n\\'" (buffer-string)))
-      (should (= (ellm-buffer-state-context-usage ellm-buffer-state) 25))
-      (should (= (ellm-buffer-state-context-size ellm-buffer-state) 1000))
-      (should (= (ellm-buffer-state-cost-amount ellm-buffer-state) 0.01))
-      (should-not ellm--active-request))))
+(defun ellm-test--kagi-event (request type &optional node parent payload id)
+  "Send a synthetic v2 event to REQUEST with TYPE, NODE, PARENT, PAYLOAD and ID."
+  (ellm-kagi--handle-event
+   request `(:event (:type ,type :node_id ,node :parent_node_id ,parent
+                    :payload ,payload :id ,id))))
 
-(ert-deftest ellm-test-kagi-backend-reuses-frontmatter-branch ()
-  "The Kagi backend should post directly to a saved branch."
-  (let ((provider (ellm-make-kagi-provider
-                   :session-token "secret"
-                   :model "model-1"))
-        paths)
-    (with-temp-buffer
-      (insert "---\nkagi:\n  conversation-id: conv-1\n  branch-id: branch-1\n---\n\n")
-      (ellm-mode)
-      (ellm--insert-turn "user")
-      (insert "Continue.\n")
-      (let ((ellm-provider provider))
-        (cl-letf
-            (((symbol-function 'ellm-kagi--request-json)
-              (lambda (_provider _method path _body then _else
-                                 &optional _request)
-                (push path paths)
-                (funcall then
-                         '(:conversation (:uuid "conv-1")
-                           :branch (:uuid "branch-1")
-                           :stream_url "/api/branches/branch-1/stream"))
-                'mock-process))
-             ((symbol-function 'ellm-kagi--start-stream)
-              (lambda (request)
-                (ellm-kagi--handle-event
-                 request '(:text "Continued." :is_final t)))))
-          (ellm-send)))
-      (should (equal paths '("/api/branches/branch-1/messages")))
-      (should (string-match-p "Continued\." (buffer-string))))))
+(defun ellm-test--kagi-answer (request)
+  "Stream a small v2 answer through REQUEST."
+  (ellm-kagi--handle-event request '(:title "Greeting"))
+  (ellm-test--kagi-event request "turn.started" nil nil '(:root_node_id "root"))
+  (ellm-test--kagi-event request "node.created" "think" "root"
+                        '(:kind "activity" :type "thinking"))
+  (ellm-test--kagi-event request "node.delta" "think" "root" '(:delta "Plan."))
+  (ellm-test--kagi-event request "node.created" "text" "root" '(:kind "text"))
+  (ellm-test--kagi-event request "node.delta" "text" "root" '(:delta "Answer."))
+  (ellm-test--kagi-event request "node.completed" "text" "root"
+                        '(:content "Answer. [^ref#1-2]" :status "completed"))
+  (ellm-test--kagi-event request "reference.added" nil nil
+                        '(:ref_id "ref" :title "Example" :url "https://example.com"))
+  (ellm-test--kagi-event request "turn.completed" nil nil
+                        '(:usage (:input_tokens 25 :output_tokens 10 :cost_usd 0.01)))
+  (ellm-kagi--handle-event request '(:is_final t :billing (:usage (:included_cost_usd 5)))))
+
+(ert-deftest ellm-test-kagi-backend-submit-stream-smoke ()
+  "Creation sends the first message once; saved branches use respond."
+  (dolist (existing '(nil t))
+    (let ((provider (ellm-make-kagi-provider :session-token "secret" :model "model-1"))
+          (ellm-buffer-name-function nil)
+          requests)
+      (with-temp-buffer
+        (when existing
+          (insert "---\nkagi:\n  conversation-id: conv-1\n  branch-id: branch-1\n---\n\n"))
+        (ellm-mode)
+        (ellm--insert-turn "user")
+        (insert "Hello.\n")
+        (let ((ellm-provider provider))
+          (cl-letf (((symbol-function 'ellm-kagi--request-json)
+                     (lambda (_provider method path body then _else &optional _request)
+                       (push (list method path body) requests)
+                       (funcall then '(:conversation_uuid "conv-1" :branch_uuid "branch-1"
+                                       :assistant_turn_uuid "turn-1"))))
+                    ((symbol-function 'ellm-kagi--start-stream)
+                     (lambda (request)
+                       (should (equal (ellm-kagi-request-stream-url request)
+                                      "/api/v2/turns/turn-1/stream"))
+                       (ellm-test--kagi-answer request))))
+            (ellm-send)))
+        (should (= (length requests) 1))
+        (should (equal (cadar requests)
+                       (if existing "/api/v2/branches/branch-1/respond"
+                         "/api/v2/conversations")))
+        (should (equal (plist-get (nth 2 (car requests)) :content) "Hello."))
+        (should (equal (ellm--frontmatter-value '(kagi conversation-id)) "conv-1"))
+        (should (equal (ellm--frontmatter-value '(kagi branch-id)) "branch-1"))
+        (should (equal (ellm--frontmatter-value '(title)) "Greeting"))
+        (should (string-match-p "Plan\\." (buffer-string)))
+        (should (string-match-p (regexp-quote "Answer. [1](https://example.com)")
+                                (buffer-string)))
+        (should (string-match-p "\n>-| user\n\\'" (buffer-string)))
+        (should (= (ellm-buffer-state-cost-amount ellm-buffer-state) 0.01))
+        (should-not ellm--active-request)))))
+
+(ert-deftest ellm-test-kagi-orders-nodes-and-ignores-nested-research ()
+  "Parallel research must not interleave with main text; completions replace deltas."
+  (let* (events
+         (request (ellm-kagi--make-request :emit (lambda (e) (push e events)))))
+    (ellm-test--kagi-event request "turn.started" nil nil '(:root_node_id "root"))
+    (ellm-test--kagi-event request "node.created" "a" "root" '(:kind "text"))
+    (ellm-test--kagi-event request "node.delta" "a" "root" '(:delta "First") "d1")
+    (ellm-test--kagi-event request "node.delta" "a" "root" '(:delta "First") "d1")
+    (ellm-test--kagi-event request "node.created" "tool" "root"
+                          '(:kind "activity" :type "tool_call" :tool_name "search"
+                            :status "running"))
+    (ellm-test--kagi-event request "node.created" "nested" "tool" '(:kind "text"))
+    (ellm-test--kagi-event request "node.delta" "nested" "tool" '(:delta "HIDDEN"))
+    (ellm-test--kagi-event request "node.created" "b" "root" '(:kind "text"))
+    (ellm-test--kagi-event request "node.delta" "b" "root" '(:delta "Last [^re"))
+    (ellm-test--kagi-event request "node.completed" "a" "root" '(:content "First corrected"))
+    (let ((channels (plist-get (cl-find 'stream events :key (lambda (e) (plist-get e :type)))
+                               :channels)))
+      (should (equal channels '((assistant . "First corrected")
+                                (reasoning . "search: running")
+                                (assistant . "Last ")))))
+    (ellm-test--kagi-event request "node.delta" "b" "root" '(:delta "f#3]"))
+    (ellm-test--kagi-event request "reference.added" nil nil
+                          '(:ref_id "ref" :url "https://example.com"))
+    (ellm-test--kagi-event request "turn.completed")
+    (ellm-kagi--handle-event request '(:is_final t))
+    (should (= (cl-count 'complete events :key (lambda (e) (plist-get e :type))) 1))
+    (should (equal (cdr (car (last (plist-get
+                                  (cl-find 'stream events :key (lambda (e) (plist-get e :type)))
+                                  :channels))))
+                   "Last [1](https://example.com)"))))
+
+(ert-deftest ellm-test-kagi-stream-eof-and-stale-callbacks ()
+  "EOF succeeds only after turn completion, and obsolete callbacks are ignored."
+  (dolist (completed '(nil t))
+    (let* (events callbacks
+           (request (ellm-kagi--make-request
+                     :provider (ellm-make-kagi-provider :session-token "secret")
+                     :stream-url "/api/v2/turns/t/stream"
+                     :emit (lambda (e) (push e events)))))
+      (cl-letf (((symbol-function 'plz)
+                 (lambda (_method url &rest args)
+                   (should (equal url "https://assistant.kagi.com/api/v2/turns/t/stream"))
+                   (setq callbacks args)
+                   'mock-process)))
+        (ellm-kagi--start-stream request))
+      (let ((old callbacks))
+        (cl-incf (ellm-kagi-request-serial request))
+        (funcall (plist-get old :then) "")
+        (funcall (plist-get old :else) (make-plz-error :message "stale"))
+        (funcall (plist-get old :filter) nil "ignored")
+        (should-not events)
+        (cl-decf (ellm-kagi-request-serial request)))
+      (when completed
+        (ellm-test--kagi-event request "turn.completed"))
+      (funcall (plist-get callbacks :then) "")
+      (should (eq (plist-get (car events) :type) (if completed 'complete 'failure)))
+      (let ((count (length events)))
+        (funcall (plist-get callbacks :then) "")
+        (should (= count (length events)))))))
+
+(ert-deftest ellm-test-kagi-sse-split-utf8-and-node-failure ()
+  "UTF-8 characters survive byte fragmentation; node failures stay terminal."
+  (let* (events
+         (request (ellm-kagi--make-request :emit (lambda (e) (push e events))))
+         (bytes (encode-coding-string
+                 "data: {\"event\":{\"type\":\"node.delta\",\"node_id\":\"a\",\"parent_node_id\":\"r\",\"payload\":{\"delta\":\"İsa 👋\"}}}\r\n\r\n"
+                 'utf-8)))
+    (ellm-test--kagi-event request "turn.started" nil nil '(:root_node_id "r"))
+    (ellm-test--kagi-event request "node.created" "a" "r" '(:kind "text"))
+    (dotimes (i (length bytes))
+      (ellm-kagi--consume-sse request (substring bytes i (1+ i))))
+    (should (equal (plist-get (car events) :channels) '((assistant . "İsa 👋"))))
+    (ellm-test--kagi-event request "node.failed" "a" "r" '(:error_code "quota_exceeded"))
+    (should (string-match-p "quota_exceeded" (plist-get (car events) :message)))
+    (ellm-kagi--handle-event request '(:is_final t))
+    (should-not (cl-find 'complete events :key (lambda (e) (plist-get e :type))))))
+
+(ert-deftest ellm-test-kagi-submit-failures-are-not-replayed ()
+  "An ambiguous POST failure must not duplicate a billed message."
+  (let* (events
+         (request (ellm-kagi--make-request :phase 'posting
+                                          :emit (lambda (e) (push e events)))))
+    (ellm-kagi--finish-plz-error
+     request "submitting" (make-plz-error :curl-error '(28 . "timeout")))
+    (should (eq (plist-get (car events) :type) 'failure))
+    (should-not (plist-get (car events) :retryable))))
 
 (ert-deftest ellm-test-backends-default-to-project-root ()
   "Backends should consistently use the project root when cwd is unset."
