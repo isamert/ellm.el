@@ -202,6 +202,10 @@ provide request defaults that may be overridden by `kagi:' frontmatter."
                   (ellm-request-backend ellm--active-request)))
         (ellm-cancel t)))))
 
+(cl-defmethod ellm-provider-load-session ((provider ellm-kagi-provider) frontmatter)
+  "Select and load a Kagi conversation for PROVIDER."
+  (ellm-kagi-load-session provider frontmatter))
+
 (cl-defmethod ellm-backend-create
   ((provider ellm-kagi-provider) frontmatter buffer)
   "Create a Kagi driver for BUFFER using FRONTMATTER."
@@ -461,6 +465,116 @@ to `ellm-provider' or the first Kagi entry in `ellm-provider-alist'."
     (when (called-interactively-p 'interactive)
       (message "ellm Kagi: loaded %d models" (length models)))
     models))
+
+;;;; Session loading
+
+(defun ellm-kagi--conversation-label (conversation)
+  "Return a unique completion label for Kagi CONVERSATION."
+  (string-join
+   (delq nil
+         (list (or (plist-get conversation :title) "Untitled conversation")
+               (plist-get conversation :updated_at)
+               (plist-get conversation :model_name)
+               (plist-get conversation :uuid)))
+   "  "))
+
+(defun ellm-kagi--read-conversation (conversations)
+  "Prompt for one item from Kagi CONVERSATIONS."
+  (unless conversations
+    (user-error "Ellm Kagi: no conversations found"))
+  (let* ((choices (mapcar (lambda (conversation)
+                            (cons (ellm-kagi--conversation-label conversation)
+                                  conversation))
+                          conversations))
+         (choice (completing-read "Kagi conversation: " choices nil t)))
+    (cdr (assoc choice choices))))
+
+(defun ellm-kagi--provider-name (provider frontmatter)
+  "Return PROVIDER's configured name using FRONTMATTER when available."
+  (or (alist-get 'provider frontmatter)
+      (car (cl-find provider ellm-provider-alist
+                    :key (lambda (entry)
+                           (ellm--provider-entry-provider (cdr entry)))
+                    :test #'eq))
+      "kagi"))
+
+(defun ellm-kagi--insert-history-message (message)
+  "Insert Kagi history MESSAGE as ellm transcript turns."
+  (let ((role (plist-get message :role))
+        (content (plist-get message :content))
+        (thinking (plist-get message :thinking)))
+    (when (and (equal role "assistant")
+               (stringp thinking) (not (string-empty-p thinking)))
+      (ellm--insert-turn "reasoning" :continuation t)
+      (insert (ellm--escape-turn-delimiters thinking) "\n"))
+    (when (and (member role '("user" "assistant"))
+               (stringp content))
+      (ellm--insert-turn role)
+      (insert (ellm--escape-turn-delimiters content) "\n"))))
+
+(defun ellm-kagi--load-conversation-into-new-buffer
+    (provider frontmatter conversation transcript)
+  "Create an ellm buffer for Kagi CONVERSATION and its TRANSCRIPT."
+  (let* ((active-branch (plist-get transcript :active_branch))
+         (branch-id (plist-get active-branch :uuid))
+         (conversation-id (plist-get conversation :uuid))
+         (model (or (plist-get (plist-get transcript :conversation) :model_name)
+                    (plist-get conversation :model_name)
+                    (ellm-kagi-provider-model provider)))
+         (provider-name (ellm-kagi--provider-name provider frontmatter))
+         (title (or (plist-get (plist-get transcript :conversation) :title)
+                    (plist-get conversation :title)))
+         (messages (plist-get (plist-get transcript :messages) :items))
+         (buffer (generate-new-buffer
+                  (if (functionp ellm-initial-buffer-name)
+                      (funcall ellm-initial-buffer-name)
+                    ellm-initial-buffer-name))))
+    (unless (and (stringp conversation-id) (stringp branch-id))
+      (kill-buffer buffer)
+      (user-error "Ellm Kagi: conversation response has no active branch"))
+    (with-current-buffer buffer
+      (insert (format "---\nprovider: %s\nmodel: %s\nkagi:\n  conversation-id: %s\n  branch-id: %s\n---\n\n"
+                      provider-name model conversation-id branch-id))
+      (ellm-mode)
+      (dolist (message messages)
+        (ellm-kagi--insert-history-message message))
+      (unless (equal (ellm-turn-role (car (last (ellm--parse-turns)))) "user")
+        (ellm--insert-turn "user"))
+      (ellm-set-session-title title buffer)
+      (goto-char (point-max))
+      (ellm--persistence-checkpoint))
+    (switch-to-buffer buffer)
+    buffer))
+
+(defun ellm-kagi-load-session (provider frontmatter)
+  "Interactively select and load a Kagi conversation for PROVIDER.
+Kagi's `/api/init' response supplies the conversation list; the selected
+conversation's active branch and transcript come from its `init' endpoint."
+  (let* ((init (ellm-kagi--request-json-sync provider "/api/init"))
+         (conversations (plist-get (plist-get init :conversations) :items))
+         (conversation (ellm-kagi--read-conversation conversations))
+         (id (plist-get conversation :uuid)))
+    (unless (stringp id)
+      (user-error "Ellm Kagi: selected conversation has no ID"))
+    (ellm-kagi--load-conversation-into-new-buffer
+     provider frontmatter conversation
+     (ellm-kagi--request-json-sync
+      provider (format "/api/conversations/%s/init" id)))))
+
+(defun ellm-kagi--request-json-sync (provider path)
+  "Synchronously GET and parse JSON from Kagi PROVIDER at PATH."
+  (json-parse-string
+   (plz 'get (ellm-kagi--url provider path)
+     :headers (ellm-kagi--headers provider "application/json")
+     :as 'string
+     :timeout ellm-request-timeout
+     :noquery t)
+   :object-type 'plist
+   :array-type 'list
+   :null-object nil
+   :false-object :json-false))
+
+;;;; Request payload
 
 (defun ellm-kagi--frontmatter-option (frontmatter path fallback)
   "Return FRONTMATTER value at PATH, or FALLBACK when PATH is absent."

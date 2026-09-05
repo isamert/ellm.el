@@ -2914,6 +2914,53 @@
     (should (equal (ellm-provider-model-candidates provider)
                    '("current" "available")))))
 
+(ert-deftest ellm-test-kagi-load-session ()
+  "Kagi session loading should select a listed conversation and replay its branch."
+  (let ((provider (ellm-make-kagi-provider :session-token "secret" :model "fallback"))
+        loaded-buffer)
+    (unwind-protect
+        (let ((ellm-provider-alist `((kagi . ,provider))))
+          (cl-letf
+              (((symbol-function 'plz)
+                (lambda (method url &rest _args)
+                  (should (eq method 'get))
+                  (cond
+                   ((equal url "https://assistant.kagi.com/api/init")
+                    (json-serialize
+                     '(:conversations (:items [(:uuid "conversation-1"
+                                                  :title "Loaded Kagi"
+                                                  :model_name "loaded-model"
+                                                  :updated_at "2026-09-05T14:00:00")]))))
+                   ((equal url
+                           "https://assistant.kagi.com/api/conversations/conversation-1/init")
+                    (json-serialize
+                     '(:conversation (:title "Loaded Kagi" :model_name "loaded-model")
+                       :active_branch (:uuid "branch-1")
+                       :messages (:items
+                                  [(:role "user" :content "First prompt")
+                                   (:role "assistant" :thinking "A thought")
+                                   (:role "assistant" :content "First reply")]))))
+                   (t (error "Unexpected Kagi URL: %s" url)))))
+               ((symbol-function 'completing-read)
+                (lambda (_prompt collection &rest _) (caar collection)))
+               ((symbol-function 'switch-to-buffer)
+                (lambda (buffer-or-name &rest _)
+                  (setq loaded-buffer (get-buffer buffer-or-name)))))
+            (setq loaded-buffer (ellm-kagi-load-session provider nil)))
+          (with-current-buffer loaded-buffer
+            (should (string-match-p "Loaded Kagi" (buffer-name)))
+            (should (string-match-p "provider: kagi" (buffer-string)))
+            (should (string-match-p "model: loaded-model" (buffer-string)))
+            (should (string-match-p "conversation-id: conversation-1" (buffer-string)))
+            (should (string-match-p "branch-id: branch-1" (buffer-string)))
+            (should (string-match-p "First prompt" (buffer-string)))
+            (should (string-match-p "A thought" (buffer-string)))
+            (should (string-match-p "First reply" (buffer-string)))
+            (should (equal (mapcar #'ellm-turn-role (ellm--parse-turns))
+                           '("user" "reasoning" "assistant" "user")))))
+      (when (buffer-live-p loaded-buffer)
+        (kill-buffer loaded-buffer)))))
+
 (ert-deftest ellm-test-kagi-stream-filter-parses-fragmented-sse ()
   "Kagi's stream filter should skip headers and join fragmented SSE records."
   (let ((request (ellm-kagi--make-request))
