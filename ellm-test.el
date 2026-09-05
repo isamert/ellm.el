@@ -4918,6 +4918,36 @@
             (should-not (string-match-p (regexp-quote id-token) printed))))
       (delete-directory directory t))))
 
+(ert-deftest ellm-test-codex-usage-requests-and-formats-rate-limits ()
+  "Codex usage should use provider credentials and report remaining quota."
+  (let* ((auth-file (make-temp-file "ellm-codex-usage-auth-"))
+         (provider (ellm-make-codex-provider :auth-file auth-file))
+         received-headers)
+    (delete-file auth-file)
+    (setf (ellm-codex-provider-access-token provider)
+          (ellm-codex--wrap-secret "access-token")
+          (ellm-codex-provider-account-id provider) "account-id")
+    (cl-letf (((symbol-function 'ellm-codex--request)
+               (lambda (method url &rest args)
+                 (setq received-headers (plist-get args :headers))
+                 (should (eq method 'get))
+                 (should (equal url ellm-codex--usage-url))
+                 (cons 200
+                       '(:plan_type "plus"
+                         :rate_limit
+                         (:primary_window
+                          (:used_percent 96 :reset_after_seconds 673)
+                          :secondary_window
+                          (:used_percent 70 :reset_after_seconds 43200)))))))
+      (let ((usage (ellm-codex-usage provider)))
+        (should (equal (plist-get usage :plan_type) "plus"))
+        (should (member '("Authorization" . "Bearer access-token")
+                        received-headers))
+        (should (member '("ChatGPT-Account-Id" . "account-id")
+                        received-headers))
+        (should (equal (ellm-codex--format-usage usage)
+                       "Codex usage (plus); 5-hour: 4% remaining; resets in 11m 13s; weekly: 30% remaining; resets in 12h 0m"))))))
+
 (ert-deftest ellm-test-codex-replays-encrypted-reasoning-item ()
   "Codex should replay a valid reasoning item instead of its visible summary."
   (let* ((provider (ellm-make-codex-provider))

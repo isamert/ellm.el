@@ -54,6 +54,14 @@ The file contains refresh credentials and is written with mode 0600."
 (defconst ellm-codex--issuer "https://auth.openai.com")
 (defconst ellm-codex--responses-url
   "https://chatgpt.com/backend-api/codex/responses")
+(defconst ellm-codex--usage-url
+  "https://chatgpt.com/backend-api/wham/usage")
+
+(defconst ellm-codex--usage-windows
+  '((:primary_window "5-hour")
+    (:secondary_window "weekly"))
+  "Rate-limit windows shown by `ellm-codex-usage'.")
+
 (defconst ellm-codex--redirect-uri
   "http://localhost:1455/auth/callback")
 
@@ -228,13 +236,13 @@ disables prompt cache reads and writes on supported models."
     (plz-error-response data)))
 
 (cl-defun ellm-codex--request
-    (method url &key body (content-type "application/json"))
+    (method url &key body (content-type "application/json") headers)
   "Send METHOD to URL and return (STATUS . parsed JSON).
-BODY is a string and CONTENT-TYPE describes it.  HTTP errors are returned;
-transport errors are signaled."
+BODY is a string and CONTENT-TYPE describes it.  HEADERS are additional HTTP
+headers.  HTTP errors are returned; transport errors are signaled."
   (condition-case error
       (let ((response (plz method url
-                        :headers `(("Content-Type" . ,content-type))
+                        :headers (append `(("Content-Type" . ,content-type)) headers)
                         :body body :as 'response)))
         (cons (plz-response-status response)
               (ellm-codex--json-parse (plz-response-body response))))
@@ -581,6 +589,68 @@ browser callback.  Interactively, the first configured Codex provider is used."
           (ellm-codex-provider-account-id provider) nil
           (ellm-codex-provider-expires-at provider) nil)
     (message "Codex credentials removed")))
+
+;;;; Usage
+
+(defun ellm-codex--format-duration (seconds)
+  "Return SECONDS as a concise, human-readable duration."
+  (let* ((seconds (max 0 (floor seconds)))
+         (hours (/ seconds 3600))
+         (minutes (/ (% seconds 3600) 60))
+         (seconds (% seconds 60)))
+    (cond
+     ((> hours 0) (format "%dh %dm" hours minutes))
+     ((> minutes 0) (format "%dm %ds" minutes seconds))
+     (t (format "%ds" seconds)))))
+
+(defun ellm-codex--format-usage-window (window name)
+  "Return a display string for usage WINDOW named NAME."
+  (let ((used (plist-get window :used_percent))
+        (reset-after (plist-get window :reset_after_seconds))
+        (reset-at (plist-get window :reset_at)))
+    (if (not (numberp used))
+        (format "%s: unavailable" name)
+      (concat
+       (format "%s: %.0f%% remaining" name (max 0 (- 100 used)))
+       (if (numberp reset-after)
+           (format "; resets in %s" (ellm-codex--format-duration reset-after))
+         "")
+       (if (numberp reset-at)
+           (format " (%s)"
+                   (format-time-string "%Y-%m-%d %H:%M %Z"
+                                       (seconds-to-time reset-at)))
+         "")))))
+
+(defun ellm-codex--format-usage (usage)
+  "Return a human-readable summary of Codex USAGE response data."
+  (let ((rate-limit (plist-get usage :rate_limit)))
+    (string-join
+     (append
+      (when-let* ((plan (plist-get usage :plan_type)))
+        (list (format "Codex usage (%s)" plan)))
+      (mapcar (lambda (entry)
+                (ellm-codex--format-usage-window
+                 (plist-get rate-limit (car entry)) (cadr entry)))
+              ellm-codex--usage-windows))
+     "; ")))
+
+;;;###autoload
+(defun ellm-codex-usage (&optional provider)
+  "Show the remaining ChatGPT Codex rate limits for PROVIDER.
+Interactively, use the first configured Codex provider.  Return the parsed
+usage response, so callers can render it differently."
+  (interactive)
+  (let ((provider (ellm-codex--provider provider)))
+    (llm-provider-request-prelude provider)
+    (pcase-let ((`(,status . ,usage)
+                 (ellm-codex--request
+                  'get ellm-codex--usage-url
+                  :headers (llm-provider-headers provider))))
+      (unless (<= 200 status 299)
+        (error "Codex usage request failed (HTTP %s)" status))
+      (when (called-interactively-p 'interactive)
+        (message "%s" (ellm-codex--format-usage usage)))
+      usage)))
 
 ;;;; Provider implementation
 
