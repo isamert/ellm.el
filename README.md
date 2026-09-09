@@ -682,26 +682,27 @@ configure attachment related customizations.
 ## Persistence
 
 Conversations are plain text, so you can always save an `.ellm` file
-yourself and reopen it later.  Automatic persistence is optional.  Set
-`ellm-persistence-enabled` to non-nil and new main conversations are
-saved as `main.ellm` in their own session directories.  Their
-subagents, retained tool outputs, reasoning state, and attachments are
-saved alongside them.
+yourself and reopen it later. For simple conversations this works
+pretty well but if your conversation contains subagents, attachments
+etc., the better way is using `ellm-save` so that subagents, retained
+tool outputs, reasoning state, and attachments are also saved
+alongside them.
 
 `ellm-persistence-location` controls where sessions go.  The default
-`global` location is `ellm-persistence-directory` (`~/ellm/`).  Set it to
-`project` to store sessions below `ellm-persistence-project-directory`
-(`.ellm`) in each project.  `M-x ellm-open-session` opens a saved main
-conversation.
+`global` location is `ellm-persistence-directory` (`~/ellm/`).  Set it
+to `project` to store sessions below
+`ellm-persistence-project-directory` (`.ellm`) in each project.  `M-x
+ellm-open-session` opens a saved main conversation.
 
 <img width="761" height="113" alt="image" src="https://github.com/user-attachments/assets/8df682dd-046a-4051-93ee-82f3350978f1" />
 
+ You can also do `C-u M-x ellm-save` to select where to save the
+conversation manually.
 
-You can also use the `ellm-save` command to save the current
-conversation and its live subagents/tool-outputs/encrypted reasonings
-etc. even when automatic persistence is disabled; use a prefix
-argument to choose its parent directory manually, otherwise it still
-uses the `ellm-persistence-location`.
+There is also optional automatic persistence.  Set
+`ellm-persistence-enabled` to non-nil and new main conversations are
+saved with `ellm-save` in certain checkpoints (it also does some sort
+of debouncing, batching, idle timers etc. to keep things smooth).
 
 ## MCPs
 
