@@ -403,6 +403,37 @@ PREVIOUS supplies values omitted by a refresh response."
                ellm-provider-alist))
       (ellm-make-codex-provider)))
 
+(defun ellm-codex--configured-providers ()
+  "Return configured Codex providers as (NAME . PROVIDER) pairs."
+  (delq nil
+        (mapcar (lambda (entry)
+                  (let ((provider
+                         (ellm--provider-entry-provider (cdr entry))))
+                    (and (ellm-codex-provider-p provider)
+                         (cons (symbol-name (car entry)) provider))))
+                ellm-provider-alist)))
+
+(defun ellm-codex--current-provider ()
+  "Return the current ellm buffer's Codex provider, or nil."
+  (when (derived-mode-p 'ellm-mode)
+    (condition-case nil
+        (let ((provider (ellm--resolve-provider (ellm--parse-frontmatter))))
+          (and (ellm-codex-provider-p provider) provider))
+      (error nil))))
+
+(defun ellm-codex--interactive-provider ()
+  "Return the Codex provider appropriate for an interactive command.
+Prefer the current ellm buffer's Codex provider.  Otherwise, prompt only when
+multiple Codex providers are configured."
+  (or (ellm-codex--current-provider)
+      (pcase (ellm-codex--configured-providers)
+        (`((,_ . ,provider)) provider)
+        (`(,first . ,rest)
+         (let* ((providers (cons first rest))
+                (choice (completing-read "Codex provider: " providers nil t)))
+           (alist-get choice providers nil nil #'equal)))
+        (_ (ellm-codex--provider)))))
+
 (defun ellm-codex--random-base64url (bytes)
   "Return BYTES random bytes encoded as unpadded base64url."
   (let ((openssl (or (executable-find "openssl")
@@ -643,9 +674,10 @@ browser callback.  Interactively, the first configured Codex provider is used."
 ;;;###autoload
 (defun ellm-codex-usage (&optional provider)
   "Show the remaining ChatGPT Codex rate limits for PROVIDER.
-Interactively, use the first configured Codex provider.  Return the parsed
-usage response, so callers can render it differently."
-  (interactive)
+Interactively, prefer the current ellm buffer's Codex provider; otherwise,
+prompt when multiple Codex providers are configured.  Return the parsed usage
+response, so callers can render it differently."
+  (interactive (list (ellm-codex--interactive-provider)))
   (let ((provider (ellm-codex--provider provider)))
     (llm-provider-request-prelude provider)
     (pcase-let ((`(,status . ,usage)
@@ -689,9 +721,10 @@ wraps it in a JSON object."
 ;;;###autoload
 (defun ellm-codex-redeem-rate-limit-reset (&optional provider)
   "Redeem an available ChatGPT Codex rate-limit reset credit.
-Interactively, prompt for an available credit and require confirmation before
-redeeming it.  Return the parsed redemption response."
-  (interactive)
+Interactively, select a provider as in `ellm-codex-usage', then prompt for an
+available credit and require confirmation before redeeming it.  Return the
+parsed redemption response."
+  (interactive (list (ellm-codex--interactive-provider)))
   (let* ((provider (ellm-codex--provider provider))
          (credits (seq-filter (lambda (credit)
                                 (equal (plist-get credit :status) "available"))

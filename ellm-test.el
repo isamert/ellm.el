@@ -5003,6 +5003,40 @@
             (should-not (string-match-p (regexp-quote id-token) printed))))
       (delete-directory directory t))))
 
+(ert-deftest ellm-test-codex-interactive-provider-prefers-current-buffer ()
+  "Interactive Codex commands should use the current conversation's provider."
+  (let* ((current (ellm-make-codex-provider))
+         (other (ellm-make-codex-provider))
+         (ellm-provider-alist `((current . ,current) (other . ,other))))
+    (with-temp-buffer
+      (insert "---\nprovider: current\n---\n")
+      (ellm-mode)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (&rest _) (error "Should not prompt"))))
+        (should (eq (ellm-codex--interactive-provider) current))))))
+
+(ert-deftest ellm-test-codex-interactive-provider-prompts-for-multiple-providers ()
+  "Interactive Codex commands should select among multiple providers outside ellm."
+  (let* ((personal (ellm-make-codex-provider))
+         (work (ellm-make-codex-provider))
+         (ellm-provider-alist `((personal . ,personal) (work . ,work))))
+    (with-temp-buffer
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (_prompt candidates &rest _)
+                   (should (equal (mapcar #'car candidates)
+                                  '("personal" "work")))
+                   "work")))
+        (should (eq (ellm-codex--interactive-provider) work))))))
+
+(ert-deftest ellm-test-codex-interactive-provider-does-not-prompt-for-one-provider ()
+  "Interactive Codex commands should not prompt for a sole provider."
+  (let* ((provider (ellm-make-codex-provider))
+         (ellm-provider-alist `((personal . ,provider))))
+    (with-temp-buffer
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (&rest _) (error "Should not prompt"))))
+        (should (eq (ellm-codex--interactive-provider) provider))))))
+
 (ert-deftest ellm-test-codex-usage-requests-and-formats-rate-limits ()
   "Codex usage should use provider credentials and report remaining quota."
   (let* ((auth-file (make-temp-file "ellm-codex-usage-auth-"))
