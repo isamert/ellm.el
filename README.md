@@ -54,6 +54,7 @@ cleanly.
 - [Configuring providers](#configuring-providers)
   - [API providers using `llm.el`](#api-providers-using-llmel)
   - [Codex](#codex)
+    - [Rate limits](#rate-limits)
   - [ACP](#acp)
 - [Rationale](#rationale)
 - [Prior art](#prior-art)
@@ -1016,6 +1017,18 @@ default; with a prefix argument it uses device-code login.
 Credentials are stored in `ellm-codex-auth-file`.  Select it with
 `provider: codex` in frontmatter.  The available models and reasoning
 levels are completed in the buffer.
+
+### Rate limits
+
+Use `M-x ellm-codex-usage` to show the remaining Codex rate limits.
+It reports the subscription plan, the remaining 5-hour and weekly
+quotas, when each quota resets, and how many rate-limit reset credits
+are available.
+
+When reset credits are available, `M-x ellm-codex-redeem-rate-limit-reset`
+uses the same provider selection, then lets you select a credit and
+asks for confirmation before redeeming it.  A successful redemption
+consumes the selected credit and resets the Codex rate limit.
 
 ## ACP
 
