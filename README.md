@@ -1065,7 +1065,7 @@ buffer, translates ACP events into turns, and forwards permission requests
 to the usual ellm permission UI.  Agent capabilities differ, so frontmatter
 completion discovers session configuration when the agent exposes it.
 
-> [!INFO]
+> [!TIP]
 >
 > For your Codex subscription, use the [Codex backend](#codex)
 > directly. It has all the ellm benefits and even more helpers for
