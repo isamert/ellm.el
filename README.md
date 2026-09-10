@@ -56,6 +56,7 @@ cleanly.
   - [Codex](#codex)
     - [Rate limits](#rate-limits)
   - [ACP](#acp)
+  - [Kagi Assistant](#kagi-assistant)
 - [Rationale](#rationale)
 - [Prior art](#prior-art)
 
@@ -150,8 +151,8 @@ example, with Elpaca and `use-package`:
 
 `ellm.el` provides the mode and conversation core.  Load `ellm-tools`
 for the built-in tools and `ellm-llm` for API providers through
-`llm.el`.  The Codex and ACP backends are optional; load `ellm-codex`
-or `ellm-acp` when you use them.
+`llm.el`.  The Codex, ACP, and Kagi backends are optional; load
+`ellm-codex`, `ellm-kagi`, or `ellm-acp` when you use them.
 
 You still need to configure a provider before sending a request.  See
 [Configuration](#configuration) and [Configuring
@@ -1110,6 +1111,63 @@ completion discovers session configuration when the agent exposes it.
 >                       :model "YOUR-MODEL"))))
 > ```
 
+## Kagi Assistant
+
+The Kagi Assistant backend uses your Kagi web session at
+[assistant.kagi.com](https://assistant.kagi.com/) It supports Kagi's
+streaming answers, web search, thinking presets, citations, and
+loading existing Kagi Assistant conversations.
+
+Load `ellm-kagi`, configure a provider with the value of your
+`kagi_session` cookie, and add it to `ellm-provider-alist`.  Keep that
+cookie in `auth-source` rather than writing it into your init file.
+
+```elisp
+(require 'auth-source)
+(require 'ellm-kagi)
+
+(defun my-ellm-kagi-session-token ()
+  (auth-source-pick-first-password
+   :host "assistant.kagi.com" :user "kagi_session"))
+
+(setq ellm-provider-alist
+      `((kagi . ,(ellm-make-kagi-provider
+                  :session-token #'my-ellm-kagi-session-token
+                  :model "ki_quick"))))
+```
+
+For example, an `authinfo` entry for this setup can use `machine
+assistant.kagi.com login kagi_session password TOKEN`, where `TOKEN`
+is the cookie value (without the `kagi_session=` prefix).  You can
+instead pass the cookie value directly to `:session-token`, or supply
+any function that returns it.
+
+Select the provider and optionally override its per-conversation
+defaults in frontmatter:
+
+```markdown
+---
+provider: kagi
+model: qwen-3-8-27b
+kagi:
+  enable-search: true
+  personalization: false
+  thinking-preset: extended
+---
+```
+
+`enable-search` and `personalization` default to enabled;
+`thinking-preset` may be `standard` or `extended` for models that
+support it.  Run `M-x ellm-kagi-refresh-models` after configuring the
+provider to retrieve Kagi's current model list for frontmatter
+completion.
+
+Kagi conversations are remote sessions.  After the first request, ellm
+writes the Kagi `conversation-id` and `branch-id` below `kagi:` in the
+frontmatter, so later prompts continue the same remote branch.  Leave
+those values in place when saving or reopening a transcript.  Use `M-x
+ellm-load-session` to choose an existing Kagi Assistant conversation
+and import its active branch into a new ellm buffer.
 
 # Rationale
 
