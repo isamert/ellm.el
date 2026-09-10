@@ -1065,6 +1065,52 @@ buffer, translates ACP events into turns, and forwards permission requests
 to the usual ellm permission UI.  Agent capabilities differ, so frontmatter
 completion discovers session configuration when the agent exposes it.
 
+> [!INFO]
+>
+> For your Codex subscription, use the [Codex backend](#codex)
+> directly. It has all the ellm benefits and even more helpers for
+> Codex itself.
+>
+> For **Claude** subscriptions, use
+> [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp):
+>
+> ```elisp
+> (require 'ellm-acp)
+>
+> (setq ellm-provider-alist
+>       `((claude . ,(ellm-make-acp-provider
+>                     :command "claude-agent-acp"
+>                     :args '()
+>                     :model "YOUR-MODEL"))))
+> ```
+>
+> For **Cursor** subscriptions, you can directly use Cursor's own ACP
+> agent via the [Cursor CLI Agent](https://cursor.com/cli):
+>
+> ```elisp
+> (require 'ellm-acp)
+>
+> (setq ellm-provider-alist
+>       `((cursor . ,(ellm-make-acp-provider
+>                     :command "agent"
+>                     :args '("acp")
+>                     :model "YOUR-MODEL"))))
+> ```
+>
+> For **OpenCode** subscriptions, again, you can use OpenCode's own
+> ACP agent:
+>
+> ```elisp
+> (require 'ellm-acp)
+>
+> (setq ellm-provider-alist
+>       `((opencode . ,(ellm-make-acp-provider
+>                       :command "opencode"
+>                       :args '("acp")
+>                       :model "YOUR-MODEL"))))
+> ```
+
+
 # Rationale
 
 There are two different parts of ellm, which I believe makes it
