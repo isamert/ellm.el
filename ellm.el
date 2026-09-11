@@ -1230,6 +1230,11 @@ The colors match `org-table' while preserving fixed-pitch alignment."
   "Face for idle sessions."
   :group 'ellm)
 
+(defface ellm-list-unseen
+  '((t :inherit font-lock-constant-face :weight bold))
+  "Face for unseen conversation completions in the session list."
+  :group 'ellm)
+
 (defface ellm-list-secondary
   '((t :inherit shadow))
   "Face for secondary session-list columns."
@@ -5252,6 +5257,24 @@ explicitly marked `:retryable' and the core retry budget remains.")
 (defvar-local ellm--last-activity-time nil
   "Time of the most recent meaningful activity in this conversation.")
 
+(defvar-local ellm--unseen-completion nil
+  "Non-nil when this conversation completed while it was not displayed.")
+
+(defun ellm--mark-completion-unseen ()
+  "Mark this conversation unseen when it completed outside a visible window."
+  (setq ellm--unseen-completion
+        (not (get-buffer-window (current-buffer) 'visible))))
+
+(defun ellm--clear-unseen-completion-on-display (window)
+  "Clear this conversation's unseen marker when WINDOW displays it."
+  ;; Buffer-local `window-buffer-change-functions' also run for a buffer that
+  ;; has just been removed from WINDOW, so verify that it is still displayed.
+  (when (and ellm--unseen-completion
+             (eq (window-buffer window) (current-buffer)))
+    (setq ellm--unseen-completion nil)
+    (when (fboundp 'ellm-list--schedule-refresh)
+      (ellm-list--schedule-refresh (current-buffer)))))
+
 (defun ellm--touch-activity ()
   "Record activity in the current conversation and refresh its listing."
   (setq ellm--last-activity-time (float-time))
@@ -5962,6 +5985,7 @@ MESSAGE-TEXT is reported after cleanup when non-nil."
             ;; The last streamed fence may still be open.  Do not leave its
             ;; embedded-language faces deferred after the request finishes.
             (ellm--flush-deferred-code-fontification)
+            (ellm--mark-completion-unseen)
             (ellm--set-active-request nil)
             (ellm--ensure-next-user-turn)
             (ellm--commit-composer-draft)
@@ -9529,10 +9553,13 @@ with `record' bound to the session record plist.  Add NAME to
 (ellm-list-define-column todos (:width 5 :title "Todos")
   (or (plist-get record :todos) ""))
 
+(ellm-list-define-column unread (:width 1 :title "")
+  (if (plist-get record :unseen) "•" ""))
+
 (ellm-list-define-column title (:width 50 :title "Conversation")
   (plist-get record :title))
 
-(defcustom ellm-list-columns '(status todos title context model)
+(defcustom ellm-list-columns '(status todos unread title context model)
   "Columns shown by `ellm-list'.
 Use `ellm-list-define-column' to register additional columns.  Columns are
 rendered from session records, keeping presentation separate from collection
@@ -9634,6 +9661,7 @@ directory so an explicit `cwd:' does not unexpectedly move a conversation."
                        (ellm-buffer-state-context-size state))
              :todos (ellm--format-todo-completion
                      (ellm-buffer-state-todos state))
+             :unseen ellm--unseen-completion
              :title (or ellm--session-title (buffer-name buffer)))
        group))))
 
@@ -9708,6 +9736,7 @@ Subagents whose parent cannot be found remain top-level records."
   "Return the display face for COLUMN in session RECORD."
   (pcase column
     ('status (ellm-list--status-face (plist-get record :status)))
+    ('unread (and (plist-get record :unseen) 'ellm-list-unseen))
     ((or 'model 'context 'todos) 'ellm-list-secondary)
     ('title 'ellm-list-title)))
 
@@ -10173,6 +10202,8 @@ conversation state only when such updates were skipped."
   (ellm--configure-turn-rules t)
   (add-hook 'post-command-hook #'ellm--reveal-separator-at-point nil t)
   (add-hook 'post-command-hook #'ellm--maybe-activate-user-prompt nil t)
+  (add-hook 'window-buffer-change-functions
+            #'ellm--clear-unseen-completion-on-display nil t)
   (add-hook 'completion-at-point-functions #'ellm--frontmatter-capf nil t)
   (add-hook 'completion-at-point-functions #'ellm--slash-command-capf nil t)
   (add-hook 'kill-buffer-hook #'ellm--close-session-on-kill nil t)

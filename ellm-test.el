@@ -5598,6 +5598,7 @@
           (should (equal (buffer-string) terminal-buffer)))
         (should (eq (ellm-request-state request) 'completed))
         (should-not ellm--active-request)
+        (should ellm--unseen-completion)
         (should (= finished 1))))))
 
 (ert-deftest ellm-test-request-lifecycle-hooks-have-logical-request-contract ()
@@ -10282,6 +10283,33 @@ The parent provider remains buffer-local fallback only when the profile omits on
       (should (string-match "Conversation" row))
       (should (eq (get-text-property (match-beginning 0) 'face row)
                   'ellm-list-title)))))
+
+(ert-deftest ellm-test-list-marks-and-clears-unseen-completions ()
+  "Completed background conversations are marked until they are displayed."
+  (let ((conversation (generate-new-buffer "ellm unseen conversation"))
+        (other (generate-new-buffer "ellm unseen other")))
+    (unwind-protect
+        (save-window-excursion
+          (switch-to-buffer conversation)
+          (with-current-buffer conversation
+            (ellm-mode))
+          (switch-to-buffer other)
+          (with-current-buffer conversation
+            (ellm--mark-completion-unseen)
+            (should ellm--unseen-completion)
+            (should (equal (ellm-list-column-unread
+                            (ellm-list--record conversation))
+                           "•"))
+            ;; A local window-change hook also runs after a buffer is removed.
+            (ellm--clear-unseen-completion-on-display (selected-window))
+            (should ellm--unseen-completion))
+          (switch-to-buffer conversation)
+          (with-current-buffer conversation
+            (ellm--clear-unseen-completion-on-display (selected-window))
+            (should-not ellm--unseen-completion)))
+      (dolist (buffer (list conversation other))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
 
 (ert-deftest ellm-test-list-pulses-terminal-status-transitions ()
   "Only terminal list-status transitions request a semantic pulse."
