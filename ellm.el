@@ -5133,7 +5133,8 @@ keep protocol-specific mutable state there, but lifecycle state lives here."
      ((eq value :missing) nil)
      ((eq value t) t)
      ((ellm--false-value-p value) nil)
-     (t (user-error "ellm: `yolo' must be true or false")))))
+     (t (warn "ellm: `yolo' must be true or false.  Assuming false")
+        nil))))
 
 (defun ellm--tool-permission-policy-for-keys (frontmatter keys)
   "Return the permission policy in FRONTMATTER for the first matching KEYS.
@@ -5142,23 +5143,23 @@ When `yolo' is true, it overrides every policy."
   (if (ellm--yolo-p frontmatter)
       'allow
     (let* ((rules (alist-get 'tool-permissions frontmatter))
-         (entry (and rules
-                     (cl-loop for key in (append keys '("default"))
-                              thereis (cl-find key rules
-                                               :key (lambda (rule)
-                                                      (format "%s" (car rule)))
-                                               :test #'equal))))
-         (value (if entry
-                    (format "%s" (cdr entry))
-                  (symbol-name ellm-default-tool-permission))))
-    (unless (or (null rules) (and (listp rules) (cl-every #'consp rules)))
-      (user-error "ellm: Tool-permissions must be a map"))
-    (pcase value
-      ("allow" 'allow)
-      ("ask" 'ask)
-      ("deny" 'deny)
-      (_ (user-error "ellm: Invalid tool permission policy for `%s': %s"
-                     (if entry (car entry) "default") value))))))
+           (entry (and rules
+                       (cl-loop for key in (append keys '("default"))
+                                thereis (cl-find key rules
+                                                 :key (lambda (rule)
+                                                        (format "%s" (car rule)))
+                                                 :test #'equal))))
+           (value (if entry
+                      (format "%s" (cdr entry))
+                    (symbol-name ellm-default-tool-permission))))
+      (unless (or (null rules) (and (listp rules) (cl-every #'consp rules)))
+        (user-error "ellm: Tool-permissions must be a map"))
+      (pcase value
+        ("allow" 'allow)
+        ("ask" 'ask)
+        ("deny" 'deny)
+        (_ (user-error "ellm: Invalid tool permission policy for `%s': %s"
+                       (if entry (car entry) "default") value))))))
 
 (defun ellm--tool-permission-policy (frontmatter tool)
   "Return the permission policy for TOOL in FRONTMATTER.

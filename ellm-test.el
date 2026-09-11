@@ -11240,7 +11240,6 @@ The parent provider remains buffer-local fallback only when the profile omits on
                      "Missing object\nREF")))))
 
 (ert-deftest ellm-attachment-ui-shared-parser-excludes-code ()
-  (skip-unless (require 'ellm-attachments nil t))
   (save-window-excursion
     (with-temp-buffer
       (ellm-mode)
