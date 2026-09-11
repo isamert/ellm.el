@@ -353,7 +353,9 @@ closest parent containing a `.git' directory."
   "When non-nil, automatically persist ellm conversation buffers.
 New conversations remain transient until they contain a non-blank user draft
 or an assistant turn.  Main conversations are stored as `main.ellm';
-subagents are stored below their session directory in `subagents/'."
+subagents are stored below their session directory in `subagents/'.
+
+Also see `ellm-persistence-location' for configuring storage path."
   :type 'boolean
   :group 'ellm)
 
@@ -3857,23 +3859,35 @@ The current session store is preferred over the global cache."
         (ellm--write-reasoning-state-file
          id (ellm--reasoning-state-json state))))))
 
+(defun ellm--persistence-project-root ()
+  "Return the project-local persistence root for the current buffer."
+  (when-let* ((default-directory
+               (or ellm--base-default-directory default-directory))
+              (project-root (funcall ellm-current-project-function)))
+    (file-name-as-directory
+     (expand-file-name ellm-persistence-project-directory project-root))))
+
 (defun ellm--persistence-root ()
   "Return the automatic persistence root for the current buffer."
   (let ((root
          (pcase ellm-persistence-location
            ('global ellm-persistence-directory)
-           ('project
-            (if-let* ((default-directory
-                        (or ellm--base-default-directory default-directory))
-                      (project-root
-                       (funcall ellm-current-project-function)))
-                (expand-file-name ellm-persistence-project-directory
-                                  project-root)
-              ellm-persistence-directory))
+           ('project (or (ellm--persistence-project-root)
+                         ellm-persistence-directory))
            ((pred functionp)
             (funcall ellm-persistence-location))
            (_ nil))))
     (and root (file-name-as-directory (expand-file-name root)))))
+
+(defun ellm--persistence-search-roots ()
+  "Return session discovery roots, preferring the current project.
+Discovery is independent of automatic persistence configuration and always
+checks the project-local store before the global store."
+  (delete-dups
+   (delq nil
+         (list (ellm--persistence-project-root)
+               (file-name-as-directory
+                (expand-file-name ellm-persistence-directory))))))
 
 (defun ellm--new-session-id ()
   "Return a new session id suitable for a directory name."
@@ -4144,28 +4158,30 @@ new session.  An existing session always keeps its current directory."
     (error '(nil nil nil))))
 
 (defun ellm--persisted-sessions (root)
-  "Return persisted sessions below ROOT, most recently modified first."
+  "Return persisted sessions directly below ROOT, most recent first."
   (let (sessions)
     (when (file-directory-p root)
-      (dolist (main-file (directory-files-recursively root "main\\.ellm\\'"))
-        ;; The recursive scan also sees Emacs lock files (e.g. `.#main.ellm').
-        ;; Only the exact persistence file identifies a session directory.
-        (when (equal (file-name-nondirectory main-file) "main.ellm")
-          (let* ((directory (file-name-directory main-file))
-                 (metadata (ellm--persisted-session-metadata main-file)))
-            (push (ellm--persisted-session-create
-                   :directory directory
-                   :main-file main-file
-                   :modified (file-attribute-modification-time
-                              (file-attributes main-file))
-                   :cwd (car metadata)
-                   :project (ignore-errors (ellm--project-name (car metadata)))
-                   :title (cadr metadata)
-                   :summary (nth 2 metadata)
-                   :subagent-count (length
-                                    (ellm--persisted-session-subagent-files
-                                     directory)))
-                  sessions)))))
+      ;; Session directories have a fixed layout: ROOT/SESSION-ID/main.ellm.
+      ;; Avoid a recursive scan, which would also walk attachments, reasoning
+      ;; state, and subagent directories for every invocation.
+      (dolist (directory (directory-files root t directory-files-no-dot-files-regexp t))
+        (when (file-directory-p directory)
+          (let ((main-file (expand-file-name "main.ellm" directory)))
+            (when (file-regular-p main-file)
+              (let ((metadata (ellm--persisted-session-metadata main-file)))
+                (push (ellm--persisted-session-create
+                       :directory (file-name-as-directory directory)
+                       :main-file main-file
+                       :modified (file-attribute-modification-time
+                                  (file-attributes main-file))
+                       :cwd (car metadata)
+                       :project (ignore-errors (ellm--project-name (car metadata)))
+                       :title (cadr metadata)
+                       :summary (nth 2 metadata)
+                       :subagent-count (length
+                                        (ellm--persisted-session-subagent-files
+                                         directory)))
+                      sessions)))))))
     (sort sessions (lambda (left right)
                      (time-less-p (ellm--persisted-session-modified right)
                                   (ellm--persisted-session-modified left))))))
@@ -4199,19 +4215,21 @@ new session.  An existing session always keeps its current directory."
 
 ;;;###autoload
 (defun ellm-open-session ()
-  "Open a persisted main conversation from the current persistence root."
+  "Open a persisted main conversation for the current project or globally.
+Project-local sessions are listed before global sessions.  This lookup is
+independent of automatic persistence and its configured save location."
   (interactive)
-  (let* ((root (or (ellm--persistence-root)
-                   (user-error "ellm: Persistence has no directory here")))
-         (sessions (ellm--persisted-sessions root))
+  (let* ((roots (ellm--persistence-search-roots))
+         (sessions (apply #'append (mapcar #'ellm--persisted-sessions roots)))
          (choices (mapcar (lambda (session)
                             (cons (ellm--persisted-session-choice session)
                                   session))
                           sessions)))
     (unless choices
-      (user-error "ellm: No persisted sessions in %s" root))
+      (user-error "ellm: No persisted sessions in %s"
+                  (string-join roots ", ")))
     (let ((session (cdr (assoc (completing-read "ellm session: " choices nil t)
-                            choices))))
+                               choices))))
       (ellm--find-file-or-switch-to-buffer
        (ellm--persisted-session-main-file session)))))
 
