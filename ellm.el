@@ -3935,7 +3935,9 @@ persisted ellm session."
     (setq-local
      ellm--session-directory
      (ellm--persistence-session-directory-from-file
-      (ellm--persistence-session-role)))))
+      (ellm--persistence-session-role)))
+    (ignore-errors
+      (ellm--apply-working-directory (ellm--parse-frontmatter)))))
 
 (defun ellm--persistence-prepare (&optional force root session-id)
   "Prepare the current buffer for persistence.

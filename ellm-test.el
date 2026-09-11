@@ -10566,6 +10566,36 @@ The parent provider remains buffer-local fallback only when the profile omits on
         (kill-buffer buffer))
       (delete-directory root t))))
 
+(ert-deftest ellm-test-open-session-restores-working-directory ()
+  "Opening a persisted session must adopt its recorded workspace."
+  (let* ((root (make-temp-file "ellm-open-session-cwd-" t))
+         (workspace (make-temp-file "ellm-open-session-workspace-" t))
+         (store (expand-file-name "store/" root))
+         (main (expand-file-name "session/main.ellm" store))
+         buffer)
+    (unwind-protect
+        (progn
+          (make-directory (file-name-directory main) t)
+          (with-temp-file main
+            (insert (format "---\ncwd: %s\nellm:\n  session-id: session\n  role: main\n---\n\n>-| user\nHello\n"
+                            (file-name-as-directory workspace))))
+          (let ((ellm-persistence-directory store)
+                (ellm-current-project-function (lambda () nil)))
+            (cl-letf (((symbol-function 'completing-read)
+                       (lambda (_prompt choices &rest _) (caar choices))))
+              (ellm-open-session)))
+          (setq buffer (current-buffer))
+          (should (equal default-directory
+                         (file-name-as-directory workspace)))
+          (should (equal ellm--effective-working-directory
+                         (file-name-as-directory workspace))))
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer
+          (set-buffer-modified-p nil))
+        (kill-buffer buffer))
+      (delete-directory root t)
+      (delete-directory workspace t))))
+
 (ert-deftest ellm-test-org-store-link-assigns-an-unsaved-session-id ()
   (let ((buffer (generate-new-buffer " *ellm org link*"))
         org-store-link-plist)
