@@ -202,9 +202,9 @@ provide request defaults that may be overridden by `kagi:' frontmatter."
                   (ellm-request-backend ellm--active-request)))
         (ellm-cancel t)))))
 
-(cl-defmethod ellm-provider-load-session ((provider ellm-kagi-provider) frontmatter)
-  "Select and load a Kagi conversation for PROVIDER."
-  (ellm-kagi-load-session provider frontmatter))
+(cl-defmethod ellm-provider-import-session ((provider ellm-kagi-provider) frontmatter)
+  "Select and import a Kagi conversation for PROVIDER."
+  (ellm-kagi-import-session provider frontmatter))
 
 (cl-defmethod ellm-backend-create
   ((provider ellm-kagi-provider) frontmatter buffer)
@@ -546,8 +546,8 @@ to `ellm-provider' or the first Kagi entry in `ellm-provider-alist'."
     (switch-to-buffer buffer)
     buffer))
 
-(defun ellm-kagi-load-session (provider frontmatter)
-  "Interactively select and load a Kagi conversation for PROVIDER.
+(defun ellm-kagi-import-session (provider frontmatter)
+  "Interactively select and import a Kagi conversation for PROVIDER.
 Kagi's `/api/init' response supplies the conversation list; the selected
 conversation's active branch and transcript come from its `init' endpoint."
   (let* ((init (ellm-kagi--request-json-sync provider "/api/init"))

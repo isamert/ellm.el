@@ -8661,13 +8661,13 @@ With prefix argument REMOVE, remove the selected frontmatter setting instead."
       (user-error "ellm: No provider configured"))
     provider))
 
-(defun ellm-load-session ()
-  "Select a backend session with completion and open it in a new buffer."
+(defun ellm-import-session ()
+  "Select a provider session and import it into a new buffer."
   (interactive)
   (ellm--ensure-no-config-in-flight)
   (let* ((fm (ellm--command-frontmatter))
          (provider (ellm--command-provider fm)))
-    (ellm-provider-load-session provider fm)))
+    (ellm-provider-import-session provider fm)))
 
 (defun ellm-start-session ()
   "Start/login the backend session without sending a prompt."
@@ -8877,12 +8877,12 @@ Implementations should avoid frontmatter rewrites that would invalidate the
   "Default model-completion session start implementation."
   nil)
 
-(cl-defgeneric ellm-provider-load-session (provider frontmatter)
-  "Interactively select and load a PROVIDER session using FRONTMATTER context.")
+(cl-defgeneric ellm-provider-import-session (provider frontmatter)
+  "Interactively select and import a PROVIDER session using FRONTMATTER context.")
 
-(cl-defmethod ellm-provider-load-session (_provider _frontmatter)
-  "Default session loading implementation for providers without sessions."
-  (user-error "ellm: Provider does not support session listing/loading"))
+(cl-defmethod ellm-provider-import-session (_provider _frontmatter)
+  "Default session import implementation for providers without sessions."
+  (user-error "ellm: Provider does not support session listing/import"))
 
 (cl-defgeneric ellm-provider-close-session (provider frontmatter buffer)
   "Close PROVIDER's active session for BUFFER using FRONTMATTER context.")
@@ -9889,7 +9889,7 @@ conversation state only when such updates were skipped."
     (define-key map (kbd "C-c C-k")   #'ellm-cancel)
     (define-key map (kbd "C-c C-a")   #'ellm-answer-prompt)
     (define-key map (kbd "C-c C-s")   #'ellm-start-session)
-    (define-key map (kbd "C-c C-l")   #'ellm-load-session)
+    (define-key map (kbd "C-c C-l")   #'ellm-import-session)
     (define-key map (kbd "C-c C-o")   #'ellm-open-session)
     (define-key map (kbd "C-c C-m")   #'ellm-comment)
     (define-key map (kbd "C-c C-f")   #'ellm-attach-file)

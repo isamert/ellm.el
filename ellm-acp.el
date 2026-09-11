@@ -472,9 +472,9 @@ Call ON-READY with its effect on success, or ON-ERROR on failure."
   (let ((ellm-acp--inhibit-frontmatter-persist t))
     (ellm-acp-start-session provider frontmatter buffer :quiet)))
 
-(cl-defmethod ellm-provider-load-session ((provider ellm-acp-provider) frontmatter)
-  "Select and load an ACP session for PROVIDER."
-  (ellm-acp-load-session provider frontmatter))
+(cl-defmethod ellm-provider-import-session ((provider ellm-acp-provider) frontmatter)
+  "Select and import an ACP session for PROVIDER."
+  (ellm-acp-import-session provider frontmatter))
 
 (cl-defmethod ellm-provider-close-session ((_provider ellm-acp-provider) frontmatter buffer)
   "Close BUFFER's active ACP session."
@@ -1795,8 +1795,8 @@ do not show a success message.  Return the ready ACP connection."
          (choice (completing-read "ACP session: " choices nil t)))
     (cdr (assoc choice choices))))
 
-(defun ellm-acp-load-session (provider frontmatter)
-  "Interactively load an ACP session for PROVIDER using FRONTMATTER context."
+(defun ellm-acp-import-session (provider frontmatter)
+  "Interactively import an ACP session for PROVIDER using FRONTMATTER context."
   (let* ((default-directory (ellm--base-directory))
          (list-buffer (generate-new-buffer " *ellm-acp-list*"))
          (list-connection nil))

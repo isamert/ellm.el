@@ -2581,7 +2581,7 @@
       (setq ellm--config-in-flight '(model))
       (should-error (ellm-set-config) :type 'user-error)
       (should-error (ellm-send) :type 'user-error)
-      (should-error (ellm-load-session) :type 'user-error)
+      (should-error (ellm-import-session) :type 'user-error)
       (should-error (ellm-start-session) :type 'user-error)
       (should-error (ellm-close-session) :type 'user-error)
       (should-error (ellm-delete-session) :type 'user-error))))
@@ -2914,8 +2914,8 @@
     (should (equal (ellm-provider-model-candidates provider)
                    '("current" "available")))))
 
-(ert-deftest ellm-test-kagi-load-session ()
-  "Kagi session loading should select a listed conversation and replay its branch."
+(ert-deftest ellm-test-kagi-import-session ()
+  "Kagi session import should select a listed conversation and replay its branch."
   (let ((provider (ellm-make-kagi-provider :session-token "secret" :model "fallback"))
         loaded-buffer)
     (unwind-protect
@@ -2946,7 +2946,7 @@
                ((symbol-function 'switch-to-buffer)
                 (lambda (buffer-or-name &rest _)
                   (setq loaded-buffer (get-buffer buffer-or-name)))))
-            (setq loaded-buffer (ellm-kagi-load-session provider nil)))
+            (setq loaded-buffer (ellm-kagi-import-session provider nil)))
           (with-current-buffer loaded-buffer
             (should (string-match-p "Loaded Kagi" (buffer-name)))
             (should (string-match-p "provider: kagi" (buffer-string)))
@@ -9028,7 +9028,7 @@ The parent provider remains buffer-local fallback only when the profile omits on
                       ((symbol-function 'switch-to-buffer)
                        (lambda (buffer-or-name &rest _)
                          (setq loaded-buffer (get-buffer buffer-or-name)))))
-              (setq loaded-buffer (ellm-load-session)))
+              (setq loaded-buffer (ellm-import-session)))
              (with-current-buffer loaded-buffer
                (let ((contents (buffer-string))
                      (turns (ellm--parse-turns)))

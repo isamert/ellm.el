@@ -45,6 +45,7 @@ cleanly.
   - [In buffer controls](#in-buffer-controls)
   - [Images and files](#images-and-files)
   - [Persistence](#persistence)
+    - [Opening conversations](#opening-conversations)
   - [MCPs](#mcps)
 - [Configuration](#configuration)
   - [`ellm-new-buffer-default-configuration-function`](#ellm-new-buffer-default-configuration-function)
@@ -690,11 +691,22 @@ etc., the better way is using `ellm-save` so that subagents, retained
 tool outputs, reasoning state, and attachments are also saved
 alongside them.
 
+### Opening conversations
+
+`M-x ellm-open-session` lists locally persisted `main.ellm` main
+conversations below the current persistence root and visits the selected
+transcript.  It is for sessions created with `ellm-save` or automatic
+persistence; open arbitrary `.ellm` files with Emacs's usual file commands.
+
+`M-x ellm-import-session` asks the selected provider to list its remote
+sessions, then imports the selected session into a new ellm buffer.  Its
+availability and scope are provider-dependent: ACP normally lists sessions
+for the current working directory, while Kagi lists account conversations.
+
 `ellm-persistence-location` controls where sessions go.  The default
 `global` location is `ellm-persistence-directory` (`~/ellm/`).  Set it
 to `project` to store sessions below
-`ellm-persistence-project-directory` (`.ellm`) in each project.  `M-x
-ellm-open-session` opens a saved main conversation.
+`ellm-persistence-project-directory` (`.ellm`) in each project.
 
 <img width="761" height="113" alt="image" src="https://github.com/user-attachments/assets/8df682dd-046a-4051-93ee-82f3350978f1" />
 
@@ -1166,7 +1178,7 @@ Kagi conversations are remote sessions.  After the first request, ellm
 writes the Kagi `conversation-id` and `branch-id` below `kagi:` in the
 frontmatter, so later prompts continue the same remote branch.  Leave
 those values in place when saving or reopening a transcript.  Use `M-x
-ellm-load-session` to choose an existing Kagi Assistant conversation
+ellm-import-session` to choose an existing Kagi Assistant conversation
 and import its active branch into a new ellm buffer.
 
 # Rationale
