@@ -4193,10 +4193,10 @@ new session.  An existing session always keeps its current directory."
   "Return a descriptive completion candidate for SESSION."
   (let* ((modified (format-time-string "%F %R"
                                        (ellm--persisted-session-modified session)))
-         (project (or (ellm--persisted-session-project session) "Unknown project"))
+         (project (or (ellm--persisted-session-project session) "no project"))
          (description (or (ellm--persisted-session-title session)
                           (ellm--persisted-session-summary session)
-                          "Untitled session"))
+                          "no title"))
          (subagents (ellm--persisted-session-subagent-count session)))
     (concat
      (propertize modified 'face 'font-lock-comment-face)
@@ -5077,10 +5077,23 @@ keep protocol-specific mutable state there, but lifecycle state lives here."
        :type marker
        :documentation "Insertion-type marker at the end of the rendered stream."))
 
+(defun ellm--yolo-p (frontmatter)
+  "Return non-nil when FRONTMATTER enables unconditional tool approval.
+`yolo' must be a boolean when present."
+  (let ((value (alist-get 'yolo frontmatter :missing)))
+    (cond
+     ((eq value :missing) nil)
+     ((eq value t) t)
+     ((ellm--false-value-p value) nil)
+     (t (user-error "ellm: `yolo' must be true or false")))))
+
 (defun ellm--tool-permission-policy-for-keys (frontmatter keys)
   "Return the permission policy in FRONTMATTER for the first matching KEYS.
-KEYS are ordered from most to least specific and are followed by `default'."
-  (let* ((rules (alist-get 'tool-permissions frontmatter))
+KEYS are ordered from most to least specific and are followed by `default'.
+When `yolo' is true, it overrides every policy."
+  (if (ellm--yolo-p frontmatter)
+      'allow
+    (let* ((rules (alist-get 'tool-permissions frontmatter))
          (entry (and rules
                      (cl-loop for key in (append keys '("default"))
                               thereis (cl-find key rules
@@ -5097,13 +5110,14 @@ KEYS are ordered from most to least specific and are followed by `default'."
       ("ask" 'ask)
       ("deny" 'deny)
       (_ (user-error "ellm: Invalid tool permission policy for `%s': %s"
-                     (if entry (car entry) "default") value)))))
+                     (if entry (car entry) "default") value))))))
 
 (defun ellm--tool-permission-policy (frontmatter tool)
   "Return the permission policy for TOOL in FRONTMATTER.
 The `tool-permissions' map accepts `allow', `ask', and `deny' values under
 `default', exact tool names, or `@CATEGORY' selectors.  Exact tool names take
-precedence over category selectors, which take precedence over `default'."
+precedence over category selectors, which take precedence over `default'.
+`yolo: true' overrides every permission policy with `allow'."
   (ellm--tool-permission-policy-for-keys
    frontmatter
    (list (ellm-tool-name tool)
@@ -6188,6 +6202,11 @@ Return non-nil when delivery succeeds."
     ("tool-permissions" :ann "map"
      :desc "Permission policies by default, local tool name/category, or advertised ACP kind."
      :children ellm--capf-tool-permission-entries)
+    ("yolo"        :ann "boolean"
+     :desc "Automatically approve every enabled tool call; tools are not sandboxed."
+     :type boolean :editable t
+     :values (("true" :value t
+               :desc "Bypass all tool permission prompts.")))
     ("mcp"         :ann "list|true"
      :desc "MCP servers enabled for this buffer; true means all, names come from `ellm-mcp-servers', and `@CATEGORY' expands categories."
      :type mcp :editable t

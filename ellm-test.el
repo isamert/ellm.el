@@ -6129,6 +6129,7 @@
                "tool-permissions:\n  read: ask\n"
                "profiles:\n  child:\n    tools: [read, edit, launch_subagent]\n"
                "    mcp: [parent, extra]\n"
+               "    yolo: true\n"
                "    tool-permissions:\n      read: allow\n"
                "---\n\n"))
       (ellm-mode)
@@ -6149,6 +6150,8 @@
                 (should (equal (alist-get 'mcp- raw) '("extra")))
                 (should (equal (alist-get 'tool-permissions raw)
                                '((read . "ask"))))
+                (should (eq (alist-get 'yolo raw) :false))
+                (should-not (ellm--yolo-p frontmatter))
                 (should (equal (sort (mapcar #'ellm-tool-name
                                       (ellm--resolve-tools frontmatter))
                                      #'string<)
@@ -9386,6 +9389,32 @@ The parent provider remains buffer-local fallback only when the profile omits on
                                         ("@files" . "ask"))))
                  tool)
                 'ask))))
+
+(ert-deftest ellm-test-yolo-overrides-tool-permissions ()
+  "`yolo: true' approves local and ACP tool calls regardless of rules."
+  (let ((tool (ellm-make-tool :name "bash" :category "shell"))
+        (frontmatter '((yolo . t)
+                       (tool-permissions . ((default . "deny")
+                                            (bash . "deny")
+                                            ("@acp/execute" . "deny"))))))
+    (should (ellm--yolo-p frontmatter))
+    (should (eq (ellm--tool-permission-policy frontmatter tool) 'allow))
+    (should (eq (ellm--tool-permission-policy-for-keys
+                 frontmatter '("@acp/execute"))
+                'allow))
+    (with-temp-buffer
+      (ellm-mode)
+      (let ((request (ellm--make-request :buffer (current-buffer)
+                                         :frontmatter frontmatter))
+            decision)
+        (ellm--set-active-request request)
+        (unwind-protect
+            (progn
+              (ellm--authorize-tool-call request tool '("echo yolo")
+                                          (lambda (value) (setq decision value)))
+              (should (eq decision 'allow))
+              (should-not ellm--active-user-prompt))
+          (ellm--set-active-request nil))))))
 
 (ert-deftest ellm-test-default-tool-permission ()
   "Unmatched permissions use `ellm-default-tool-permission'."

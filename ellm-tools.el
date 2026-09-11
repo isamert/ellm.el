@@ -2209,6 +2209,11 @@ The restrictions deliberately preserve CHILD's profile reference and its
 configuration.  They constrain only capabilities that are currently broader
 than PARENT; profiles therefore remain live configuration baselines."
   (let* ((parent (ellm--effective-frontmatter parent))
+         ;; `yolo' is a capability escalation, not a profile preference.
+         ;; Persist the parent's effective value before deriving restrictions so
+         ;; a selected child profile cannot affect those calculations.
+         (child (ellm-tools--frontmatter-set
+                 child 'yolo (if (ellm--yolo-p parent) t :false)))
          (child-effective (ellm--effective-frontmatter child))
          (parent-tools (ellm--resolve-tools parent))
          (child-tools (ellm--resolve-tools child-effective))

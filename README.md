@@ -404,12 +404,26 @@ tool-permissions:
 ---
 ```
 
+For an explicitly unrestricted conversation, use `yolo: true`.  It
+approves every enabled local tool call, overriding all `tool-permissions`
+rules.  Tools are not sandboxed, so use this only in a trusted workspace:
+
+```markdown
+---
+profile: agent
+yolo: true
+---
+```
+
+Subagents inherit this capability from their parent; a child cannot enable it
+when its parent has not.
+
 ACP agents own their tools, so their tool names are not available to
 ellm.  When an ACP agent asks for permission, ellm applies `default`
 to the offered one-shot allow/reject choices; `ask` retains the
 agent's permission prompt.  It never automatically selects an ACP
 “always” choice, so frontmatter changes continue to affect later
-requests.
+requests.  `yolo: true` likewise selects only a one-shot allow choice.
 
 ACP agents may advertise a broad tool kind.  You can use it as a
 best-effort selector, for example:
