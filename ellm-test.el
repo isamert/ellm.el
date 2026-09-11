@@ -16,6 +16,7 @@
 (require 'ellm-codex)
 (require 'llm-claude)
 (require 'llm-fake)
+(require 'ol)
 
 ;; Tests must not create desktop notifications for the test runner.
 (setq ellm-notifications-enabled nil)
@@ -10384,10 +10385,11 @@ The parent provider remains buffer-local fallback only when the profile omits on
           (setq buffer (find-file-noselect main))
           (with-current-buffer buffer
             (insert "Unsaved edit\n"))
-          (cl-letf (((symbol-function 'ellm--persistence-root) (lambda () root))
-                    ((symbol-function 'completing-read)
-                     (lambda (_prompt choices &rest _) (caar choices))))
-            (ellm-open-session))
+          (let ((ellm-persistence-directory root)
+                (ellm-current-project-function (lambda () nil)))
+            (cl-letf (((symbol-function 'completing-read)
+                       (lambda (_prompt choices &rest _) (caar choices))))
+              (ellm-open-session)))
           (should (eq (current-buffer) buffer))
           (with-current-buffer buffer
             (should (buffer-modified-p))
@@ -10397,6 +10399,146 @@ The parent provider remains buffer-local fallback only when the profile omits on
           (set-buffer-modified-p nil))
         (kill-buffer buffer))
       (delete-directory root t))))
+
+(ert-deftest ellm-test-open-session-searches-project-before-global-when-disabled ()
+  "Session discovery must not depend on automatic persistence settings."
+  (let* ((root (make-temp-file "ellm-session-search-" t))
+         (project (expand-file-name "project/" root))
+         (project-store (expand-file-name ".ellm/" project))
+         (global-store (expand-file-name "global/" root))
+         (project-main (expand-file-name "project/main.ellm" project-store))
+         (global-main (expand-file-name "global/main.ellm" global-store))
+         buffer)
+    (unwind-protect
+        (progn
+          (make-directory (file-name-directory project-main) t)
+          (make-directory (file-name-directory global-main) t)
+          (with-temp-file project-main (insert ">-| user\nProject\n"))
+          (with-temp-file global-main (insert ">-| user\nGlobal\n"))
+          (let ((default-directory project)
+                (ellm-persistence-enabled nil)
+                (ellm-persistence-location 'global)
+                (ellm-persistence-directory global-store)
+                (ellm-current-project-function (lambda () project)))
+            (cl-letf (((symbol-function 'completing-read)
+                       (lambda (_prompt choices &rest _)
+                         (should (= (length choices) 2))
+                         (should (equal (ellm--persisted-session-main-file
+                                         (cdar choices))
+                                        project-main))
+                         (caar choices))))
+              (ellm-open-session)
+              (setq buffer (current-buffer))
+              (should (equal buffer-file-name project-main)))))
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer
+          (set-buffer-modified-p nil))
+        (kill-buffer buffer))
+      (delete-directory root t))))
+
+(ert-deftest ellm-test-org-store-link-assigns-an-unsaved-session-id ()
+  (let ((buffer (generate-new-buffer " *ellm org link*"))
+        org-store-link-plist)
+    (unwind-protect
+        (with-current-buffer buffer
+          (insert "---\ntitle: Link title\n---\n\n>-| user\nInvestigate the failure\n")
+          (ellm-mode)
+          (should (ellm-org-store-link))
+          (let ((id (ellm--frontmatter-value '(ellm session-id))))
+            (should (stringp id))
+            (should (equal (plist-get org-store-link-plist :link)
+                           (concat "ellm:" id)))
+            (should (equal (plist-get org-store-link-plist :description)
+                           "ellm: Link title"))
+            (should-not buffer-file-name)))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest ellm-test-org-link-prefers-live-buffer ()
+  (let ((buffer (generate-new-buffer " *ellm org link live*"))
+        (id "20260911T142530-a1b2c3"))
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer
+            (insert (format "---\nellm:\n  session-id: %s\n---\n\n>-| user\nLive\n" id))
+            (ellm-mode))
+          (ellm-org-open-link id nil)
+          (should (eq (current-buffer) buffer)))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest ellm-test-org-link-searches-project-before-global ()
+  (let* ((root (make-temp-file "ellm-org-link-" t))
+         (project (expand-file-name "project/" root))
+         (project-main (expand-file-name ".ellm/session/main.ellm" project))
+         (global (expand-file-name "global/" root))
+         (global-main (expand-file-name "session/main.ellm" global))
+         (id "20260911T142530-a1b2c3")
+         buffer)
+    (unwind-protect
+        (progn
+          (dolist (file (list project-main global-main))
+            (make-directory (file-name-directory file) t)
+            (with-temp-file file
+              (insert (format "---\nellm:\n  session-id: %s\n---\n\n>-| user\nSaved\n" id))))
+          (let ((default-directory project)
+                (ellm-persistence-directory global)
+                (ellm-current-project-function (lambda () project)))
+            (ellm-org-open-link id nil)
+            (setq buffer (current-buffer))
+            (should (equal buffer-file-name project-main))))
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer
+          (set-buffer-modified-p nil))
+        (kill-buffer buffer))
+      (delete-directory root t))))
+
+(ert-deftest ellm-test-org-link-finds-renamed-session-directory ()
+  (let* ((root (make-temp-file "ellm-org-link-" t))
+         (main (expand-file-name "renamed/main.ellm" root))
+         (id "20260911T142530-a1b2c3")
+         buffer)
+    (unwind-protect
+        (progn
+          (make-directory (file-name-directory main) t)
+          (with-temp-file main
+            (insert (format "---\nellm:\n  session-id: %s\n---\n\n>-| user\nMoved\n" id)))
+          (let ((ellm-persistence-directory root)
+                (ellm-current-project-function (lambda () nil)))
+            (ellm-org-open-link id nil)
+            (setq buffer (current-buffer))
+            (should (equal buffer-file-name main))))
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer
+          (set-buffer-modified-p nil))
+        (kill-buffer buffer))
+      (delete-directory root t))))
+
+(ert-deftest ellm-test-org-store-and-open-subagent-link ()
+  (let ((parent (generate-new-buffer " *ellm org parent*"))
+        (child (generate-new-buffer " *ellm org child*"))
+        org-store-link-plist)
+    (unwind-protect
+        (progn
+          (with-current-buffer parent
+            (insert ">-| user\nParent\n")
+            (ellm-mode))
+          (with-current-buffer child
+            (setq-local ellm-subagent-parent-buffer (buffer-name parent))
+            (insert "---\nsubagent:\n  id: subagent_1\n  name: Research\n---\n\n>-| user\nChild\n")
+            (ellm-mode)
+            (should (ellm-org-store-link))
+            (should (equal (plist-get org-store-link-plist :link)
+                           (concat "ellm:"
+                                   (with-current-buffer parent
+                                     (ellm--frontmatter-value '(ellm session-id)))
+                                   "/subagent/subagent_1"))))
+          (ellm-org-open-link (substring (plist-get org-store-link-plist :link)
+                                         (length "ellm:")) nil)
+          (should (eq (current-buffer) child)))
+      (dolist (buffer (list child parent))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
 
 (ert-deftest ellm-test-fold-and-unfold-all-prompt-tags ()
   "Explicit tag commands affect complete tags in every turn."

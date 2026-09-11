@@ -4216,6 +4216,156 @@ new session.  An existing session always keeps its current directory."
       (switch-to-buffer buffer)
     (find-file file)))
 
+;;;; Org links
+
+(declare-function org-link-set-parameters "ol")
+(declare-function org-link-store-props "ol")
+
+(defun ellm--org-link-session-id ()
+  "Return the session id to use for an Org link from this buffer.
+
+An unsaved subagent inherits its live parent's newly assigned id so a later
+`ellm-save' retains the link's identity."
+  (if-let* ((parent-name (and (local-variable-p 'ellm-subagent-parent-buffer)
+                              ellm-subagent-parent-buffer))
+            (parent (get-buffer parent-name))
+            ((buffer-live-p parent))
+            ((with-current-buffer parent (derived-mode-p 'ellm-mode))))
+      (let ((id (with-current-buffer parent (ellm--ensure-session-id))))
+        (unless (equal (ellm--frontmatter-value '(ellm session-id)) id)
+          (ellm--set-frontmatter-value '(ellm session-id) id))
+        id)
+    (ellm--ensure-session-id)))
+
+(defun ellm--org-link-target ()
+  "Return the Org link target for the current ellm buffer."
+  (let ((id (ellm--org-link-session-id)))
+    (if-let* ((subagent-id (ellm--frontmatter-value '(subagent id))))
+        (concat id "/subagent/" (url-hexify-string (format "%s" subagent-id)))
+      id)))
+
+(defun ellm--org-link-description ()
+  "Return a concise default description for an Org link."
+  (let* ((frontmatter (ellm--parse-frontmatter t))
+         (title (alist-get 'title frontmatter))
+         (subagent-name (ellm--alist-get-nested frontmatter '(subagent name)))
+         (user-turn (cl-find "user" (ellm--parse-turns)
+                             :key #'ellm-turn-role :test #'equal))
+         (summary (and user-turn
+                       (replace-regexp-in-string
+                        "[[:space:]]+" " " (ellm-turn-content user-turn))))
+         (description (or (and (stringp title)
+                               (not (string-empty-p (string-trim title)))
+                               (string-trim title))
+                          (and (stringp subagent-name)
+                               (not (string-empty-p (string-trim subagent-name)))
+                               (string-trim subagent-name))
+                          (and (stringp summary)
+                               (not (string-empty-p (string-trim summary)))
+                               summary)
+                          "ellm session")))
+    (concat "ellm: " (truncate-string-to-width description 80 nil nil t))))
+
+(defun ellm-org-store-link (&optional _interactive)
+  "Store an Org link to the current ellm conversation.
+The link identifies the session rather than its persistence path.  Storing a
+link to an unsaved conversation assigns it a session id but does not save it."
+  (when (derived-mode-p 'ellm-mode)
+    (org-link-store-props
+     :type "ellm"
+     :link (concat "ellm:" (ellm--org-link-target))
+     :description (ellm--org-link-description))
+    t))
+
+(defun ellm--org-link-safe-component-p (component)
+  "Return non-nil when COMPONENT is safe to use as one file-name component."
+  (and (stringp component)
+       (not (member component '("." "..")))
+       (equal component (file-name-nondirectory component))))
+
+(defun ellm--org-link-parse-target (target)
+  "Return (SESSION-ID SUBAGENT-ID) parsed from Org link TARGET."
+  (unless (string-match
+           "\\`\\([^/]+\\)\\(?:/subagent/\\([^/]+\\)\\)?\\'" target)
+    (user-error "ellm: Invalid Org link target: %s" target))
+  (let ((session-id (match-string 1 target))
+        (subagent-id (when-let* ((subagent (match-string 2 target)))
+                       (url-unhex-string subagent))))
+    (unless (and (ellm--org-link-safe-component-p session-id)
+                 (or (null subagent-id)
+                     (ellm--org-link-safe-component-p subagent-id)))
+      (user-error "ellm: Invalid Org link target: %s" target))
+    (list session-id subagent-id)))
+
+(defun ellm--org-link-live-buffer (session-id subagent-id)
+  "Return a live ellm buffer for SESSION-ID and optional SUBAGENT-ID."
+  (cl-find-if
+   (lambda (buffer)
+     (with-current-buffer buffer
+       (and (derived-mode-p 'ellm-mode)
+            (equal (ellm--frontmatter-value '(ellm session-id)) session-id)
+            (if subagent-id
+                (equal (ellm--frontmatter-value '(subagent id)) subagent-id)
+              (not (ellm--frontmatter-value '(subagent id)))))))
+   (buffer-list)))
+
+(defun ellm--persisted-session-by-id (session-id)
+  "Return the persisted session identified by SESSION-ID, or nil.
+
+Check the fixed path in each search root first.  The full root scan is only a
+fallback for a session directory that was renamed after saving."
+  (let ((roots (ellm--persistence-search-roots)))
+    (or (cl-loop for root in roots
+                 for file = (expand-file-name (concat session-id "/main.ellm") root)
+                 for metadata = (and (file-regular-p file)
+                                     (ellm--persisted-session-metadata file))
+                 when (equal (car metadata) session-id)
+                 return (ellm--persisted-session-create
+                         :id session-id
+                         :directory (file-name-directory file)
+                         :main-file file))
+        (cl-loop for root in roots
+                 thereis (cl-find session-id (ellm--persisted-sessions root)
+                                  :key #'ellm--persisted-session-id
+                                  :test #'equal)))))
+
+(defun ellm--org-link-file (session subagent-id)
+  "Return SESSION's main or SUBAGENT-ID file, if it exists."
+  (if subagent-id
+      (let ((file (expand-file-name
+                   (concat subagent-id ".ellm")
+                   (expand-file-name "subagents/"
+                                     (ellm--persisted-session-directory session)))))
+        ;; The file name is only a candidate.  Verify its frontmatter so a
+        ;; hand-written link cannot select another subagent.
+        (and (file-regular-p file)
+             (with-temp-buffer
+               (insert-file-contents file)
+               (equal (ellm--alist-get-nested (ellm--parse-frontmatter t)
+                                               '(subagent id))
+                      subagent-id))
+             file))
+    (ellm--persisted-session-main-file session)))
+
+(defun ellm-org-open-link (target _arg)
+  "Open the ellm Org link TARGET."
+  (pcase-let ((`(,session-id ,subagent-id)
+               (ellm--org-link-parse-target target)))
+    (if-let* ((buffer (ellm--org-link-live-buffer session-id subagent-id)))
+        (switch-to-buffer buffer)
+      (if-let* ((session (ellm--persisted-session-by-id session-id))
+                (file (ellm--org-link-file session subagent-id)))
+          (ellm--find-file-or-switch-to-buffer file)
+        (user-error "ellm: No %s found for session %s"
+                    (if subagent-id "subagent" "conversation") session-id)))))
+
+(with-eval-after-load 'ol
+  (org-link-set-parameters "ellm"
+                           :store #'ellm-org-store-link
+                           :follow #'ellm-org-open-link))
+
+;;;; ellm-open-session
+
 ;;;###autoload
 (defun ellm-open-session ()
   "Open a persisted main conversation for the current project or globally.
