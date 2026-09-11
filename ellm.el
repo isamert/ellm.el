@@ -4128,7 +4128,7 @@ new session.  An existing session always keeps its current directory."
 (cl-defstruct (ellm--persisted-session
                (:constructor ellm--persisted-session-create))
   "A persisted session discovered by `ellm--persisted-sessions'."
-  directory main-file modified cwd project title summary subagent-count)
+  id directory main-file modified cwd project title summary subagent-count)
 
 (defun ellm--persisted-session-subagent-files (directory)
   "Return persisted subagent files directly below DIRECTORY."
@@ -4142,6 +4142,7 @@ new session.  An existing session always keeps its current directory."
       (with-temp-buffer
         (insert-file-contents file)
         (let* ((frontmatter (ellm--parse-frontmatter t))
+               (id (ellm--alist-get-nested frontmatter '(ellm session-id)))
                (cwd (alist-get 'cwd frontmatter))
                (title (alist-get 'title frontmatter))
                (user-turn (cl-find "user" (ellm--parse-turns)
@@ -4150,12 +4151,13 @@ new session.  An existing session always keeps its current directory."
                              (replace-regexp-in-string
                               "[[:space:]]+" " "
                               (ellm-turn-content user-turn)))))
-          (list (and (stringp cwd) cwd)
+          (list (and (stringp id) id)
+                (and (stringp cwd) cwd)
                 (when-let* ((title (and (stringp title) (string-trim title)))
                             ((not (string-empty-p title))))
                   title)
                 summary)))
-    (error '(nil nil nil))))
+    (error '(nil nil nil nil))))
 
 (defun ellm--persisted-sessions (root)
   "Return persisted sessions directly below ROOT, most recent first."
@@ -4170,14 +4172,15 @@ new session.  An existing session always keeps its current directory."
             (when (file-regular-p main-file)
               (let ((metadata (ellm--persisted-session-metadata main-file)))
                 (push (ellm--persisted-session-create
+                       :id (car metadata)
                        :directory (file-name-as-directory directory)
                        :main-file main-file
                        :modified (file-attribute-modification-time
                                   (file-attributes main-file))
-                       :cwd (car metadata)
-                       :project (ignore-errors (ellm--project-name (car metadata)))
-                       :title (cadr metadata)
-                       :summary (nth 2 metadata)
+                       :cwd (nth 1 metadata)
+                       :project (ignore-errors (ellm--project-name (nth 1 metadata)))
+                       :title (nth 2 metadata)
+                       :summary (nth 3 metadata)
                        :subagent-count (length
                                         (ellm--persisted-session-subagent-files
                                          directory)))
