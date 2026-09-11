@@ -3607,7 +3607,7 @@
         (should-not (ellm-llm-driver-title-started driver))))))
 
 (ert-deftest ellm-test-persistence-new-and-temp-buffers ()
-  "New conversations should persist while temporary ones remain ephemeral."
+  "New conversations wait for content; temporary ones remain ephemeral."
   (let ((root (make-temp-file "ellm-persistence-" t))
         (ellm-persistence-enabled t)
         (ellm-persistence-location 'global)
@@ -3616,7 +3616,14 @@
         (let ((ellm-persistence-directory root))
           (setq main (ellm-new-buffer))
           (with-current-buffer main
-            (should buffer-file-name)
+            (should-not buffer-file-name)
+            (should-not ellm--session-directory)
+            ;; Killing an untouched initial skeleton must not create a file.
+            (ellm--persistence-before-kill)
+            (should-not buffer-file-name)
+            (goto-char (point-max))
+            (insert "Recover this draft.")
+            (ellm--persistence-before-kill)
             (should (file-exists-p buffer-file-name))
             (should (equal (file-name-nondirectory buffer-file-name)
                            "main.ellm"))
@@ -3625,6 +3632,9 @@
           (setq temp (ellm-new-temp-buffer))
           (with-current-buffer temp
             (should ellm--persistence-ephemeral-p)
+            (goto-char (point-max))
+            (insert "Do not save this draft.")
+            (ellm--persistence-before-kill)
             (should-not buffer-file-name)
             (should-not ellm--session-directory)))
       (dolist (buffer (list temp main))
@@ -4004,6 +4014,9 @@
         (let ((default-directory (file-name-as-directory workspace)))
           (setq buffer (ellm-new-buffer))
           (with-current-buffer buffer
+            (goto-char (point-max))
+            (insert "Persist this draft.")
+            (ellm--persistence-flush)
             (should (equal (ellm--frontmatter-value 'cwd)
                            (file-name-as-directory workspace)))
             (should (equal default-directory
@@ -4028,6 +4041,9 @@
           (make-directory (expand-file-name ".git" root))
           (setq buffer (ellm-new-buffer))
           (with-current-buffer buffer
+            (goto-char (point-max))
+            (insert "Persist this draft.")
+            (ellm--persistence-flush)
             (should (file-in-directory-p
                      buffer-file-name (expand-file-name ".ellm/" root)))))
       (when (buffer-live-p buffer)
@@ -4172,6 +4188,9 @@
         (progn
           (setq parent (ellm-new-buffer))
           (with-current-buffer parent
+            (goto-char (point-max))
+            (insert "Start parent session.")
+            (ellm-send)
             (ellm-tools--launch-subagent "Persist child." nil "worker" nil)
             (setq parent-file buffer-file-name
                   child (get-buffer

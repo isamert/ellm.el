@@ -351,8 +351,9 @@ closest parent containing a `.git' directory."
 
 (defcustom ellm-persistence-enabled nil
   "When non-nil, automatically persist ellm conversation buffers.
-New main conversations receive a session directory and `main.ellm' file.
-Subagents are stored below that directory in `subagents/'."
+New conversations remain transient until they contain a non-blank user draft
+or an assistant turn.  Main conversations are stored as `main.ellm';
+subagents are stored below their session directory in `subagents/'."
   :type 'boolean
   :group 'ellm)
 
@@ -3966,6 +3967,19 @@ metadata is written in one frontmatter replacement."
         (ellm--apply-working-directory
          (ellm--effective-frontmatter updated))))))
 
+(defun ellm--persistence-automatic-eligible-p ()
+  "Return non-nil when this buffer has content worth automatically saving.
+Already visited files are always eligible.  New buffers become eligible after
+an assistant turn, including a failed first request, or a non-blank user
+draft.  Frontmatter and default system prompts alone do not create sessions."
+  (or buffer-file-name
+      (cl-some
+       (lambda (turn)
+         (pcase (ellm-turn-role turn)
+           ("assistant" t)
+           ("user" (not (string-blank-p (ellm-turn-content turn))))))
+       (ellm--parse-turns))))
+
 (defun ellm--persistence-cancel-timer ()
   "Cancel the current buffer's pending persistence timer."
   (when ellm--persistence-timer
@@ -4005,10 +4019,10 @@ idle for three seconds.  Further checkpoints do not restart either wait."
 When FORCE is non-nil, persist regardless of automatic-persistence settings.
 ROOT and SESSION-ID have the same meanings as in `ellm--persistence-prepare'."
   (ellm--persistence-cancel-timer)
-  (when (and (or force ellm--persistence-dirty-p
-                      (buffer-modified-p) (not buffer-file-name))
+  (when (and (or force ellm--persistence-dirty-p (buffer-modified-p))
              (or force ellm-persistence-enabled)
              (or force (not ellm--persistence-ephemeral-p))
+             (or force (ellm--persistence-automatic-eligible-p))
              (not ellm--persistence-saving-p))
     (condition-case err
         (progn
@@ -9953,9 +9967,10 @@ conversation state only when such updates were skipped."
       (setq ellm--session-title title)
       (ellm-update-session-title title)))
   ;; A visited persisted session is already complete on disk.  Recognize it
-  ;; without immediately reparsing and rewriting its frontmatter.
-  (unless (ellm--persistence-recognize-buffer)
-    (ellm--persistence-flush))
+  ;; without immediately reparsing and rewriting its frontmatter.  New
+  ;; conversations receive automatic storage only once they have meaningful
+  ;; content; see `ellm--persistence-automatic-eligible-p'.
+  (ellm--persistence-recognize-buffer)
   (ellm-attachment-ui-setup)
   (ellm--touch-activity))
 
