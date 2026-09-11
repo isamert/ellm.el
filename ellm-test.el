@@ -7735,6 +7735,20 @@ The parent provider remains buffer-local fallback only when the profile omits on
      (ellm-tools--validate-subagent-frontmatter
       '((provider . "fake") (model . "small")) nil))))
 
+(ert-deftest ellm-test-subagent-validation-accepts-parent-model ()
+  "Subagents may inherit a working parent model outside configured candidates."
+  (let* ((provider (make-ellm-test-sync-provider))
+         (ellm-provider-alist
+          `((fake . (:provider ,provider :models ("configured"))))))
+    (cl-letf (((symbol-function 'ellm-provider-current-model)
+               (lambda (_provider) "parent-model")))
+      (should-not
+       (ellm-tools--validate-subagent-frontmatter
+        '((provider . "fake") (model . "parent-model")) provider))
+      (should-error
+       (ellm-tools--validate-subagent-frontmatter
+        '((provider . "fake") (model . "other-model")) provider)))))
+
 (ert-deftest ellm-test-frontmatter-model-capf-preserves-quoted-value ()
   "Completing a quoted model value should not duplicate the typed prefix."
   (should

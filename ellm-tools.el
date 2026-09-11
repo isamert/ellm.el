@@ -2147,12 +2147,15 @@ FALLBACK-PROVIDER is used when FRONTMATTER has no `provider:' key."
                        fallback-provider))
            (model (ellm-tools--model-name
                    (ellm--plistish-get frontmatter 'model)))
+           (parent-model (and fallback-provider
+                              (ellm-provider-current-model fallback-provider)))
            (candidates (car (ellm--provider-model-candidates entry provider))))
       (unless provider
         (ellm-tools--error "subagent has no provider configured"))
       (when (and model candidates
-                 (not (member model
-                              (mapcar #'ellm--model-candidate-name candidates))))
+                 (not (or (equal model parent-model)
+                          (member model
+                                  (mapcar #'ellm--model-candidate-name candidates)))))
         (ellm-tools--error
          "subagent model `%s' is not configured for provider `%s'"
          model (or provider-name "<fallback>"))))))
