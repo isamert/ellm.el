@@ -2574,6 +2574,19 @@
     (setq ellm--active-request 'pending)
     (should-error (ellm-set-config) :type 'user-error)))
 
+(ert-deftest ellm-test-delete-session-unsupported-provider-suggests-local-deletion ()
+  "Unsupported backend deletion should distinguish local conversation deletion."
+  (let ((ellm-provider (make-ellm-test-config-llm-provider)))
+    (with-temp-buffer
+      (ellm-mode)
+      (condition-case err
+          (progn
+            (ellm-delete-session)
+            (error "Expected session deletion to fail"))
+        (user-error
+         (should (string-match-p "ellm-delete-conversation"
+                                 (error-message-string err))))))))
+
 (ert-deftest ellm-test-set-config-rejects-in-flight-config ()
   "Sends and additional config changes should wait for live application."
   (let ((ellm-provider (make-ellm-test-config-llm-provider)))
@@ -3644,6 +3657,52 @@
             (set-buffer-modified-p nil))
           (kill-buffer buffer)))
       (delete-directory root t))))
+
+(ert-deftest ellm-test-delete-conversation-removes-managed-local-session ()
+  "Deleting a saved conversation kills its buffers and removes its directory."
+  (let ((root (make-temp-file "ellm-delete-conversation-" t))
+        (ellm-persistence-enabled t)
+        (ellm-persistence-location 'global)
+        buffer related directory session-id)
+    (unwind-protect
+        (let ((ellm-persistence-directory root))
+          (setq buffer (ellm-new-buffer))
+          (with-current-buffer buffer
+            (goto-char (point-max))
+            (insert "Delete this conversation.")
+            (ellm-save)
+            (setq directory ellm--session-directory
+                  session-id (ellm--frontmatter-value '(ellm session-id)))
+            (should (file-directory-p directory))
+            (setq related (ellm-new-buffer))
+            (with-current-buffer related
+              (ellm--set-frontmatter-value
+               '(ellm session-id) session-id)
+              (setq-local ellm--session-directory directory))
+            (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t)))
+              (ellm-delete-conversation)))
+          (should-not (buffer-live-p buffer))
+          (should-not (buffer-live-p related))
+          (should-not (file-exists-p directory)))
+      (dolist (candidate (list related buffer))
+        (when (buffer-live-p candidate)
+          (with-current-buffer candidate
+            (set-buffer-modified-p nil))
+          (kill-buffer candidate)))
+      (when (file-exists-p root)
+        (delete-directory root t)))))
+
+(ert-deftest ellm-test-delete-conversation-rejects-unmanaged-buffer ()
+  "Local deletion must not remove an arbitrary directory."
+  (let ((directory (make-temp-file "ellm-unmanaged-conversation-" t)))
+    (unwind-protect
+        (with-temp-buffer
+          (ellm-mode)
+          (ellm--set-frontmatter-value '(ellm session-id) "not-saved")
+          (setq-local ellm--session-directory directory)
+          (should-error (ellm-delete-conversation) :type 'user-error)
+          (should (file-directory-p directory)))
+      (delete-directory directory t))))
 
 (ert-deftest ellm-test-dwim-appends-region-to-project-buffer ()
   "`ellm-dwim' should reuse the project conversation and append context."

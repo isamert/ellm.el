@@ -1850,7 +1850,8 @@ When SELECT is non-nil, choose a session from `session/list'."
                          (ellm-acp--current-session-id connection frontmatter))))
       (ellm-acp--initialize-sync connection)
       (unless (ellm-acp--capability connection '(sessionCapabilities delete))
-        (user-error "ellm ACP: agent does not support session/delete"))
+        (user-error "ellm ACP: agent does not support session/delete. %s"
+                    ellm--delete-conversation-hint))
       (unless session-id
         (let ((session (ellm-acp--session-choice
                         (ellm-acp--list-sessions connection provider frontmatter))))

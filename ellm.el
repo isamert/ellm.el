@@ -4121,6 +4121,49 @@ new session.  An existing session always keeps its current directory."
             (user-error "ellm: Failed to save %s" (buffer-name buffer)))))
       (message "ellm: saved session to %s" directory))))
 
+(defun ellm--managed-conversation-directory ()
+  "Return the current buffer's managed conversation directory.
+Signal `user-error' unless the directory has ellm's persisted session layout."
+  (let* ((directory ellm--session-directory)
+         (session-id (ellm--frontmatter-value '(ellm session-id)))
+         (main-file (and directory (expand-file-name "main.ellm" directory)))
+         (metadata (and (file-regular-p main-file)
+                        (ellm--persisted-session-metadata main-file))))
+    (unless (and (stringp session-id)
+                 (stringp directory)
+                 (file-directory-p directory)
+                 (equal session-id (car metadata)))
+      (user-error "ellm: This is not a managed saved conversation"))
+    (file-name-as-directory directory)))
+
+;;;###autoload
+(defun ellm-delete-conversation ()
+  "Delete the current managed, locally persisted conversation.
+This removes the conversation directory, including its transcript, subagents,
+attachments, retained outputs, and local reasoning state.  It does not delete
+a backend session.  All live buffers belonging to the conversation are killed."
+  (interactive)
+  (unless (derived-mode-p 'ellm-mode)
+    (user-error "ellm-delete-conversation must be called from an ellm buffer"))
+  (let* ((directory (ellm--managed-conversation-directory))
+         (session-id (ellm--frontmatter-value '(ellm session-id)))
+         (buffers (ellm--related-session-buffers session-id)))
+    (unless (yes-or-no-p (format "Delete saved ellm conversation in %s? " directory))
+      (user-error "ellm: Conversation deletion cancelled"))
+    ;; Prevent kill hooks from recreating the files being deleted.  Backend
+    ;; cleanup remains enabled so active requests and connections are released.
+    (dolist (buffer buffers)
+      (with-current-buffer buffer
+        (ellm--persistence-cancel-timer)
+        (setq-local ellm--persistence-ephemeral-p t)
+        (remove-hook 'kill-buffer-hook #'ellm--persistence-before-kill t)
+        (set-buffer-modified-p nil)))
+    (dolist (buffer buffers)
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))
+    (delete-directory directory t)
+    (message "ellm: deleted saved conversation in %s" directory)))
+
 (defun ellm--persistence-before-kill ()
   "Save the current conversation before backend session cleanup."
   (ellm--persistence-flush))
@@ -8911,15 +8954,21 @@ keeping frontmatter and an empty user prompt."
       (error
        (message "ellm: session cleanup failed: %s" (error-message-string err))))))
 
+(defconst ellm--delete-conversation-hint
+  "To remove local files, use M-x ellm-delete-conversation."
+  "Guidance distinguishing backend-session and local-conversation deletion.")
+
 (defun ellm-delete-session (&optional select)
   "Delete an ACP/backend session from session history.
 With prefix argument SELECT, choose a session from the backend when supported.
-Without SELECT, delete the current buffer's session when it has one."
+Without SELECT, delete the current buffer's session when it has one.
+To delete local persisted files instead, use `ellm-delete-conversation'."
   (interactive "P")
   (ellm--ensure-no-config-in-flight)
   (let* ((fm (ellm--command-frontmatter))
          (provider (ellm--command-provider fm)))
-    (ellm-provider-delete-session provider fm (current-buffer) select)))
+    (ellm-provider-delete-session provider fm (current-buffer) select)
+    (message "ellm: %s" ellm--delete-conversation-hint)))
 
 ;;;; Backend interface
 
@@ -9101,7 +9150,8 @@ When SELECT is non-nil, implementations may prompt for the session to delete.")
 
 (cl-defmethod ellm-provider-delete-session (_provider _frontmatter _buffer &optional _select)
   "Default session delete implementation for providers without sessions."
-  (user-error "ellm: Provider does not support session delete"))
+  (user-error "ellm: Provider does not support session delete. %s"
+              ellm--delete-conversation-hint))
 
 (cl-defgeneric ellm-backend-create (provider frontmatter buffer)
   "Create a backend driver for PROVIDER, FRONTMATTER, and BUFFER.
