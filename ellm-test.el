@@ -1255,6 +1255,24 @@
     (should (string-match-p "Brief announcement" content))
     (should (string-match-p "Contact us" content))))
 
+(ert-deftest ellm-tools-websearch-e2e ()
+  "Check if websearch tool works e2e.
+Search results may change and this may fail."
+  (let ((called nil)
+        (result nil))
+    (ellm-tools--start-websearch
+     "speed test" 2
+     (lambda (value)
+       (setq called t
+             result value)))
+    (with-timeout (10 (ert-fail "Timed out waiting for websearch callback"))
+      (while (not called)
+        (accept-process-output nil 0.3)))
+    (should called)
+    (should result)
+    (should (string-match-p "results=2" result))
+    (should (string-match-p "[Ss]peedtest" result))))
+
 (ert-deftest ellm-test-tool-output-store-and-tools ()
   "Retained output is named in frontmatter and accessible only by its id."
   (with-temp-buffer
