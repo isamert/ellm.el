@@ -884,6 +884,21 @@ and depending on that, you can select a different provider etc. Or you
 can do a small synchronous LLM call to determine all of these
 automatically. The sky is the limit here.
 
+## Creating new buffers with given configuration using the API
+
+Similarly to `ellm-new-buffer-default-configuration-function`, you can
+use the `ellm-new-buffer-with-configuration` directly to create one
+buffer with explicit settings without changing the defaults.
+
+```elisp
+(ellm-new-buffer-with-configuration
+ :provider 'codex :model "o4-mini" :profile "agent" :cwd "/tmp"
+ :ephemeral t)
+```
+
+This selects and returns the new buffer. The arguments uses the same
+keys as the default configuration function described above.
+
 ## Visuals and the header line
 
 The header line can show:

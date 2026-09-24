@@ -614,14 +614,18 @@ a continuation for visual nesting (no horizontal rule above it)."
   #'ellm--new-buffer-default-configuration
   "Function returning default frontmatter settings for new buffers.
 
-The function is called without arguments by `ellm-new-buffer' and returns a
-plist of frontmatter settings.  `:provider' and `:model' select the initial
-provider and model; missing values retain the standard first-provider and
-network-free model fallback.  `:system' is a prompt string inserted as a
+The function is called without arguments by `ellm-new-buffer' and
+`ellm-new-temp-buffer' and returns a plist of frontmatter settings.
+To supply settings for a single buffer instead, use
+`ellm-new-buffer-with-configuration'.  `:provider' and `:model' select the
+initial provider and model; missing values retain the standard first-provider
+and network-free model fallback.  `:system' is a prompt string inserted as a
 leading system turn rather than as frontmatter.  Other keywords are written
 to the initial frontmatter after the standard `provider', `model', and
 `created' keys; those standard keys are reserved.  For example, `:tools',
-`:cwd', and `:mcp' configure their corresponding frontmatter keys.
+`:cwd', and `:mcp' configure their corresponding frontmatter keys.  Set
+`:ephemeral' to non-nil to disable automatic persistence for the buffer and
+its subagents; it is not written to frontmatter.
 
 With a prefix argument, interactive provider/model selection overrides the
 plist's `:provider' and `:model', while all other settings still apply.  Use
@@ -4744,29 +4748,28 @@ accepted."
 
 `provider', `model', and `created' lead the frontmatter.  Other configuration
 keywords follow them, except the reserved `:provider', `:model', `:created',
-and `:system' keys."
+`:system', and `:ephemeral' keys."
   (let ((frontmatter `((provider . ,(or provider "null"))
                        (model . ,(or model "null"))
                        (created . ,(ellm--timestamp)))))
     (cl-loop for (key value) on configuration by #'cddr
-             unless (memq key '(:provider :model :created :system))
+             unless (memq key '(:provider :model :created :system :ephemeral))
              do (setq frontmatter
                       (append frontmatter
                               (list (cons (intern (substring (symbol-name key) 1))
                                           value)))))
     frontmatter))
 
-(defun ellm--new-buffer (ephemeral &optional select-provider-model)
-  "Create a new ellm conversation buffer.
-When EPHEMERAL is non-nil, do not automatically persist it.
-When SELECT-PROVIDER-MODEL is non-nil, prompt for the provider and model."
+(defun ellm--new-buffer (configuration ephemeral &optional select-provider-model)
+  "Create a new ellm conversation buffer using CONFIGURATION.
+When EPHEMERAL or CONFIGURATION's `:ephemeral' is non-nil, do not
+automatically persist it.  When SELECT-PROVIDER-MODEL is non-nil, prompt
+for the provider and model."
   (let* ((buf (generate-new-buffer (if (functionp ellm-initial-buffer-name)
                                        (funcall ellm-initial-buffer-name)
                                      ellm-initial-buffer-name)))
-         (default-configuration
-           (funcall ellm-new-buffer-default-configuration-function))
          (default-provider
-           (or (plist-get default-configuration :provider)
+           (or (plist-get configuration :provider)
                (caar ellm-provider-alist)))
          (provider-name
           (if select-provider-model
@@ -4775,21 +4778,25 @@ When SELECT-PROVIDER-MODEL is non-nil, prompt for the provider and model."
                 (and (not (string-empty-p name)) (intern name)))
             default-provider))
          (provider-entry (and provider-name
-                              (alist-get provider-name ellm-provider-alist)))
+                              (alist-get (if (stringp provider-name)
+                                             (intern provider-name)
+                                           provider-name)
+                                         ellm-provider-alist)))
          (provider (ellm--provider-entry-provider provider-entry))
          (model (if select-provider-model
                     (ellm-provider-default-model provider-name)
-                  (if (plist-member default-configuration :model)
-                      (plist-get default-configuration :model)
+                  (if (plist-member configuration :model)
+                      (plist-get configuration :model)
                     (ellm-provider-default-model provider-name))))
-         (system (plist-get default-configuration :system)))
+         (system (plist-get configuration :system)))
     (when (and system (not (stringp system)))
-      (user-error "ellm: Default `:system' must be a string"))
+      (user-error "ellm: `:system' must be a string"))
     (with-current-buffer buf
-      (setq-local ellm--persistence-ephemeral-p ephemeral)
+      (setq-local ellm--persistence-ephemeral-p
+                  (or ephemeral (plist-get configuration :ephemeral)))
       (insert "---\n"
               (ellm--yaml-encode
-               (ellm--new-buffer-frontmatter default-configuration
+               (ellm--new-buffer-frontmatter configuration
                                              provider-name model))
               "\n---\n\n")
       (when system
@@ -4842,7 +4849,30 @@ When SELECT-PROVIDER-MODEL is non-nil, prompt for the provider and model."
 With prefix argument SELECT-PROVIDER-MODEL, prompt for provider and model.
 Session-backed providers may start a session to discover model candidates."
   (interactive "P")
-  (ellm--new-buffer nil select-provider-model))
+  (ellm--new-buffer (funcall ellm-new-buffer-default-configuration-function)
+                    nil select-provider-model))
+
+(cl-defun ellm-new-buffer-with-configuration (&rest configuration &key &allow-other-keys)
+  "Create and select a new ellm conversation buffer with CONFIGURATION.
+Pass settings as keyword arguments, not as a plist.  They replace the
+settings from `ellm-new-buffer-default-configuration-function' for this
+buffer only:
+
+  :provider   Name in `ellm-provider-alist' (symbol or string); defaults to
+              the first provider.
+  :model      Model name; defaults to `ellm-provider-default-model'.
+  :system     String inserted as a leading system turn, not frontmatter.
+  :profile    Name of a profile from `ellm-profiles'.
+  :cwd        Working directory for the conversation.
+  :tools      Tool selectors to enable (e.g. a list containing `@buffers').
+  :mcp        MCP server selectors to enable.
+  :ephemeral  Non-nil disables automatic persistence for this buffer and
+              its subagents, as with `ellm-new-temp-buffer'.
+
+Other keywords become their corresponding frontmatter keys.  :created is
+reserved for the creation timestamp and cannot be set here.  Return the
+new buffer."
+  (ellm--new-buffer configuration nil))
 
 (defun ellm-new-temp-buffer ()
   "Create an ephemeral ellm conversation buffer.
@@ -4850,7 +4880,8 @@ This is equivalent to `ellm-new-buffer' when automatic persistence is
 disabled.  When persistence is enabled, neither this buffer nor subagents
 launched from it receive automatic files."
   (interactive)
-  (ellm--new-buffer 'ephemeral))
+  (ellm--new-buffer (funcall ellm-new-buffer-default-configuration-function)
+                    'ephemeral))
 
 (defun ellm--now ()
   "Return the current time.

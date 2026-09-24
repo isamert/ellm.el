@@ -7581,6 +7581,60 @@ The parent provider remains buffer-local fallback only when the profile omits on
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
+(ert-deftest ellm-test-new-buffer-with-configuration ()
+  "Explicit configuration should replace defaults for just this buffer."
+  (let* ((provider (make-ellm-test-sync-provider))
+         (ellm-provider-alist
+          `((first . (:provider ,provider :models ("first")))
+            (second . (:provider ,provider :models ("second")))))
+         (ellm-new-buffer-default-configuration-function
+          (lambda () (ert-fail "explicit configuration called default function")))
+         buffer)
+    (unwind-protect
+        (progn
+          (setq buffer
+                (ellm-new-buffer-with-configuration
+                 :provider "second" :system "Custom system"
+                 :tools '("@buffers") :cwd "/tmp" :created "ignored"))
+          (should (eq (current-buffer) buffer))
+          (with-current-buffer buffer
+            (should (derived-mode-p 'ellm-mode))
+            (let ((frontmatter (ellm--parse-frontmatter)))
+              (should (equal (alist-get 'provider frontmatter) "second"))
+              (should (equal (alist-get 'model frontmatter) "second"))
+              (should (equal (alist-get 'tools frontmatter) '("@buffers")))
+              (should (equal (alist-get 'cwd frontmatter) "/tmp"))
+              (should-not (equal (alist-get 'created frontmatter) "ignored"))
+              (should-not (alist-get 'system frontmatter)))
+            (should (equal (ellm-turn-content (car (ellm--parse-turns)))
+                           "Custom system"))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest ellm-test-new-buffer-with-configuration-ephemeral ()
+  "Explicit configuration can create an ephemeral buffer."
+  (let ((buffer (ellm-new-buffer-with-configuration :ephemeral t)))
+    (unwind-protect
+        (with-current-buffer buffer
+          (should ellm--persistence-ephemeral-p)
+          (should-not (alist-get 'ephemeral (ellm--parse-frontmatter))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest ellm-test-new-buffer-default-configuration-ephemeral ()
+  "The default configuration may also request an ephemeral buffer."
+  (let ((ellm-new-buffer-default-configuration-function
+         (lambda () '(:ephemeral t)))
+        buffer)
+    (unwind-protect
+        (progn
+          (setq buffer (ellm-new-buffer))
+          (with-current-buffer buffer
+            (should ellm--persistence-ephemeral-p)
+            (should-not (alist-get 'ephemeral (ellm--parse-frontmatter)))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
 (ert-deftest ellm-test-new-buffer-prefix-keeps-default-system-and-tools ()
 "Prefix provider/model selection should retain default system and tools."
 (let* ((provider (make-ellm-test-sync-provider))
