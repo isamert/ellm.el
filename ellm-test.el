@@ -204,6 +204,21 @@
     (should (equal result "output: ��"))
     (should (stringp (json-serialize result)))))
 
+(ert-deftest ellm-test-structured-tool-param-preserves-unicode ()
+  "Structured tool parameters should survive rendering and reconstruction."
+  (let* ((todos [((content . "Trade çağrısı ve X→Y için don’t")
+                  (status . "in_progress"))])
+         (expected "[{\"content\":\"Trade çağrısı ve X→Y için don’t\",\"status\":\"in_progress\"}]"))
+    (with-temp-buffer
+      (ellm--insert-tool-call-with-params "todowrite" "call_1"
+                                          `((todos . ,todos)))
+      (let* ((turns (ellm--parse-turns))
+             (text (ellm-turn-content (cadr turns))))
+        (should (equal text expected))
+        (should (equal (ellm-llm--deserialize-tool-param
+                        text '(:name "todos" :type array))
+                       todos))))))
+
 (defun ellm-test--buffer-string-after-send (provider prompt)
   "Return buffer contents after sending PROMPT through PROVIDER."
   (let ((ellm-provider provider))
@@ -9052,6 +9067,15 @@ The parent provider remains buffer-local fallback only when the profile omits on
           (should-not (string-match-p "Full title:" contents))
           (when (eq level 'headings)
             (should-not (string-match-p "tool-param" contents))))))))
+
+(ert-deftest ellm-test-acp-json-section-preserves-unicode ()
+  "ACP structured output should remain readable after tool text transforms."
+  (let* ((section (ellm-acp--json-section
+                   "Raw output" '(:text "Trade çağrısı → don’t")))
+         (text (ellm-tools--transform-tool-result "ACP" nil nil section)))
+    (should (string-match-p
+             (regexp-quote "\"text\":\"Trade çağrısı → don’t\"") text))
+    (should-not (string-match-p "�" text))))
 
 (ert-deftest ellm-test-acp-tool-summary-generically-renders-raw-output ()
   "ACP summaries should not assign semantics to opaque raw output keys."

@@ -5021,7 +5021,7 @@ preserved."
    ((null value) "null")
    ((stringp value) value)
    ((memq value '(:false :json-false)) "false")
-   (t (json-serialize value))))
+   (t (decode-coding-string (json-serialize value) 'utf-8))))
 
 (defun ellm--tool-header-title (name params)
   "Return a concise tool title from NAME and PARAMS.

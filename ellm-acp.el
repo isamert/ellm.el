@@ -2658,8 +2658,10 @@ When RENDER-UNKNOWN is non-nil, serialize unknown content variants."
   "Return a fenced JSON section named TITLE for VALUE."
   (format "%s:\n```json\n%s\n```\n"
           title
-          (json-serialize (ellm-acp--json-serializable-value value)
-                          :false-object :json-false :null-object nil)))
+          (decode-coding-string
+           (json-serialize (ellm-acp--json-serializable-value value)
+                           :false-object :json-false :null-object nil)
+           'utf-8)))
 
 (defun ellm-acp--tool-content-text (item)
   "Return Markdown text for ACP tool content ITEM."
