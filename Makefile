@@ -9,7 +9,8 @@ CHANGELOG := CHANGELOG.md
 # dependencies are available as sibling directories
 LISP_DIRS := . ../emacs-async ../llm ../plz ../plz-media-type ../plz-event-source ../yaml ../s
 LOAD_PATHS := $(foreach dir,$(LISP_DIRS),-L $(dir))
-EMACS_BATCH := $(EMACS) -Q --batch --eval '(setq load-prefer-newer t)' $(LOAD_PATHS)
+# plz-debug needs byte-compile-current-buffer during Emacs 31 eager macro-expansion.
+EMACS_BATCH := $(EMACS) -Q --batch --eval "(require 'bytecomp)" --eval '(setq load-prefer-newer t)' $(LOAD_PATHS)
 SOURCES := ellm.el ellm-acp.el ellm-acp-extensions.el ellm-codex.el ellm-kagi.el ellm-llm.el ellm-mcp.el ellm-tools.el
 
 .PHONY: help compile test load check release
