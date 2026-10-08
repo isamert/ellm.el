@@ -2281,16 +2281,16 @@ Search results may change and this may fail."
       (let ((contents (buffer-string)))
         (should (string-match-p
                  (regexp-quote
-                  ">>-| tool-call | Edit filePath=/tmp/project/a.el :id")
+                  ">>-| tool-call | Edit :filePath /tmp/project/a.el :id")
                  contents))
         (should (string-match-p
                  (regexp-quote
-                  ">>-| tool-result | Edit filePath=/tmp/project/a.el :id")
+                  ">>-| tool-result | Edit :filePath /tmp/project/a.el :id")
                  contents))
         (dolist (line (split-string contents "\n"))
           (when (string-prefix-p ">>-| tool-" line)
-            (should-not (string-match-p "oldString=" line))
-            (should-not (string-match-p "newString=" line))))))))
+            (should-not (string-match-p ":oldString " line))
+            (should-not (string-match-p ":newString " line))))))))
 
 (ert-deftest ellm-test-tool-heading-summary-is-width-limited ()
   "Tool heading summaries should honor `ellm-tool-header-summary-width'."
@@ -2315,6 +2315,105 @@ Search results may change and this may fail."
       (should (equal (alist-get "id" (ellm-turn-attrs turn)
                                 nil nil #'equal)
                      "real")))))
+
+(ert-deftest ellm-test-tool-summary-parameters-cannot-spoof-metadata ()
+  "Display-only parameters do not override a tool turn's real attributes."
+  (let ((ellm-pretty-separators t))
+    (with-temp-buffer
+      (ellm-mode)
+      (ellm--insert-turn
+       "tool-call"
+       :pipe-arg (ellm--tool-header-title
+                  "Shell" '((id . "fake") (kind . "other")
+                            (command . "echo :id injected")))
+       :id "real" :kind "execute")
+      (let* ((turn (car (ellm--parse-turns)))
+             (attrs (ellm-turn-attrs turn))
+             (title (ellm--turn-pipe-title
+                     (save-excursion
+                       (goto-char (point-min))
+                       (looking-at ellm-turn-regexp)
+                       (buffer-substring-no-properties
+                        (match-end 2) (match-end 0)))
+                     "tool-call")))
+        (should (equal (alist-get "arg" attrs nil nil #'equal) "Shell"))
+        (should (equal (alist-get "id" attrs nil nil #'equal) "real"))
+        (should (equal (alist-get "kind" attrs nil nil #'equal) "execute"))
+        (should (string-match-p (regexp-quote ":id fake :kind other") title))
+        (should (string-match-p (regexp-quote "\\:id injected") title))))))
+
+(ert-deftest ellm-test-turn-parameters-highlight-raw-and-pretty ()
+  "Header parameter names and values use distinct faces in both views."
+  (let ((ellm-pretty-separators t))
+    (with-temp-buffer
+      (ellm-mode)
+      (ellm--insert-turn "tool-call"
+                         :pipe-arg "Shell :command pwd && ls :like_this some value :timeout 10"
+                         :id "real")
+      (insert "body :ignored value\n")
+      (ellm--insert-turn "user" :ts "today")
+      (font-lock-ensure)
+      (goto-char (point-min))
+      (search-forward "Shell")
+      (should-not (eq (get-text-property (1- (point)) 'face)
+                      'ellm-turn-parameter-value))
+      (search-forward ":command")
+      (should (eq (get-text-property (1- (point)) 'face)
+                  'ellm-turn-parameter))
+      (search-forward "pwd && ls")
+      (should (eq (get-text-property (1- (point)) 'face)
+                  'ellm-turn-parameter-value))
+      (search-forward ":like_this")
+      (should (eq (get-text-property (1- (point)) 'face)
+                  'ellm-turn-parameter))
+      (search-forward "some value")
+      (should (eq (get-text-property (1- (point)) 'face)
+                  'ellm-turn-parameter-value))
+      (search-forward ":timeout")
+      (should (eq (get-text-property (1- (point)) 'face)
+                  'ellm-turn-parameter))
+      (search-forward "10")
+      (should (eq (get-text-property (1- (point)) 'face)
+                  'ellm-turn-parameter-value))
+      (search-forward ":id")
+      (should (eq (get-text-property (1- (point)) 'face)
+                  'ellm-turn-parameter))
+      (search-forward "real")
+      (should (eq (get-text-property (1- (point)) 'face)
+                  'ellm-turn-parameter-value))
+      (search-forward ":ignored")
+      (should-not (eq (get-text-property (1- (point)) 'face)
+                      'ellm-turn-parameter))
+      (search-forward ":ts")
+      (should (eq (get-text-property (1- (point)) 'face)
+                  'ellm-turn-parameter))
+      (search-forward "today")
+      (should (eq (get-text-property (1- (point)) 'face)
+                  'ellm-turn-parameter-value))
+      (ellm--put-pretty-separators (point-min) (point-max))
+      (let* ((ov (cl-find-if (lambda (overlay)
+                               (overlay-get overlay 'ellm-pretty-separator))
+                             (overlays-at (point-min))))
+             (display (overlay-get ov 'display)))
+        (should (string-match ":command" display))
+        (should (equal (get-text-property (match-beginning 0) 'face display)
+                       '(ellm-turn-parameter ellm-role-tool-call)))
+        (should (string-match "pwd && ls" display))
+        (should (equal (get-text-property (match-beginning 0) 'face display)
+                       '(ellm-turn-parameter-value ellm-role-tool-call)))
+        (should (string-match ":like_this" display))
+        (should (equal (get-text-property (match-beginning 0) 'face display)
+                       '(ellm-turn-parameter ellm-role-tool-call)))
+        (should (string-match "some value" display))
+        (should (equal (get-text-property (match-beginning 0) 'face display)
+                       '(ellm-turn-parameter-value ellm-role-tool-call)))
+        (should (string-match ":timeout" display))
+        (should (equal (get-text-property (match-beginning 0) 'face display)
+                       '(ellm-turn-parameter ellm-role-tool-call)))
+        (should (string-match "10" display))
+        (should (equal (get-text-property (match-beginning 0) 'face display)
+                       '(ellm-turn-parameter-value ellm-role-tool-call)))
+        (should-not (string-match ":id" display))))))
 
 (ert-deftest ellm-test-tool-heading-title-newlines-cannot-split-metadata ()
   "Newlines in externally supplied tool titles must not split turn headers."
@@ -8252,7 +8351,7 @@ The parent provider remains buffer-local fallback only when the profile omits on
       (let ((contents (buffer-string)))
         (should (string-match-p
                  (regexp-quote
-                  ">>-| tool-call | Shell command=ls args=[\"-la\"] :id call_1")
+                  ">>-| tool-call | Shell :command ls :args [\"-la\"] :id call_1")
                  contents))
         (should (string-match-p ">>>-| tool-param | command\nls" contents))
         (should (string-match-p ">>>-| tool-param | args\n\[\"-la\"\]" contents))))))
@@ -8281,7 +8380,7 @@ The parent provider remains buffer-local fallback only when the profile omits on
                                                      :priority "high"))))))
            (let ((contents (buffer-string)))
              (should (string-match-p
-                      "^>>-| tool-call | todowrite todos=.* :id call_todos :kind other$"
+                      "^>>-| tool-call | todowrite :todos .* :id call_todos :kind other$"
                       contents))
              (should (string-match-p ">>>-| tool-param | todos" contents))
              (should (string-match-p
@@ -8580,7 +8679,7 @@ The parent provider remains buffer-local fallback only when the profile omits on
                      ">>>-| tool-param | filePath\n/tmp/ellm"
                      contents))
             (should (string-match-p
-                      ">>-| tool-result | read filePath=/tmp/ellm :id call_1 :status completed"
+                      ">>-| tool-result | read :filePath /tmp/ellm :id call_1 :status completed"
                       contents))
             (should (string-match-p "human readable output" contents))
             (should (string-match-p "<path>/tmp/ellm</path>" contents))
@@ -8855,11 +8954,11 @@ The parent provider remains buffer-local fallback only when the profile omits on
         (let ((contents (buffer-string)))
           (should (string-match-p
                    (regexp-quote
-                    ">>-| tool-result | Edit filePath=/tmp/project/a.el :id call_1 :status completed")
+                    ">>-| tool-result | Edit :filePath /tmp/project/a.el :id call_1 :status completed")
                    contents))
           (dolist (line (split-string contents "\n"))
             (when (string-prefix-p ">>-| tool-" line)
-              (should-not (string-match-p "oldString=" line)))))))))
+              (should-not (string-match-p ":oldString " line)))))))))
 
 (ert-deftest ellm-test-acp-tool-text-escapes-turn-delimiters ()
   "ACP-rendered tool params/results should not become parsed turns."
@@ -8962,15 +9061,15 @@ The parent provider remains buffer-local fallback only when the profile omits on
           (let ((contents (buffer-string))
                 (turns (ellm--parse-turns)))
             (should (string-match-p
-                     "^>>-| tool-call | Shell command=ls :id call_1 :kind execute$"
+                     "^>>-| tool-call | Shell :command ls :id call_1 :kind execute$"
                      contents))
             (should (string-match-p
-                     "^>>-| tool-result | Shell command=echo later :id call_1 :kind execute :status completed$"
+                     "^>>-| tool-result | Shell :command echo later :id call_1 :kind execute :status completed$"
                      contents))
             (should-not (string-match-p "tool-param" contents))
-            (should (string-match-p "command=ls" contents))
+            (should (string-match-p ":command ls" contents))
             (should-not (string-match-p "pwd" contents))
-            (should (string-match-p "command=echo later" contents))
+            (should (string-match-p ":command echo later" contents))
             (should-not (string-match-p "human readable output" contents))
             (should-not (string-match-p "raw output text" contents))
             (should-not (string-match-p "later output" contents))
@@ -9015,7 +9114,7 @@ The parent provider remains buffer-local fallback only when the profile omits on
                                   :toolCallId "call_1"
                                   :status "completed")))
           (let ((contents (buffer-string)))
-            (should (string-match-p "command=123456789" contents))
+            (should (string-match-p ":command 123456789" contents))
             (should (string-match-p ">>>-| tool-param | command\n123" contents))
             (should (string-match-p "89\n>>-| tool-result" contents))
             (should (string-match-p "\nabc" contents))
@@ -9068,16 +9167,16 @@ The parent provider remains buffer-local fallback only when the profile omits on
                                   :rawOutput (:output "raw output detail"))))
           (let ((contents (buffer-string)))
             (should (string-match-p
-                     "^>>-| tool-call | bash command=initial raw input :id call_1 :kind execute$"
+                     "^>>-| tool-call | bash :command initial raw input :id call_1 :kind execute$"
                      contents))
             (should (string-match-p
-                     "^>>-| tool-result | git status --short command=updated raw input :id call_1 :status completed$"
+                     "^>>-| tool-result | git status --short :command updated raw input :id call_1 :status completed$"
                      contents))
             (should (string-match-p "^2 modified files$" contents))
             (should (string-match-p "^Diff: /tmp/project/a$" contents))
             (should-not (string-match-p "tool-param" contents))
-            (should (string-match-p "command=initial raw input" contents))
-            (should (string-match-p "command=updated raw input" contents))
+            (should (string-match-p ":command initial raw input" contents))
+            (should (string-match-p ":command updated raw input" contents))
             (should-not (string-match-p "first raw output" contents))
             (should-not (string-match-p "raw output detail" contents))
             (should-not (string-match-p "Locations:" contents))
@@ -9170,7 +9269,7 @@ The parent provider remains buffer-local fallback only when the profile omits on
       (let ((contents (buffer-string)))
         (should (string-match-p ">>>-| tool-param | command\npwd" contents))
         (should (string-match-p
-                 "^>>-| tool-result | Shell command=pwd :id" contents))
+                 "^>>-| tool-result | Shell :command pwd :id" contents))
         (should (string-match-p "ok" contents))))))
 
 (ert-deftest ellm-test-acp-tool-live-updates-do-not-parse-buffer ()
@@ -9211,7 +9310,7 @@ The parent provider remains buffer-local fallback only when the profile omits on
                      ">>>-| tool-param | filePath\n/tmp/ellm"
                      contents))
             (should (string-match-p
-                      ">>-| tool-result | read filePath=/tmp/ellm :id call_1 :status completed"
+                      ">>-| tool-result | read :filePath /tmp/ellm :id call_1 :status completed"
                       contents))
             (should (string-match-p "done" contents))
             (should-not (string-match-p "Status: in_progress" contents))))

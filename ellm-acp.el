@@ -2390,7 +2390,7 @@ objects otherwise look like malformed plists to `json-serialize'."
               (equal (match-string-no-properties 2) role)
               (equal (alist-get "id"
                                 (ellm--parse-turn-attrs
-                                 (match-string-no-properties 3))
+                                 (match-string-no-properties 3) role)
                                 nil nil #'equal)
                      id)))))
 

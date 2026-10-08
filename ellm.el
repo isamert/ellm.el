@@ -1111,6 +1111,16 @@ and `set-face-attribute' calls safe in non-graphical contexts."
   "Face for the assistant's private reasoning."
   :group 'ellm)
 
+(defface ellm-turn-parameter
+  '((t :inherit font-lock-type-face :weight normal))
+  "Face for parameter names in turn headers, distinct from role names."
+  :group 'ellm)
+
+(defface ellm-turn-parameter-value
+  '((t :inherit default :weight normal))
+  "Face for parameter values in turn headers."
+  :group 'ellm)
+
 (defface ellm-turn-rule
   '((t :inherit shadow :strike-through t))
   "Face for the horizontal rule line between turns."
@@ -1687,6 +1697,40 @@ Matches outside Markdown prose regions are ignored."
             (setq found t)))))
       found)))
 
+(defconst ellm--turn-parameter-regexp
+  "\\(?:^\\|[ \t]\\)\\(:[[:alnum:]_-]+\\)[ \t]"
+  "Regexp for a parameter name followed by its value in a header.")
+
+(defun ellm--turn-parameter-matcher (limit)
+  "Find the next header parameter name and value before LIMIT."
+  (let (found)
+    (while (and (not found)
+                (re-search-forward ellm--turn-parameter-regexp limit t))
+      (let ((name-beg (match-beginning 1))
+            (name-end (match-end 1))
+            (value-beg (match-end 0)))
+        (when (save-excursion
+                (goto-char name-beg)
+                (beginning-of-line)
+                (and (looking-at ellm-turn-regexp)
+                     (>= name-beg (match-end 2))))
+          (let ((value-end
+                 (save-excursion
+                   (goto-char value-beg)
+                   (let ((end (or (and (re-search-forward
+                                        ellm--turn-parameter-regexp
+                                        (line-end-position) t)
+                                       (match-beginning 0))
+                                  (line-end-position))))
+                     (goto-char end)
+                     (skip-chars-backward " \t" value-beg)
+                     (point)))))
+            (goto-char (max value-beg value-end))
+            (set-match-data (list name-beg (point)
+                                  name-beg name-end value-beg value-end))
+            (setq found t)))))
+    found))
+
 (defconst ellm-font-lock-keywords
   `(;; Frontmatter delimiter lines (`---' open and close) and YAML body
     ;; are handled by `ellm--fontify-code-blocks'.
@@ -1722,14 +1766,17 @@ Matches outside Markdown prose regions are ignored."
     (,(ellm--make-markdown-matcher "^[ \t]*+[-+]+[ \t]*$") (0 'ellm-table t))
     ;; List markers
     (,(ellm--make-markdown-matcher "^\\s-*\\([-*]\\|[0-9]+\\.\\) ") (1 'ellm-list-marker t))
-    ;; Turn delimiters are structural and deliberately run last.  This is a
-    ;; defensive precedence guarantee in addition to the prose-region checks
-    ;; above: content matchers must never replace a delimiter or role face.
+    ;; Turn delimiters are structural and run after prose matchers.
+    ;; Highlight their parameter names afterwards, without replacing the
+    ;; delimiter or role faces.
     (,ellm-turn-regexp
      (0 (list 'ellm-turn-delimiter
               (ellm--turn-heading-face (match-string 1)))
         t)
-     (2 (ellm--role-face (match-string 2)) t)))
+     (2 (ellm--role-face (match-string 2)) t))
+    (ellm--turn-parameter-matcher
+     (1 'ellm-turn-parameter t)
+     (2 'ellm-turn-parameter-value t t)))
   "Font-lock keywords for `ellm-mode'.")
 
 ;;;;; Fence position cache
@@ -2507,11 +2554,21 @@ A continuation `assistant' line collapses to a blank row so it flows
 visually from the preceding turn.  All other roles display their glyph."
   (and continuation (equal role "assistant")))
 
-(defun ellm--turn-pipe-title (tail)
+(defun ellm--tool-metadata-beg (text)
+  "Return the start of the final `:id VALUE' in tool header TEXT."
+  (let ((start 0) last)
+    (while (string-match " :id [^[:space:]]+" text start)
+      (setq last (match-beginning 0)
+            start (match-end 0)))
+    last))
+
+(defun ellm--turn-pipe-title (tail &optional role)
   "Return the pipe-delimited title from raw turn delimiter TAIL."
   (when (string-prefix-p " | " tail)
     (let* ((value (substring tail 3))
-           (attrs-beg (string-match " :[[:alnum:]-]+ [^[:space:]]+" value))
+           (attrs-beg (if (ellm--tool-role-p role)
+                          (ellm--tool-metadata-beg value)
+                        (string-match " :[[:alnum:]-]+ [^[:space:]]+" value)))
            (title (string-trim-right
                    (if attrs-beg (substring value 0 attrs-beg) value))))
       (unless (string-empty-p title)
@@ -2547,7 +2604,25 @@ glyph followed by TITLE when present."
       (let* ((glyph (ellm--role-glyph role))
              (face (ellm--role-face role))
              (label (if title (concat glyph " | " title) glyph)))
-        (overlay-put ov 'display (propertize label 'face face))))))
+        (setq label (propertize label 'face face))
+        (let ((start 0))
+          (while (string-match ellm--turn-parameter-regexp label start)
+            (let* ((name-beg (match-beginning 1))
+                   (name-end (match-end 1))
+                   (value-beg (match-end 0))
+                   (value-end (or (and (string-match
+                                        ellm--turn-parameter-regexp
+                                        label value-beg)
+                                       (match-beginning 0))
+                                  (length label))))
+              (add-text-properties name-beg name-end
+                                   `(face (ellm-turn-parameter ,face)) label)
+              (when (< value-beg value-end)
+                (add-text-properties value-beg value-end
+                                     `(face (ellm-turn-parameter-value ,face))
+                                     label))
+              (setq start value-end))))
+        (overlay-put ov 'display label)))))
 
 (defun ellm--put-pretty-separators (beg end)
   "Place pretty separator overlays on turn delimiter lines between BEG and END.
@@ -2582,7 +2657,7 @@ the user can edit it without the glyph reappearing on every keystroke."
                      (role (match-string-no-properties 2))
                      (title (ellm--turn-pipe-title
                              (buffer-substring-no-properties
-                              (match-end 2) (match-end 0))))
+                              (match-end 2) (match-end 0)) role))
                      (continuation (ellm--continuation-header-p header))
                      (ov (make-overlay line-beg line-end nil t nil)))
                 (ellm--apply-pretty-separator
@@ -2610,7 +2685,8 @@ the user can edit it without the glyph reappearing on every keystroke."
                     (match-string-no-properties 1))
                    (ellm--turn-pipe-title
                     (buffer-substring-no-properties
-                     (match-end 2) (match-end 0))))
+                     (match-end 2) (match-end 0))
+                    (match-string-no-properties 2)))
                 ;; Line no longer matches a turn delimiter; drop overlay.
                 (delete-overlay ov)))))
         (setq ellm--revealed-separator-overlay nil)
@@ -2653,13 +2729,17 @@ of the preceding top-level turn).
 DEPTH is the nesting depth of the delimiter (1, 2, or 3)."
   role attrs content beg end continuation depth)
 
-(defun ellm--parse-turn-attrs (rest)
+(defun ellm--parse-turn-attrs (rest &optional role)
   "Parse REST of turn delimiter into an alist.
-Recognises org-block-style attribute syntax: a sequence of `:KEY VALUE'
-pairs interleaved with bare positional arguments.  Bare tokens are
-collected under the key `\"arg\"' (one entry each, in order).  Keys are
-stored without their leading colon, e.g. `:id call_1' becomes
-`(\"id\" . \"call_1\")'."
+For tool ROLEs, the pipe title is display text; only the first token is
+positional, and actual metadata begins at the final `:id' token.  Tool
+parameter summaries in the title must not masquerade as metadata.
+Other turns use org-block-style `:KEY VALUE' pairs and bare arguments."
+  (when (and (ellm--tool-role-p role)
+             (not (string-prefix-p ":" rest)))
+    (let ((id-beg (ellm--tool-metadata-beg rest)))
+      (setq rest (concat (or (car (split-string rest "[ \t]" t)) "")
+                         (and id-beg (substring rest id-beg))))))
   (let (result
         (parts (split-string (string-trim rest))))
     (while parts
@@ -2695,7 +2775,7 @@ stored without their leading colon, e.g. `:id call_1' becomes
                               current-beg (match-beginning 0))))
                   turns))
           (setq current-role role
-                current-attrs (ellm--parse-turn-attrs rest)
+                current-attrs (ellm--parse-turn-attrs rest role)
                 current-beg (1+ line-end)
                 current-cont (ellm--continuation-header-p header)
                 current-depth (ellm--turn-header-depth header))))
@@ -5066,7 +5146,7 @@ preserved."
 
 (defun ellm--tool-header-title (name params)
   "Return a concise tool title from NAME and PARAMS.
-PARAMS is an alist.  Single-line values are rendered as `KEY=VALUE'; multiline
+PARAMS is an alist.  Single-line values are rendered as `:KEY VALUE'; multiline
 values are omitted because their nested turns remain available when unfolded."
   (let ((parts (list (ellm--tool-header-fragment name))))
     (dolist (param params)
@@ -5074,7 +5154,7 @@ values are omitted because their nested turns remain available when unfolded."
         (unless (string-match-p "[\n\r]" value)
           (setq parts
                 (append parts
-                        (list (format "%s=%s"
+                        (list (format ":%s %s"
                                       (car param)
                                       (ellm--tool-header-fragment value))))))))
     (truncate-string-to-width
