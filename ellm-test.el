@@ -10304,6 +10304,37 @@ The parent provider remains buffer-local fallback only when the profile omits on
       (delete-directory project t)
       (delete-directory outside t))))
 
+(ert-deftest ellm-test-list-cancel-confirms-before-cancelling ()
+  "Declining cancellation leaves the conversation and its list row alone."
+  (let ((conversation (generate-new-buffer "ellm list cancel"))
+        (cancelled nil)
+        (refreshed nil)
+        (confirmed nil))
+    (unwind-protect
+        (save-window-excursion
+          (with-current-buffer conversation (ellm-mode))
+          (ellm-list)
+          (with-current-buffer "*ellm sessions*"
+            (ellm-list--goto-buffer conversation)
+            (cl-letf (((symbol-function 'y-or-n-p)
+                       (lambda (prompt)
+                         (should (equal prompt "Cancel request for ellm list cancel? "))
+                         confirmed))
+                      ((symbol-function 'ellm-cancel)
+                       (lambda (&optional _quiet)
+                         (setq cancelled (current-buffer))))
+                      ((symbol-function 'ellm-list-refresh-buffer)
+                       (lambda (buffer) (setq refreshed buffer))))
+              (ellm-list-cancel)
+              (should-not cancelled)
+              (should-not refreshed)
+              (setq confirmed t)
+              (ellm-list-cancel)
+              (should (eq cancelled conversation))
+              (should (eq refreshed conversation)))))
+      (dolist (buffer (list conversation (get-buffer "*ellm sessions*")))
+        (when (buffer-live-p buffer) (kill-buffer buffer))))))
+
 (ert-deftest ellm-test-list-answer-prompt-keeps-list-selected ()
   "Answer prompts from the session list without visiting the conversation."
   (let ((conversation (generate-new-buffer "ellm list prompt"))

@@ -10074,9 +10074,10 @@ Return non-nil when BUFFER has a row in the current list."
   "Cancel the active request for the conversation at point, retaining point."
   (interactive nil ellm-list-mode)
   (let ((buffer (ellm-list--buffer-at-point)))
-    (with-current-buffer buffer
-      (ellm-cancel))
-    (ellm-list-refresh-buffer buffer)))
+    (when (y-or-n-p (format "Cancel request for %s? " (buffer-name buffer)))
+      (with-current-buffer buffer
+        (ellm-cancel))
+      (ellm-list-refresh-buffer buffer))))
 
 (defun ellm-list-answer-prompt ()
   "Answer the pending prompt for the conversation at point.
