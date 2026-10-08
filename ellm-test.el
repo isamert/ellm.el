@@ -10746,6 +10746,10 @@ The parent provider remains buffer-local fallback only when the profile omits on
           (make-directory (file-name-directory global-main) t)
           (with-temp-file project-main (insert ">-| user\nProject\n"))
           (with-temp-file global-main (insert ">-| user\nGlobal\n"))
+          ;; Equal timestamps preserve the project-first search-root order.
+          (let ((timestamp (current-time)))
+            (set-file-times project-main timestamp)
+            (set-file-times global-main timestamp))
           (let ((default-directory project)
                 (ellm-persistence-enabled nil)
                 (ellm-persistence-location 'global)
@@ -10764,6 +10768,47 @@ The parent provider remains buffer-local fallback only when the profile omits on
       (when (buffer-live-p buffer)
         (with-current-buffer buffer
           (set-buffer-modified-p nil))
+        (kill-buffer buffer))
+      (delete-directory root t))))
+
+(ert-deftest ellm-test-open-session-sorts-across-project-and-global-stores ()
+  "A newer global conversation precedes an older project conversation."
+  (let* ((root (make-temp-file "ellm-session-order-" t))
+         (project (expand-file-name "project/" root))
+         (project-main (expand-file-name ".ellm/older/main.ellm" project))
+         (global-store (expand-file-name "global/" root))
+         (global-main (expand-file-name "newer/main.ellm" global-store))
+         buffer)
+    (unwind-protect
+        (progn
+          (make-directory (file-name-directory project-main) t)
+          (make-directory (file-name-directory global-main) t)
+          (with-temp-file project-main (insert ">-| user\nProject\n"))
+          (with-temp-file global-main (insert ">-| user\nGlobal\n"))
+          (set-file-times project-main (time-subtract (current-time) 60))
+          (let ((default-directory project)
+                (ellm-persistence-directory global-store)
+                (ellm-current-project-function (lambda () project))
+                (completion-extra-properties
+                 '(:display-sort-function reverse)))
+            (cl-letf (((symbol-function 'completing-read)
+                       (lambda (_prompt choices &rest _)
+                         (should (eq (plist-get completion-extra-properties
+                                                :display-sort-function)
+                                     'identity))
+                         (should (eq (plist-get completion-extra-properties
+                                                :cycle-sort-function)
+                                     'identity))
+                         (should (equal (mapcar (lambda (choice)
+                                                  (ellm--persisted-session-main-file
+                                                   (cdr choice)))
+                                                choices)
+                                        (list global-main project-main)))
+                         (caar choices))))
+              (ellm-open-session)
+              (setq buffer (current-buffer))
+              (should (equal buffer-file-name global-main)))))
+      (when (buffer-live-p buffer)
         (kill-buffer buffer))
       (delete-directory root t))))
 

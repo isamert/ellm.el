@@ -4423,11 +4423,16 @@ fallback for a session directory that was renamed after saving."
 ;;;###autoload
 (defun ellm-open-session ()
   "Open a persisted main conversation for the current project or globally.
-Project-local sessions are listed before global sessions.  This lookup is
-independent of automatic persistence and its configured save location."
+Sessions are listed by main file modification time, newest first; ties favor
+project-local sessions.  This lookup is independent of automatic persistence
+and its configured save location."
   (interactive)
   (let* ((roots (ellm--persistence-search-roots))
-         (sessions (apply #'append (mapcar #'ellm--persisted-sessions roots)))
+         (sessions (cl-stable-sort
+                    (apply #'append (mapcar #'ellm--persisted-sessions roots))
+                    (lambda (left right)
+                      (time-less-p (ellm--persisted-session-modified right)
+                                   (ellm--persisted-session-modified left)))))
          (choices (mapcar (lambda (session)
                             (cons (ellm--persisted-session-choice session)
                                   session))
@@ -4435,8 +4440,12 @@ independent of automatic persistence and its configured save location."
     (unless choices
       (user-error "ellm: No persisted sessions in %s"
                   (string-join roots ", ")))
-    (let ((session (cdr (assoc (completing-read "ellm session: " choices nil t)
-                               choices))))
+    (let* ((completion-extra-properties
+            (append '(:display-sort-function identity
+                      :cycle-sort-function identity)
+                    completion-extra-properties))
+           (session (cdr (assoc (completing-read "ellm session: " choices nil t)
+                                choices))))
       (ellm--find-file-or-switch-to-buffer
        (ellm--persisted-session-main-file session)))))
 
