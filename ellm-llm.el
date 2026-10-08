@@ -43,11 +43,12 @@
 (unless (get 'not-implemented 'error-conditions)
   (define-error 'not-implemented "Operation is not implemented for this LLM provider"))
 
-(defcustom ellm-llm-generate-title t
+(defcustom ellm-llm-auto-title t
   "Whether the `llm.el' backend generates a title for new conversations.
 Generation is a best-effort asynchronous request using only the first user
 prompt.  It uses the provider entry's `:small-model' when configured, and
-otherwise uses the current chat model."
+otherwise uses the current chat model.  The `auto-title:' frontmatter
+key overrides this setting for an individual conversation."
   :type 'boolean
   :group 'ellm)
 
@@ -122,6 +123,9 @@ inherit media inputs from the conversation request."
   (stream-reasoning-state-id nil
                              :type (or null string)
                              :documentation "Reasoning state ID rendered with the current stream snapshot.")
+  (title-enabled nil
+                 :type boolean
+                 :documentation "Whether this request may generate a title.")
   (title-prompt nil
                 :type (or null string)
                 :documentation "First user prompt eligible for title generation.")
@@ -920,9 +924,16 @@ IDS, when non-nil, are the stable rendered IDs for TOOL-USES."
       (when (and title (not (string-empty-p title)))
         (truncate-string-to-width title 100 nil nil t)))))
 
+(defun ellm-llm--title-generation-enabled-p (frontmatter)
+  "Return whether title generation is enabled by FRONTMATTER or the default."
+  (let ((entry (assq 'auto-title frontmatter)))
+    (if entry
+        (not (ellm--false-value-p (cdr entry)))
+      ellm-llm-auto-title)))
+
 (defun ellm-llm--start-title-generation (driver)
   "Start best-effort title generation for DRIVER when eligible."
-  (when (and ellm-llm-generate-title
+  (when (and (ellm-llm-driver-title-enabled driver)
              (with-current-buffer (ellm-llm-driver-buffer driver)
                ellm--session-titling-p)
              (not (ellm-llm-driver-title-started driver))
@@ -1344,6 +1355,7 @@ could not be executed: %s. Retry it using an advertised tool and valid arguments
       (let ((driver
              (ellm-llm--make-driver
               :provider provider :buffer buffer :prompt prompt
+              :title-enabled (ellm-llm--title-generation-enabled-p frontmatter)
               :title-prompt (and first-user
                                  (not (alist-get 'title frontmatter))
                                  (ellm-llm--title-prompt

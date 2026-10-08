@@ -1038,7 +1038,9 @@ temperature: 0.1
 pattern applies to all of them: require its library, construct a provider,
 and give it a name in `ellm-provider-alist`.  `:models` supplies frontmatter
 completion; `:small-model` is used for small auxiliary requests such as
-title generation.
+title generation. Set `ellm-llm-auto-title` to `nil` to disable automatic
+titles globally, or use `auto-title: false` (or `true`) in the YAML
+frontmatter to override it for a conversation.
 
 ## Codex
 

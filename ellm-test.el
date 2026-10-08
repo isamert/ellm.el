@@ -3627,14 +3627,34 @@ Search results may change and this may fail."
                    "Explain <ATTACHMENT> and <ATTACHMENT>."))
     (should (equal (ellm-llm--title-prompt image) "<ATTACHMENT>"))))
 
+(ert-deftest ellm-test-llm-title-generation-frontmatter-override ()
+  "Frontmatter overrides the global title-generation preference."
+  (with-temp-buffer
+    (ellm-mode)
+    (let ((ellm-llm-auto-title t))
+      (should (ellm-llm--title-generation-enabled-p (ellm--effective-frontmatter)))
+      (ellm--set-frontmatter-value '(auto-title) :false)
+      (should-not (ellm-llm--title-generation-enabled-p (ellm--effective-frontmatter)))
+      (let ((driver (ellm-llm--make-driver
+                     :buffer (current-buffer) :title-prompt "Question"
+                     :title-enabled (ellm-llm--title-generation-enabled-p
+                                     (ellm--effective-frontmatter)))))
+        (ellm-llm--start-title-generation driver)
+        (should-not (ellm-llm-driver-title-started driver))))
+    (let ((ellm-llm-auto-title nil))
+      (ellm--set-frontmatter-value '(auto-title) t)
+      (should (ellm-llm--title-generation-enabled-p (ellm--effective-frontmatter))))))
+
 (ert-deftest ellm-test-disabled-session-titling-skips-llm-title-request ()
   "Disabled session titling must not start an llm.el title request."
-  (let ((ellm-llm-generate-title t))
+  (let ((ellm-llm-auto-title t))
     (with-temp-buffer
       (ellm-mode)
       (setq-local ellm--session-titling-p nil)
       (let ((driver (ellm-llm--make-driver
-                     :buffer (current-buffer) :title-prompt "Question")))
+                     :buffer (current-buffer) :title-prompt "Question"
+                     :title-enabled (ellm-llm--title-generation-enabled-p
+                                     (ellm--effective-frontmatter)))))
         (ellm-llm--start-title-generation driver)
         (should-not (ellm-llm-driver-title-started driver))))))
 
@@ -5530,7 +5550,7 @@ Search results may change and this may fail."
   "A long llm.el tool run is governed by its tool timeout, not the request idle timeout."
   (let ((ellm-provider (make-llm-claude :key "test" :chat-model "test"))
         (ellm-request-timeout 0.02)
-        (ellm-llm-generate-title nil)
+        (ellm-llm-auto-title nil)
         (ellm-tools-list ellm-tools-list)
         (ellm-tools-refs ellm-tools-refs)
         outcome (calls 0))
@@ -5565,7 +5585,7 @@ Search results may change and this may fail."
 (ert-deftest ellm-test-llm-request-retries-transient-error-internally ()
   "A transient llm.el failure should retry without caller bookkeeping."
   (let ((ellm-provider (make-llm-claude :key "test" :chat-model "test"))
-        (ellm-llm-generate-title nil)
+        (ellm-llm-auto-title nil)
         (ellm-request-timeout nil)
         (ellm-request-retries 1)
         (ellm-request-retry-delay 0)
@@ -6683,7 +6703,7 @@ The parent provider remains buffer-local fallback only when the profile omits on
 (ert-deftest ellm-test-llm-backend-reuses-send-frontmatter-parse ()
   "The llm.el backend should not reparse frontmatter while building prompt."
   (let ((ellm-provider (make-llm-fake :chat-action-func (lambda () "ok")))
-        (ellm-llm-generate-title nil)
+        (ellm-llm-auto-title nil)
         (parse-count 0)
         (orig-parse (symbol-function 'ellm--parse-frontmatter)))
     (with-temp-buffer

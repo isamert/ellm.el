@@ -6268,7 +6268,10 @@ Return non-nil when delivery succeeds."
   "Fallback reasoning candidates for providers without model metadata.")
 
 (defconst ellm--frontmatter-keys
-  '(("provider"    :ann "provider"
+  '(("auto-title" :ann "boolean"
+     :desc "Generate a title automatically for new llm.el conversations; overrides `ellm-llm-auto-title'."
+     :type boolean :editable t)
+    ("provider"    :ann "provider"
      :desc "Provider name from `ellm-provider-alist'."
      :values ellm--capf-provider-candidates)
     ("model"       :ann "model"
