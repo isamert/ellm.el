@@ -1061,6 +1061,60 @@
                              "<file_lines start_line=1 end_line=1>\ncwd\n</file_lines>")))))
       (delete-directory root t))))
 
+(ert-deftest ellm-test-tools-glob-fd-root-relative-patterns ()
+  "Default fd globs match paths relative to the search root, including dirs."
+  (skip-unless (executable-find "fd"))
+  (let ((dir (file-name-as-directory
+              (make-temp-file "ellm-glob-[Case]-" t))))
+    (unwind-protect
+        (let ((default-directory dir)
+              (ellm-current-project-function (lambda () dir))
+              (ellm-tools-glob-program "fd")
+              (ellm-tools-glob-options ellm-tools--default-glob-options))
+          (dolist (subdir '("src/nested" "other/src" ".hidden" ".git"
+                            "node_modules"))
+            (make-directory (expand-file-name subdir dir) t))
+          (dolist (file '("src/direct.ts" "src/nested/deep.ts"
+                          "src/upper.TS" "other/src/unwanted.ts"
+                          "target.el" ".hidden/target.el"
+                          ".git/target.el" "node_modules/target.el"))
+            (with-temp-file (expand-file-name file dir)
+              (insert "contents\n")))
+          (cl-labels ((search (pattern path)
+                        (let (result)
+                          (ellm-tools/glob-tool
+                           (lambda (value) (setq result value))
+                           pattern path 20)
+                          (should (ellm-test--wait-for (lambda () result)))
+                          (should (string-match-p "<glob " result))
+                          result)))
+            (let ((result (search "src/**/*.ts" dir)))
+              (should (string-match-p (regexp-quote "src/direct.ts") result))
+              (should (string-match-p (regexp-quote "src/nested/deep.ts") result))
+              (should (string-match-p (regexp-quote "src/upper.TS") result))
+              (should-not (string-match-p "other/src/unwanted.ts" result)))
+            (let ((result (search "src/**/*.TS" ".")))
+              (should (string-match-p (regexp-quote "./src/upper.TS") result))
+              (should-not (string-match-p "src/direct.ts" result)))
+            (let ((result (search "**/target.el" dir)))
+              (should (string-match-p (regexp-quote (concat dir "target.el")) result))
+              (should (string-match-p (regexp-quote ".hidden/target.el") result))
+              (should-not (string-match-p (regexp-quote ".git/target.el") result))
+              (should-not (string-match-p "node_modules/target.el" result)))
+            (let ((result (search "*.el" dir)))
+              (should (string-match-p (regexp-quote ".hidden/target.el") result))
+              (should-not (string-match-p "node_modules/target.el" result)))
+            (should (string-match-p (regexp-quote (concat dir "src/nested"))
+                                    (search "src/nested" dir)))))
+      (delete-directory dir t))))
+
+(ert-deftest ellm-test-tools-glob-fd-only-translates-default-command ()
+  "Non-default glob commands keep the caller's original pattern."
+  (let ((ellm-tools-glob-program "fd")
+        (ellm-tools-glob-options '("--glob" "--type" "f")))
+    (should (equal (ellm-tools--glob-command "src/**/*.ts" ".")
+                   '("fd" "--glob" "--type" "f" "--" "src/**/*.ts" ".")))))
+
 (ert-deftest ellm-test-tools-glob-supports-configurable-command ()
   "The glob tool should support replacing fd with a templated command."
   (let ((dir (file-name-as-directory (make-temp-file "ellm-glob-" t)))

@@ -1759,6 +1759,31 @@ whose documentation contains all QUERY words are included as well."
   "Return non-nil when PROGRAM looks like find."
   (member (file-name-nondirectory program) '("find" "gfind")))
 
+(defun ellm-tools--fd-glob-args (pattern path)
+  "Return fd arguments matching PATTERN relative to search root PATH.
+`fd --glob' normally matches basenames only, so patterns containing a slash
+fail; `--full-path' instead matches absolute paths, not paths relative to
+PATH.  This missing root-relative glob mode is discussed in fd issues
+https://github.com/sharkdp/fd/issues/839 and
+https://github.com/sharkdp/fd/issues/1508.  Anchor the glob to PATH's
+absolute name so `src/**/*.ts' matches only
+that root's src directory, while basename globs like `*.el' match at any
+depth.  Escape glob syntax in PATH, which is a literal directory name, and
+set case sensitivity from PATTERN alone so uppercase letters in PATH cannot
+change fd's default smart-case behavior.  This translation is only for the
+default fd command; configured commands receive the original PATTERN."
+  (let* ((root (replace-regexp-in-string
+                "[][?*{}\\\\]" (lambda (match) (concat "\\" match))
+                (expand-file-name path) t t))
+         (glob (concat (file-name-as-directory root)
+                       (unless (string-match-p "/" pattern) "**/")
+                       pattern))
+         (case-fold-search nil))
+    (list "--full-path"
+          (if (string-match-p "[[:upper:]]" pattern)
+              "--case-sensitive" "--ignore-case")
+          "--" glob path)))
+
 (defun ellm-tools--glob-command (pattern path)
   "Return command list for running the glob tool with PATTERN under PATH."
   (let ((program ellm-tools-glob-program)
@@ -1767,6 +1792,9 @@ whose documentation contains all QUERY words are included as well."
           (cond
            ((ellm-tools--command-template-p options)
             (ellm-tools--expand-command-template options pattern path))
+           ((and (equal program "fd")
+                 (equal options ellm-tools--default-glob-options))
+            (append options (ellm-tools--fd-glob-args pattern path)))
            ((ellm-tools--find-program-p program)
             (append (list path)
                     (unless (equal options ellm-tools--default-glob-options)
