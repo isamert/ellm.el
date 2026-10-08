@@ -9668,6 +9668,60 @@ Return a cons of the left and right portions, split at `%>'."
      ((not (string-empty-p right))
       (ellm--header-line-right-status right)))))
 
+;;;; Dired integration
+
+(declare-function dired-current-directory "dired")
+(declare-function dired-get-filename "dired")
+(declare-function dired-move-to-filename "dired")
+(declare-function dired-move-to-end-of-filename "dired")
+
+(defun ellm--dired-clear-title-overlays ()
+  "Remove ellm title overlays before entering writable Dired."
+  (save-restriction
+    (widen)
+    (remove-overlays (point-min) (point-max) 'ellm-dired-title t)))
+
+(defun ellm-dired-display-titles ()
+  "Display conversation titles in Dired without changing filenames.
+Add this function to `dired-after-readin-hook' to update titles when Dired
+reads or reverts a listing.  Only session directories directly under the
+global or project-local persistence root are affected.  Dired operations
+continue to use the real directory names.  Overlays are removed when
+entering writable Dired so filenames are visible for editing."
+  (when (derived-mode-p 'dired-mode)
+    (require 'dired)
+    (add-hook 'wdired-mode-hook #'ellm--dired-clear-title-overlays nil t)
+    (remove-overlays (point-min) (point-max) 'ellm-dired-title t)
+    (save-excursion
+      (goto-char (point-min))
+      (while (not (eobp))
+        (when-let* ((directory (dired-current-directory))
+                    (root (file-name-as-directory (expand-file-name directory)))
+                    ((or (equal root (file-name-as-directory
+                                      (expand-file-name ellm-persistence-directory)))
+                         (let ((default-directory
+                                 (file-name-directory (directory-file-name root)))
+                               (ellm--base-default-directory nil))
+                           (equal root (ellm--persistence-project-root)))))
+                    (file (dired-get-filename nil t))
+                    ((file-directory-p file))
+                    (main (expand-file-name "main.ellm" file))
+                    ((file-regular-p main))
+                    (metadata (ellm--persisted-session-metadata main))
+                    (label (or (nth 2 metadata) (nth 3 metadata)))
+                    ((not (string-empty-p (string-trim label))))
+                    (start (dired-move-to-filename)))
+          (dired-move-to-end-of-filename)
+          (let ((overlay (make-overlay start (point))))
+            (overlay-put overlay 'ellm-dired-title t)
+            (overlay-put overlay 'display
+                         (truncate-string-to-width
+                          (replace-regexp-in-string "[[:space:]]+" " "
+                                                    (string-trim label))
+                          80 nil nil "..."))
+            (overlay-put overlay 'help-echo (file-name-nondirectory file))))
+        (forward-line 1)))))
+
 ;;;; Session list
 
 (defgroup ellm-list nil
