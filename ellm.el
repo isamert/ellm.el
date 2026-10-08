@@ -4190,32 +4190,59 @@ a backend session.  All live buffers belonging to the conversation are killed."
     (and (file-directory-p subagents)
          (directory-files subagents t "\\.ellm\\'" t))))
 
+(defun ellm--first-user-summary (&optional require-next-turn)
+  "Return the first user turn's whitespace-normalized content in this buffer.
+When REQUIRE-NEXT-TURN is non-nil, return nil unless another turn follows it.
+This allows callers reading a file prefix to distinguish a complete prompt
+from one cut off by the end of the prefix."
+  (save-excursion
+    (goto-char (point-min))
+    (catch 'summary
+      (while (re-search-forward ellm-turn-regexp nil t)
+        (when (equal (match-string 2) "user")
+          (let* ((start (min (point-max) (1+ (line-end-position))))
+                 (end (and (re-search-forward ellm-turn-regexp nil t)
+                           (match-beginning 0))))
+            (throw 'summary
+                   (when (or end (not require-next-turn))
+                     (replace-regexp-in-string
+                      "[[:space:]]+" " "
+                      (string-trim (buffer-substring-no-properties
+                                    start (or end (point-max)))))))))))))
+
 (defun ellm--persisted-session-metadata (file)
-  "Return FILE's workspace, title, and first user prompt, or nil on error."
+  "Return FILE's session id, workspace, title, and first user prompt.
+Read a prefix first, falling back to the whole file when it cannot supply
+complete frontmatter and a complete first user turn.  On error, return nils."
   (condition-case nil
       (with-temp-buffer
-        (insert-file-contents file)
+        (let* ((limit (* 64 1024))
+               (large (> (file-attribute-size (file-attributes file)) limit)))
+          (insert-file-contents file nil 0 (and large limit))
+          (goto-char (point-min))
+          (when (and large
+                     (or (and (looking-at "---\\n")
+                              (not (ellm--frontmatter-bounds)))
+                         (not (ellm--first-user-summary t))))
+            (erase-buffer)
+            (insert-file-contents file)))
         (let* ((frontmatter (ellm--parse-frontmatter t))
                (id (ellm--alist-get-nested frontmatter '(ellm session-id)))
                (cwd (alist-get 'cwd frontmatter))
-               (title (alist-get 'title frontmatter))
-               (user-turn (cl-find "user" (ellm--parse-turns)
-                                   :key #'ellm-turn-role :test #'equal))
-               (summary (and user-turn
-                             (replace-regexp-in-string
-                              "[[:space:]]+" " "
-                              (ellm-turn-content user-turn)))))
+               (title (alist-get 'title frontmatter)))
           (list (and (stringp id) id)
                 (and (stringp cwd) cwd)
                 (when-let* ((title (and (stringp title) (string-trim title)))
                             ((not (string-empty-p title))))
                   title)
-                summary)))
+                (ellm--first-user-summary))))
     (error '(nil nil nil nil))))
 
-(defun ellm--persisted-sessions (root)
-  "Return persisted sessions directly below ROOT, most recent first."
-  (let (sessions)
+(defun ellm--persisted-sessions (root &optional project-cache)
+  "Return persisted sessions directly below ROOT, most recent first.
+PROJECT-CACHE, when supplied, shares workspace project names across roots."
+  (let ((project-cache (or project-cache (make-hash-table :test #'equal)))
+        sessions)
     (when (file-directory-p root)
       ;; Session directories have a fixed layout: ROOT/SESSION-ID/main.ellm.
       ;; Avoid a recursive scan, which would also walk attachments, reasoning
@@ -4224,15 +4251,20 @@ a backend session.  All live buffers belonging to the conversation are killed."
         (when (file-directory-p directory)
           (let ((main-file (expand-file-name "main.ellm" directory)))
             (when (file-regular-p main-file)
-              (let ((metadata (ellm--persisted-session-metadata main-file)))
+              (let* ((metadata (ellm--persisted-session-metadata main-file))
+                     (cwd (nth 1 metadata))
+                     (project (gethash cwd project-cache 'missing)))
+                (when (eq project 'missing)
+                  (setq project (ignore-errors (ellm--project-name cwd)))
+                  (puthash cwd project project-cache))
                 (push (ellm--persisted-session-create
                        :id (car metadata)
                        :directory (file-name-as-directory directory)
                        :main-file main-file
                        :modified (file-attribute-modification-time
                                   (file-attributes main-file))
-                       :cwd (nth 1 metadata)
-                       :project (ignore-errors (ellm--project-name (nth 1 metadata)))
+                       :cwd cwd
+                       :project project
                        :title (nth 2 metadata)
                        :summary (nth 3 metadata)
                        :subagent-count (length
@@ -4303,11 +4335,7 @@ An unsaved subagent inherits its live parent's newly assigned id so a later
   (let* ((frontmatter (ellm--parse-frontmatter t))
          (title (alist-get 'title frontmatter))
          (subagent-name (ellm--alist-get-nested frontmatter '(subagent name)))
-         (user-turn (cl-find "user" (ellm--parse-turns)
-                             :key #'ellm-turn-role :test #'equal))
-         (summary (and user-turn
-                       (replace-regexp-in-string
-                        "[[:space:]]+" " " (ellm-turn-content user-turn))))
+         (summary (ellm--first-user-summary))
          (description (or (and (stringp title)
                                (not (string-empty-p (string-trim title)))
                                (string-trim title))
@@ -4428,8 +4456,12 @@ project-local sessions.  This lookup is independent of automatic persistence
 and its configured save location."
   (interactive)
   (let* ((roots (ellm--persistence-search-roots))
+         (project-cache (make-hash-table :test #'equal))
          (sessions (cl-stable-sort
-                    (apply #'append (mapcar #'ellm--persisted-sessions roots))
+                    (apply #'append
+                           (mapcar (lambda (root)
+                                     (ellm--persisted-sessions root project-cache))
+                                   roots))
                     (lambda (left right)
                       (time-less-p (ellm--persisted-session-modified right)
                                    (ellm--persisted-session-modified left)))))

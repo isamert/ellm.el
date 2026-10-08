@@ -10705,6 +10705,90 @@ The parent provider remains buffer-local fallback only when the profile omits on
             (should (string-match-p "1 subagent" choice))))
       (delete-directory root t))))
 
+(ert-deftest ellm-test-persisted-session-metadata-reads-only-complete-prefix ()
+  (let* ((file (make-temp-file "ellm-session-prefix-" nil ".ellm"))
+         (read-file (symbol-function 'insert-file-contents))
+         reads)
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "---\ncwd: /tmp/work\ntitle: Title\n---\n\n"
+                    ">-| user\nFirst   prompt\n>-| assistant\n"
+                    (make-string 70000 ?x)))
+          (cl-letf (((symbol-function 'insert-file-contents)
+                     (lambda (&rest args)
+                       (push (nth 3 args) reads)
+                       (apply read-file args))))
+            (should (equal (ellm--persisted-session-metadata file)
+                           '(nil "/tmp/work" "Title" "First prompt"))))
+          (should (equal reads '(65536))))
+      (delete-file file))))
+
+(ert-deftest ellm-test-persisted-session-metadata-falls-back-for-long-prompt ()
+  (let* ((file (make-temp-file "ellm-session-long-prompt-" nil ".ellm"))
+         (read-file (symbol-function 'insert-file-contents))
+         reads)
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "---\ntitle: Long prompt\n---\n>-| user\n"
+                    (make-string 70000 ?x) " end\n>-| assistant\nDone\n"))
+          (cl-letf (((symbol-function 'insert-file-contents)
+                     (lambda (&rest args)
+                       (push (nth 3 args) reads)
+                       (apply read-file args))))
+            (should (equal (nth 3 (ellm--persisted-session-metadata file))
+                           (concat (make-string 70000 ?x) " end"))))
+          (should (equal (nreverse reads) '(65536 nil))))
+      (delete-file file))))
+
+(ert-deftest ellm-test-persisted-session-metadata-falls-back-for-long-frontmatter ()
+  (let* ((file (make-temp-file "ellm-session-long-frontmatter-" nil ".ellm"))
+         (read-file (symbol-function 'insert-file-contents))
+         reads)
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "---\ntitle: Title\nnotes: |\n  "
+                    (make-string 70000 ?x)
+                    "\n---\n>-| user\nPrompt\n>-| assistant\nDone\n"))
+          (cl-letf (((symbol-function 'insert-file-contents)
+                     (lambda (&rest args)
+                       (push (nth 3 args) reads)
+                       (apply read-file args))))
+            (should (equal (nth 2 (ellm--persisted-session-metadata file))
+                           "Title")))
+          (should (equal (nreverse reads) '(65536 nil))))
+      (delete-file file))))
+
+(ert-deftest ellm-test-persisted-sessions-caches-project-by-workspace ()
+  (let* ((root (make-temp-file "ellm-project-cache-" t))
+         (other (make-temp-file "ellm-project-cache-other-" t))
+         (cwd (expand-file-name "workspace/" root))
+         (cache (make-hash-table :test #'equal))
+         (calls 0)
+         (ellm-current-project-function
+          (lambda () (cl-incf calls) root)))
+    (unwind-protect
+        (progn
+          (dolist (file (list (expand-file-name "one/main.ellm" root)
+                              (expand-file-name "two/main.ellm" root)
+                              (expand-file-name "three/main.ellm" other)))
+            (make-directory (file-name-directory file) t)
+            (with-temp-file file
+              (insert (format "---\ncwd: %s\n---\n>-| user\nHello\n" cwd))))
+          (let ((sessions (append (ellm--persisted-sessions root cache)
+                                  (ellm--persisted-sessions other cache))))
+            (should (= (length sessions) 3))
+            (should (= calls 1))
+            (should (cl-every (lambda (session)
+                                (equal (ellm--persisted-session-project session)
+                                       (file-name-nondirectory
+                                        (directory-file-name root))))
+                              sessions))))
+      (delete-directory root t)
+      (delete-directory other t))))
+
 (ert-deftest ellm-test-open-session-reuses-an-existing-main-buffer ()
   (let* ((root (make-temp-file "ellm-sessions-" t))
          (main (expand-file-name "session/main.ellm" root))
