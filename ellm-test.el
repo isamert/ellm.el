@@ -3910,6 +3910,95 @@ Search results may change and this may fail."
           (should (file-directory-p directory)))
       (delete-directory directory t))))
 
+(ert-deftest ellm-test-sessions-kill-deletes-folder-and-live-buffers ()
+  "Deleting a saved session removes its directory and every live member."
+  (let ((root (make-temp-file "ellm-sessions-kill-" t))
+        (list-buffer (generate-new-buffer " *ellm saved sessions test*"))
+        (ellm-persistence-enabled t)
+        (ellm-persistence-location 'global)
+        buffer related directory file session-id)
+    (unwind-protect
+        (let ((ellm-persistence-directory root)
+              (ellm-current-project-function (lambda () nil)))
+          (setq buffer (ellm-new-buffer))
+          (with-current-buffer buffer
+            (goto-char (point-max))
+            (insert "Delete this saved session.")
+            (ellm-save)
+            (setq directory ellm--session-directory
+                  file buffer-file-name
+                  session-id (ellm--frontmatter-value '(ellm session-id))))
+          (should (file-directory-p directory))
+          (setq related (ellm-new-buffer))
+          (with-current-buffer related
+            (ellm--set-frontmatter-value '(ellm session-id) session-id)
+            (setq-local ellm--session-directory directory))
+          (with-current-buffer list-buffer
+            (ellm-sessions-mode)
+            (setq ellm-sessions--roots (ellm--persistence-search-roots))
+            (ellm-sessions-refresh)
+            (should (ellm-list--goto-item 'ellm-sessions-file file))
+            (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t)))
+              (ellm-sessions-kill))
+            (should-not (buffer-live-p buffer))
+            (should-not (buffer-live-p related))
+            (should-not (file-exists-p directory))
+            (should-not (ellm-list--goto-item 'ellm-sessions-file file))))
+      (dolist (candidate (list related buffer))
+        (when (buffer-live-p candidate)
+          (with-current-buffer candidate
+            (set-buffer-modified-p nil))
+          (kill-buffer candidate)))
+      (when (buffer-live-p list-buffer)
+        (kill-buffer list-buffer))
+      (when (file-exists-p root)
+        (delete-directory root t)))))
+
+(ert-deftest ellm-test-sessions-kill-keeps-point-on-nearest-row ()
+  "Deleting a session leaves point on the row that takes its place."
+  (let* ((root (make-temp-file "ellm-sessions-point-" t))
+         (project (expand-file-name "project/" root))
+         (first (expand-file-name "a/main.ellm" root))
+         (second (expand-file-name "b/main.ellm" root))
+         (list-buffer (generate-new-buffer " *ellm sessions point*"))
+         (ellm-persistence-directory root)
+         (ellm-persistence-location 'global)
+         (ellm-current-project-function (lambda () nil))
+         first-file other-file)
+    (unwind-protect
+        (progn
+          (dolist (file (list first second))
+            (make-directory (file-name-directory file) t)
+            (with-temp-file file
+              (insert (format "---\ncwd: %s\n---\n>-| user\nHello\n" project))))
+          (with-current-buffer list-buffer
+            (ellm-sessions-mode)
+            (setq ellm-sessions--roots (ellm--persistence-search-roots))
+            (ellm-sessions-refresh)
+            (setq first-file (plist-get
+                              (car (plist-get (car ellm-sessions--cached-groups)
+                                              :records))
+                              :file)
+                  other-file (if (equal first-file first) second first))
+            (ellm-list--goto-item 'ellm-sessions-file first-file)
+            (let ((line (line-number-at-pos)))
+              (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t)))
+                (ellm-sessions-kill))
+              (should-not (file-exists-p (file-name-directory first-file)))
+              (should (equal (get-text-property (point) 'ellm-sessions-file)
+                             other-file))
+              (should (= (line-number-at-pos) line)))
+            ;; Folding the remaining group must not resurrect the removed row.
+            (when-let* ((group (ellm-list--group-at-point)))
+              (ellm-sessions-toggle-group)
+              (ellm-sessions-toggle-group)
+              (should (ellm-list--goto-item 'ellm-sessions-file other-file))
+              (should-not (ellm-list--goto-item 'ellm-sessions-file first-file)))))
+      (when (buffer-live-p list-buffer)
+        (kill-buffer list-buffer))
+      (when (file-exists-p root)
+        (delete-directory root t)))))
+
 (ert-deftest ellm-test-dwim-appends-region-to-project-buffer ()
   "`ellm-dwim' should reuse the project conversation and append context."
   (let* ((root (file-name-as-directory (make-temp-file "ellm-dwim-" t)))
@@ -10728,6 +10817,80 @@ The parent provider remains buffer-local fallback only when the profile omits on
       (dolist (buffer (list parent child (get-buffer "*ellm sessions*")))
         (when (buffer-live-p buffer) (kill-buffer buffer))))))
 
+(ert-deftest ellm-test-list-kill-removes-conversation-subtree ()
+  "Killing a parent conversation also kills its subagent descendants."
+  (let ((parent (generate-new-buffer "ellm list kill parent"))
+        (child (generate-new-buffer "ellm list kill child"))
+        (grandchild (generate-new-buffer "ellm list kill grandchild"))
+        (sibling (generate-new-buffer "ellm list kill sibling")))
+    (unwind-protect
+        (progn
+          (with-current-buffer parent (ellm-mode))
+          (with-current-buffer sibling (ellm-mode))
+          (with-current-buffer child
+            (ellm-mode)
+            (setq-local ellm-subagent-parent-buffer (buffer-name parent)))
+          (with-current-buffer grandchild
+            (ellm-mode)
+            (setq-local ellm-subagent-parent-buffer (buffer-name child)))
+          (save-window-excursion
+            (ellm-list)
+            (with-current-buffer "*ellm sessions*"
+              (ellm-list--goto-buffer parent)
+              (should (= (length (get-text-property
+                                  (point) 'ellm-list-subagent-children))
+                         1))
+              (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t)))
+                (ellm-list-kill))
+              (should-not (buffer-live-p parent))
+              (should-not (buffer-live-p child))
+              (should-not (buffer-live-p grandchild))
+              (should (buffer-live-p sibling))
+              (should-not (ellm-list--goto-buffer parent))
+              (should-not (ellm-list--goto-buffer child))
+              (should (ellm-list--goto-buffer sibling)))))
+      (dolist (buffer (list parent child grandchild sibling
+                            (get-buffer "*ellm sessions*")))
+        (when (buffer-live-p buffer)
+          (with-current-buffer buffer
+            (when (derived-mode-p 'ellm-mode)
+              (ellm--set-active-request nil)))
+          (kill-buffer buffer))))))
+
+(ert-deftest ellm-test-list-kill-subagent-keeps-parent-and-refreshes ()
+  "Killing a subagent keeps its parent and clears the parent's expansion."
+  (let ((parent (generate-new-buffer "ellm list subkill parent"))
+        (child (generate-new-buffer "ellm list subkill child"))
+        (grandchild (generate-new-buffer "ellm list subkill grandchild")))
+    (unwind-protect
+        (progn
+          (with-current-buffer parent (ellm-mode))
+          (with-current-buffer child
+            (ellm-mode)
+            (setq-local ellm-subagent-parent-buffer (buffer-name parent)))
+          (with-current-buffer grandchild
+            (ellm-mode)
+            (setq-local ellm-subagent-parent-buffer (buffer-name child)))
+          (save-window-excursion
+            (ellm-list)
+            (with-current-buffer "*ellm sessions*"
+              (should (ellm-list--goto-buffer child))
+              (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t)))
+                (ellm-list-kill))
+              (should-not (buffer-live-p child))
+              (should-not (buffer-live-p grandchild))
+              (should (buffer-live-p parent))
+              (should (ellm-list--goto-buffer parent))
+              (should-not (get-text-property
+                           (point) 'ellm-list-subagent-children)))))
+      (dolist (buffer (list parent child grandchild
+                            (get-buffer "*ellm sessions*")))
+        (when (buffer-live-p buffer)
+          (with-current-buffer buffer
+            (when (derived-mode-p 'ellm-mode)
+              (ellm--set-active-request nil)))
+          (kill-buffer buffer))))))
+
 (ert-deftest ellm-test-prompt-tags-fontify-and-fold-within-turn ()
   "Complete line prompt tags are fontified and fold only in their turn."
   (with-temp-buffer
@@ -10972,6 +11135,71 @@ The parent provider remains buffer-local fallback only when the profile omits on
                               sessions))))
       (delete-directory root t)
       (delete-directory other t))))
+
+(ert-deftest ellm-test-saved-session-browser-discovery-fold-refresh-visit ()
+  (let* ((root (make-temp-file "ellm-saved-browser-" t))
+         (project (expand-file-name "project/" root))
+         (local-store (expand-file-name ".ellm/" project))
+         (global-store (expand-file-name "global/" root))
+         (local-file (expand-file-name "one/main.ellm" local-store))
+         (global-file (expand-file-name "two/main.ellm" global-store))
+         (other (expand-file-name "elsewhere/" root))
+         (ellm-persistence-directory global-store)
+         (ellm-persistence-enabled nil)
+         (ellm-current-project-function (lambda () project))
+         visited)
+    (unwind-protect
+        (progn
+          (dolist (file (list local-file global-file))
+            (make-directory (file-name-directory file) t))
+          (with-temp-file local-file
+            (insert (format "---\ncwd: %s\ntitle: Local title\n---\n>-| user\nHello\n" project)))
+          (with-temp-file global-file
+            (insert (format "---\ncwd: %s\n---\n>-| user\nGlobal prompt\n" other)))
+          (with-temp-buffer
+            (ellm-sessions-mode)
+            (should (eq (key-binding (kbd "<backtab>"))
+                        #'ellm-sessions-cycle-groups))
+            (setq default-directory project)
+            (ellm-sessions-refresh)
+            (should (ellm-list--goto-item 'ellm-sessions-file local-file))
+            (should (string-match-p "Local title" (buffer-string)))
+            (should (string-match-p "Global prompt" (buffer-string)))
+            (let ((group (ellm-list--group-at-point)))
+              (cl-letf (((symbol-function 'ellm--discover-sessions)
+                         (lambda (&rest _) (ert-fail "Toggle rescanned disk"))))
+                (ellm-sessions-toggle-group)
+                (should (equal group (ellm-list--group-at-point)))
+                (should-not (ellm-list--goto-item 'ellm-sessions-file local-file))
+                (should (ellm-list--goto-group group))
+                (ellm-sessions-toggle-group)
+                (should (ellm-list--goto-item 'ellm-sessions-file local-file))
+                (should (ellm-list--goto-item 'ellm-sessions-file global-file))
+                (let ((other-group (ellm-list--group-at-point)))
+                  (ellm-sessions-toggle-group)
+                  (should-not (ellm-list--goto-item 'ellm-sessions-file global-file))
+                  (ellm-list--goto-group other-group)
+                  (ellm-sessions-toggle-group)
+                  (should (ellm-list--goto-item 'ellm-sessions-file global-file)))
+                (should (ellm-list--goto-item 'ellm-sessions-file local-file))
+                (ellm-sessions-cycle-groups)
+                (should-not (ellm-list--goto-item 'ellm-sessions-file local-file))
+                (should-not (ellm-list--goto-item 'ellm-sessions-file global-file))
+                (ellm-sessions-cycle-groups)
+                (should (ellm-list--goto-item 'ellm-sessions-file local-file))
+                (should (ellm-list--goto-item 'ellm-sessions-file global-file))
+                (should (ellm-list--goto-item 'ellm-sessions-file local-file))))
+            (cl-letf (((symbol-function 'ellm--find-file-or-switch-to-buffer)
+                       (lambda (file) (setq visited file))))
+              (ellm-sessions-visit))
+            (should (equal visited local-file))
+            (with-temp-file local-file
+              (insert (format "---\ncwd: %s\ntitle: Updated title\n---\n>-| user\nHello\n" project)))
+            (ellm-sessions-refresh)
+            (should (equal (get-text-property (point) 'ellm-sessions-file)
+                           local-file))
+            (should (string-match-p "Updated title" (buffer-string)))))
+      (delete-directory root t))))
 
 (ert-deftest ellm-test-open-session-reuses-an-existing-main-buffer ()
   (let* ((root (make-temp-file "ellm-sessions-" t))

@@ -4147,11 +4147,12 @@ ROOT and SESSION-ID have the same meanings as in `ellm--persistence-prepare'."
               (error-message-string err))
        nil))))
 
-(defun ellm--related-session-buffers (session-id)
-  "Return live ellm buffers related to the current session.
-SESSION-ID identifies already persisted members.  Live subagent parent links
-also include members created before their parent was explicitly saved."
-  (let ((pending (list (current-buffer)))
+(defun ellm--related-session-buffers (session-id &optional buffers)
+  "Return live ellm buffers related to SESSION-ID.
+BUFFERS seeds the traversal and defaults to the current buffer.  SESSION-ID
+identifies already persisted members.  Live subagent parent links also include
+members created before their parent was explicitly saved."
+  (let ((pending (or buffers (list (current-buffer))))
         seen)
     (while pending
       (let ((buffer (pop pending)))
@@ -4178,6 +4179,36 @@ also include members created before their parent was explicitly saved."
                         (parent (get-buffer parent-name)))
               (push parent pending))))))
     (nreverse seen)))
+
+(defun ellm--session-buffers (session-id directory)
+  "Return live ellm buffers identified by SESSION-ID or located under DIRECTORY.
+These seed `ellm--related-session-buffers' when the session is not focused in
+any one buffer, as when deleting it from the saved-session browser."
+  (let ((prefix (file-name-as-directory (expand-file-name directory))))
+    (cl-remove-if-not
+     (lambda (buffer)
+       (with-current-buffer buffer
+         (and (derived-mode-p 'ellm-mode)
+              (or (and (stringp session-id)
+                       (equal (ellm--frontmatter-value '(ellm session-id))
+                              session-id))
+                  (and buffer-file-name
+                       (string-prefix-p prefix (expand-file-name buffer-file-name)))))))
+     (buffer-list))))
+
+(defun ellm--kill-session-buffers (buffers)
+  "Kill BUFFERS without letting persistence hooks recreate deleted files.
+Backend cleanup remains enabled, so active requests and connections are
+released."
+  (dolist (buffer buffers)
+    (with-current-buffer buffer
+      (ellm--persistence-cancel-timer)
+      (setq-local ellm--persistence-ephemeral-p t)
+      (remove-hook 'kill-buffer-hook #'ellm--persistence-before-kill t)
+      (set-buffer-modified-p nil)))
+  (dolist (buffer buffers)
+    (when (buffer-live-p buffer)
+      (kill-buffer buffer))))
 
 ;;;###autoload
 (defun ellm-save (&optional choose-directory)
@@ -4241,17 +4272,7 @@ a backend session.  All live buffers belonging to the conversation are killed."
          (buffers (ellm--related-session-buffers session-id)))
     (unless (yes-or-no-p (format "Delete saved ellm conversation in %s? " directory))
       (user-error "ellm: Conversation deletion cancelled"))
-    ;; Prevent kill hooks from recreating the files being deleted.  Backend
-    ;; cleanup remains enabled so active requests and connections are released.
-    (dolist (buffer buffers)
-      (with-current-buffer buffer
-        (ellm--persistence-cancel-timer)
-        (setq-local ellm--persistence-ephemeral-p t)
-        (remove-hook 'kill-buffer-hook #'ellm--persistence-before-kill t)
-        (set-buffer-modified-p nil)))
-    (dolist (buffer buffers)
-      (when (buffer-live-p buffer)
-        (kill-buffer buffer)))
+    (ellm--kill-session-buffers buffers)
     (delete-directory directory t)
     (message "ellm: deleted saved conversation in %s" directory)))
 
@@ -4528,6 +4549,20 @@ fallback for a session directory that was renamed after saving."
 
 ;;;; ellm-open-session
 
+(defun ellm--discover-sessions (&optional roots)
+  "Discover sessions in ROOTS, or current-project and global stores.
+Ties favor project-local sessions.  Discovery does not depend on automatic
+persistence configuration."
+  (let ((project-cache (make-hash-table :test #'equal)))
+    (cl-stable-sort
+     (apply #'append
+            (mapcar (lambda (root)
+                      (ellm--persisted-sessions root project-cache))
+                    (or roots (ellm--persistence-search-roots))))
+     (lambda (left right)
+       (time-less-p (ellm--persisted-session-modified right)
+                    (ellm--persisted-session-modified left))))))
+
 ;;;###autoload
 (defun ellm-open-session ()
   "Open a persisted main conversation for the current project or globally.
@@ -4536,19 +4571,10 @@ project-local sessions.  This lookup is independent of automatic persistence
 and its configured save location."
   (interactive)
   (let* ((roots (ellm--persistence-search-roots))
-         (project-cache (make-hash-table :test #'equal))
-         (sessions (cl-stable-sort
-                    (apply #'append
-                           (mapcar (lambda (root)
-                                     (ellm--persisted-sessions root project-cache))
-                                   roots))
-                    (lambda (left right)
-                      (time-less-p (ellm--persisted-session-modified right)
-                                   (ellm--persisted-session-modified left)))))
          (choices (mapcar (lambda (session)
                             (cons (ellm--persisted-session-choice session)
                                   session))
-                          sessions)))
+                          (ellm--discover-sessions roots))))
     (unless choices
       (user-error "ellm: No persisted sessions in %s"
                   (string-join roots ", ")))
@@ -9722,7 +9748,7 @@ entering writable Dired so filenames are visible for editing."
             (overlay-put overlay 'help-echo (file-name-nondirectory file))))
         (forward-line 1)))))
 
-;;;; Session list
+;;;; Live session list (ellm-list)
 
 (defgroup ellm-list nil
   "Browse active ellm conversations."
@@ -9952,8 +9978,8 @@ Subagents whose parent cannot be found remain top-level records."
     ((or 'model 'context 'todos) 'ellm-list-secondary)
     ('title 'ellm-list-title)))
 
-(defun ellm-list--format-row (record)
-  "Return one aligned display row for session RECORD."
+(defun ellm-list--format-row (record &optional columns)
+  "Return one aligned display row for RECORD using COLUMNS."
   (string-join
    (mapcar (lambda (column)
              (let ((value (ellm-list--format-column
@@ -9961,7 +9987,7 @@ Subagents whose parent cannot be found remain top-level records."
                (if-let* ((face (ellm-list--column-face column record)))
                    (propertize value 'face face)
                  value)))
-           ellm-list-columns)
+           (or columns ellm-list-columns))
    "  "))
 
 (defun ellm-list--transition-pulse-face (previous current)
@@ -9979,24 +10005,29 @@ Subagents whose parent cannot be found remain top-level records."
   (when-let* ((face (ellm-list--transition-pulse-face previous status)))
     (pulse-momentary-highlight-region start end face)))
 
+(defun ellm-list--group-records (records less-p)
+  "Group RECORDS by :key, sorting groups and their rows with LESS-P.
+RECORDS are already ordered; this preserves their order on ties."
+  (let ((groups (make-hash-table :test #'equal)) order)
+    (dolist (record records)
+      (let ((key (plist-get record :key)))
+        (unless (gethash key groups)
+          (push key order))
+        (push record (gethash key groups))))
+    (cl-stable-sort
+     (mapcar (lambda (key)
+               (let ((rows (cl-stable-sort (nreverse (gethash key groups)) less-p)))
+                 (list :key key :label (plist-get (car rows) :label)
+                       :records rows)))
+             (nreverse order))
+     (lambda (left right)
+       (funcall less-p (car (plist-get left :records))
+                (car (plist-get right :records)))))))
+
 (defun ellm-list--groups ()
   "Return top-level session records grouped and ordered for rendering."
-  (let ((groups (make-hash-table :test #'equal)))
-    (dolist (record (ellm-list--subagent-tree (ellm-list--records)))
-      (push record (gethash (plist-get record :key) groups)))
-    (sort
-     (let (result)
-       (maphash
-        (lambda (key records)
-          (setq records (sort records #'ellm-list--record-less-p))
-          (push (list :key key :label (plist-get (car records) :label)
-                      :records records)
-                result))
-        groups)
-       result)
-     (lambda (left right)
-       (ellm-list--record-less-p (car (plist-get left :records))
-                                 (car (plist-get right :records)))))))
+  (ellm-list--group-records (ellm-list--subagent-tree (ellm-list--records))
+                            #'ellm-list--record-less-p))
 
 (defun ellm-list--group-at-point ()
   "Return the group key at point, including from one of its session rows."
@@ -10015,23 +10046,43 @@ When NOERROR is non-nil, return nil on a group heading or unrelated line."
       (unless noerror
         (user-error "ellm: No conversation at point"))))
 
+(defun ellm-list--goto-item (property item &optional test)
+  "Move point to ITEM's row marked by PROPERTY, if present."
+  (when item
+    (goto-char (point-min))
+    (when-let* ((position (text-property-search-forward property item (or test #'equal))))
+      (goto-char (prop-match-beginning position))
+      t)))
+
 (defun ellm-list--goto-buffer (buffer)
   "Move point to BUFFER's row and return non-nil when it is present."
-  (when buffer
-    (goto-char (point-min))
-    (let ((position (text-property-search-forward 'ellm-list-buffer buffer #'eq)))
-      (when position
-        (goto-char (prop-match-beginning position))
-        t))))
+  (ellm-list--goto-item 'ellm-list-buffer buffer #'eq))
 
 (defun ellm-list--goto-group (group)
   "Move point to GROUP's heading and return non-nil when it is present."
-  (when group
-    (goto-char (point-min))
-    (let ((position (text-property-search-forward 'ellm-list-group group #'equal)))
-      (when position
-        (goto-char (prop-match-beginning position))
-        t))))
+  (ellm-list--goto-item 'ellm-list-group group))
+
+(defun ellm-list--insert-group (group)
+  "Insert GROUP's foldable heading; return non-nil when it is folded."
+  (let ((folded (member (plist-get group :key) ellm-list--folded-groups))
+        (start (point)))
+    (insert (format "%s %s\n" (if folded "▸" "▾")
+                    (plist-get group :label)))
+    (add-text-properties start (point)
+                         `(ellm-list-group ,(plist-get group :key)
+                                           face ellm-list-group-heading
+                                           mouse-face highlight))
+    folded))
+
+(defun ellm-list--toggle-group (group refresh)
+  "Toggle GROUP and call REFRESH, leaving point on its heading."
+  (unless group
+    (user-error "ellm: No project or directory group at point"))
+  (if (member group ellm-list--folded-groups)
+      (setq ellm-list--folded-groups (delete group ellm-list--folded-groups))
+    (push group ellm-list--folded-groups))
+  (funcall refresh)
+  (ellm-list--goto-group group))
 
 (defun ellm-list--insert-record (record indent)
   "Insert RECORD and its expanded subagents at INDENT."
@@ -10068,35 +10119,37 @@ A folded group or ancestor keeps its rows absent without requiring a rebuild."
             (setq hidden (member parent ellm-list--folded-subagents)))
           hidden))))
 
-(defun ellm-list--point-location (position)
-  "Return the list row and column at POSITION, if any."
+(defun ellm-list--point-location (position &optional property)
+  "Return the list row and column at POSITION using item PROPERTY."
   (save-excursion
     (goto-char position)
-    (list (ellm-list--buffer-at-point t)
+    (list (get-text-property (point) (or property 'ellm-list-buffer))
           (ellm-list--group-at-point)
           (current-column))))
 
-(defun ellm-list--restore-point-location (location)
-  "Move point to LOCATION in the current session-list buffer.
-Return non-nil when LOCATION's row is still present."
-  (pcase-let ((`(,buffer ,group ,column) location))
-    (when (or (ellm-list--goto-buffer buffer)
+(defun ellm-list--restore-point-location (location &optional property)
+  "Move point to LOCATION in the current list buffer.
+Return non-nil when LOCATION's row is still present.  Use item PROPERTY."
+  (pcase-let ((`(,item ,group ,column) location))
+    (when (or (ellm-list--goto-item (or property 'ellm-list-buffer) item
+                                    (if property #'equal #'eq))
               (ellm-list--goto-group group))
       (move-to-column column)
       t)))
 
-(defun ellm-list--window-locations ()
-  "Return displayed session-list windows and their logical point locations."
+(defun ellm-list--window-locations (&optional property)
+  "Return displayed list windows and their logical point locations.
+Use item PROPERTY when supplied."
   (mapcar (lambda (window)
-            (cons window (ellm-list--point-location (window-point window))))
+            (cons window (ellm-list--point-location (window-point window) property)))
           (get-buffer-window-list (current-buffer) nil t)))
 
-(defun ellm-list--restore-window-locations (locations)
-  "Restore LOCATIONS after session-list text has been regenerated."
+(defun ellm-list--restore-window-locations (locations &optional property)
+  "Restore LOCATIONS after list text has been regenerated using PROPERTY."
   (dolist (entry locations)
     (when (window-live-p (car entry))
       (save-excursion
-        (when (ellm-list--restore-point-location (cdr entry))
+        (when (ellm-list--restore-point-location (cdr entry) property)
           (set-window-point (car entry) (point)))))))
 
 (defun ellm-list--record-at (buffer)
@@ -10178,16 +10231,9 @@ Return non-nil when BUFFER has a row in the current list."
         (inhibit-read-only t))
     (erase-buffer)
     (dolist (group-data (ellm-list--groups))
-      (let* ((key (plist-get group-data :key))
-             (folded (member key ellm-list--folded-groups))
-             (heading-start (point)))
-        (insert (format "%s %s\n" (if folded "▸" "▾")
-                        (plist-get group-data :label)))
-        (add-text-properties heading-start (point)
-                             `(ellm-list-group ,key face ellm-list-group-heading mouse-face highlight))
-        (unless folded
-          (dolist (record (plist-get group-data :records))
-            (ellm-list--insert-record record 1)))))
+      (unless (ellm-list--insert-group group-data)
+        (dolist (record (plist-get group-data :records))
+          (ellm-list--insert-record record 1))))
     (goto-char (point-min))
     (unless (ellm-list--restore-point-location point-location)
       (goto-char (point-min)))
@@ -10223,25 +10269,22 @@ Return non-nil when BUFFER has a row in the current list."
 (defun ellm-list-toggle-group ()
   "Toggle visibility of the project or directory group at point."
   (interactive nil ellm-list-mode)
-  (let ((group (ellm-list--group-at-point)))
-    (unless group
-      (user-error "ellm: No project or directory group at point"))
-    (if (member group ellm-list--folded-groups)
-        (setq ellm-list--folded-groups (delete group ellm-list--folded-groups))
-      (push group ellm-list--folded-groups))
-    (ellm-list-refresh)
-    (ellm-list--goto-group group)))
+  (ellm-list--toggle-group (ellm-list--group-at-point) #'ellm-list-refresh))
+
+(defun ellm-list--cycle-groups (groups redraw)
+  "Fold all GROUPS or unfold them all if folded, then call REDRAW."
+  (setq ellm-list--folded-groups
+        (if (cl-every (lambda (group) (member group ellm-list--folded-groups)) groups)
+            nil
+          groups))
+  (funcall redraw))
 
 (defun ellm-list-cycle-groups ()
   "Fold every expanded group, or unfold every group when all are folded."
   (interactive nil ellm-list-mode)
-  (let ((groups (mapcar (lambda (group) (plist-get group :key))
-                        (ellm-list--groups))))
-    (setq ellm-list--folded-groups
-          (if (cl-every (lambda (group) (member group ellm-list--folded-groups)) groups)
-              nil
-            groups))
-    (ellm-list-refresh)))
+  (ellm-list--cycle-groups
+   (mapcar (lambda (group) (plist-get group :key)) (ellm-list--groups))
+   #'ellm-list-refresh))
 
 (defun ellm-list-visit ()
   "Visit the conversation at point without changing its cursor position."
@@ -10283,25 +10326,64 @@ Keep the session list selected while reading the answer."
       (ellm-list-refresh)
       (pop-to-buffer new-buffer))))
 
+(defun ellm-list--subagent-buffers (buffer)
+  "Return BUFFER's live subagent buffers, including their descendants."
+  (let ((name (buffer-name buffer))
+        children)
+    (dolist (candidate (buffer-list))
+      (with-current-buffer candidate
+        (when (and (derived-mode-p 'ellm-mode)
+                   (equal (bound-and-true-p ellm-subagent-parent-buffer) name))
+          (push candidate children))))
+    (append children
+            (apply #'append (mapcar #'ellm-list--subagent-buffers children)))))
+
+(defun ellm-list--refresh-after-kill (start end property refresh &optional test)
+  "Refresh the current session list and land on the nearest surviving row.
+START and END delimit the removed rows and PROPERTY identifies row items,
+compared with TEST.  Call this while the removed rows are still present so the
+surviving neighbour can be located before REFRESH rebuilds the list."
+  (let ((item (or (get-text-property end property)
+                  (save-excursion
+                    (goto-char start)
+                    (forward-line -1)
+                    (get-text-property (point) property)))))
+    (funcall refresh)
+    (when item
+      (ellm-list--goto-item property item (or test #'equal)))))
+
 (defun ellm-list-kill ()
-  "Kill the conversation at point, retaining point on the nearest row."
+  "Kill the conversation at point and its subagents, retaining point."
   (interactive nil ellm-list-mode)
   (let* ((start (line-beginning-position))
          (buffer (ellm-list--buffer-at-point))
-         (children (get-text-property start 'ellm-list-subagent-children))
-         (next (save-excursion
-                 (forward-line 1)
-                 (ellm-list--buffer-at-point t))))
-    (when (yes-or-no-p (format "Kill ellm conversation %s? " (buffer-name buffer)))
-      (kill-buffer buffer)
-      (if children
-          ;; Its children become orphaned and must be placed in their regular
-          ;; groups, which is an exceptional structural rebuild.
-          (ellm-list-refresh)
-        (let ((inhibit-read-only t))
-          (delete-region start (line-beginning-position 2))))
-      (when next
-        (ellm-list--goto-buffer next)))))
+         (depth (or (get-text-property start 'ellm-list-depth) 0))
+         (victims (cons buffer (ellm-list--subagent-buffers buffer)))
+         (end (save-excursion
+                (goto-char start)
+                (forward-line 1)
+                ;; Descendant rows use a greater depth, so skip them all before
+                ;; selecting the nearest surviving row.
+                (while (and (not (eobp))
+                            (> (or (get-text-property (point) 'ellm-list-depth)
+                                   0)
+                               depth))
+                  (forward-line 1))
+                (point))))
+    (when (yes-or-no-p
+           (format "Kill ellm conversation %s%s? "
+                   (buffer-name buffer)
+                   (if (> (length victims) 1)
+                       (format " and %d subagent%s" (1- (length victims))
+                               (if (= (length victims) 2) "" "s"))
+                     "")))
+      (dolist (victim victims)
+        (when (buffer-live-p victim)
+          (kill-buffer victim)))
+      ;; A killed subagent changes its parent's expansion state, so rebuild
+      ;; rather than deleting the selected row and leaving the parent stale.
+      (ellm-list--refresh-after-kill start end 'ellm-list-buffer
+                                     #'ellm-list-refresh #'eq))))
 
 (defconst ellm-list--keybindings
   '(("r" . ellm-list-refresh)
@@ -10315,16 +10397,17 @@ Keep the session list selected while reading the answer."
     ("q" . quit-window))
   "Bindings shared by `ellm-list-mode' and its Evil normal state.")
 
-(defun ellm-list--define-keybindings (define-key)
-  "Call DEFINE-KEY for every `ellm-list--keybindings' entry."
-  (dolist (binding ellm-list--keybindings)
+(defun ellm-list--define-keybindings (define-key bindings)
+  "Call DEFINE-KEY for every entry in BINDINGS."
+  (dolist (binding bindings)
     (funcall define-key (kbd (car binding)) (cdr binding))))
 
 (defvar ellm-list-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map special-mode-map)
     (ellm-list--define-keybindings
-     (lambda (key command) (define-key map key command)))
+     (lambda (key command) (define-key map key command))
+     ellm-list--keybindings)
     map)
   "Keymap for `ellm-list-mode'.")
 
@@ -10333,7 +10416,8 @@ Keep the session list selected while reading the answer."
 (with-eval-after-load 'evil
   (ellm-list--define-keybindings
    (lambda (key command)
-     (evil-define-key* 'normal ellm-list-mode-map key command))))
+     (evil-define-key* 'normal ellm-list-mode-map key command))
+   ellm-list--keybindings))
 
 (defun ellm-list--refresh-on-display (window)
   "Refresh this session list after it is displayed in WINDOW.
@@ -10349,7 +10433,7 @@ conversation state only when such updates were skipped."
 \\[ellm-list-cycle-groups] cycles all groups, \\[ellm-list-visit] visits,
 \\[ellm-list-cancel] cancels, \\[ellm-list-answer-prompt] answers input,
 \\[ellm-list-new] creates a conversation for the group at point, and
-\\[ellm-list-kill] kills the selected conversation."
+\\[ellm-list-kill] kills the selected conversation and its subagents."
   (setq-local truncate-lines t)
   (hl-line-mode 1)
   (add-to-invisibility-spec '(ellm-list-group . t))
@@ -10365,6 +10449,185 @@ conversation state only when such updates were skipped."
       (unless (derived-mode-p 'ellm-list-mode)
         (ellm-list-mode))
       (ellm-list-refresh))
+    (pop-to-buffer buffer)))
+
+;;;; Persisted session browser (ellm-sessions)
+
+(ellm-list-define-column modified (:width 16 :title "Modified")
+  (format-time-string "%F %R" (plist-get record :modified)))
+
+(defconst ellm-sessions--columns '(modified title)
+  "Columns displayed in the persisted session browser.")
+
+(defvar-local ellm-sessions--roots nil
+  "Discovery roots captured when opening the saved session browser.")
+
+(defvar-local ellm-sessions--cached-groups nil
+  "Group records from the last saved-session rescan.")
+
+(defun ellm-sessions--groups ()
+  "Discover and group saved sessions in the current project's search roots."
+  (ellm-list--group-records
+   (mapcar (lambda (session)
+             (let* ((cwd (ellm--persisted-session-cwd session))
+                    (project (ellm--persisted-session-project session))
+                    (directory (and cwd (file-name-as-directory
+                                         (expand-file-name cwd)))))
+               (list :key (concat (if project "project:" "directory:")
+                                  (or directory ""))
+                     :label (if project
+                                (format "Project: %s" project)
+                              (format "Directory: %s"
+                                      (if directory (abbreviate-file-name directory)
+                                        "unknown")))
+                     :file (ellm--persisted-session-main-file session)
+                     :modified (ellm--persisted-session-modified session)
+                     :title (or (ellm--persisted-session-title session)
+                                (ellm--persisted-session-summary session)
+                                "no title"))))
+           (ellm--discover-sessions ellm-sessions--roots))
+   (lambda (left right)
+     (time-less-p (plist-get right :modified)
+                  (plist-get left :modified)))))
+
+(defun ellm-sessions--insert-group (group)
+  "Insert GROUP's heading and its visible saved-session rows."
+  (unless (ellm-list--insert-group group)
+    (dolist (record (plist-get group :records))
+      (let ((start (point)))
+        (insert "   " (ellm-list--format-row record ellm-sessions--columns) "\n")
+        (add-text-properties start (point)
+                             `(ellm-sessions-file ,(plist-get record :file)
+                                                  mouse-face highlight))))))
+
+(defun ellm-sessions--redraw-group ()
+  "Redraw only the group at point using the last disk scan."
+  (let* ((key (ellm-list--group-at-point))
+         (group (cl-find key ellm-sessions--cached-groups
+                         :key (lambda (item) (plist-get item :key))
+                         :test #'equal))
+         (inhibit-read-only t))
+    (when group
+      (ellm-list--goto-group key)
+      (let ((start (point)))
+        (forward-line 1)
+        (while (and (not (eobp))
+                    (not (get-text-property (point) 'ellm-list-group)))
+          (forward-line 1))
+        (delete-region start (point))
+        (ellm-sessions--insert-group group))
+      (ellm-list--redisplay (current-buffer)))))
+
+(defun ellm-sessions--redraw ()
+  "Redraw cached saved sessions, preserving the selected row."
+  (let* ((property 'ellm-sessions-file)
+         (location (ellm-list--point-location (point) property))
+         (windows (ellm-list--window-locations property))
+         (inhibit-read-only t))
+    (erase-buffer)
+    (dolist (group ellm-sessions--cached-groups)
+      (ellm-sessions--insert-group group))
+    (goto-char (point-min))
+    (unless (ellm-list--restore-point-location location property)
+      (goto-char (point-min)))
+    (ellm-list--restore-window-locations windows property)
+    (ellm-list--redisplay (current-buffer))))
+
+(defun ellm-sessions-refresh ()
+  "Rescan saved sessions and redraw the browser, preserving the selected row."
+  (interactive nil ellm-sessions-mode)
+  (setq ellm-sessions--cached-groups (ellm-sessions--groups))
+  (ellm-sessions--redraw))
+
+(defun ellm-sessions-cycle-groups ()
+  "Fold every expanded saved-session group, or unfold all when all are folded."
+  (interactive nil ellm-sessions-mode)
+  (ellm-list--cycle-groups
+   (mapcar (lambda (group) (plist-get group :key)) ellm-sessions--cached-groups)
+   #'ellm-sessions--redraw))
+
+(defun ellm-sessions-toggle-group ()
+  "Fold or unfold the saved-session group at point."
+  (interactive nil ellm-sessions-mode)
+  (ellm-list--toggle-group (ellm-list--group-at-point)
+                           #'ellm-sessions--redraw-group))
+
+(defun ellm-sessions-visit ()
+  "Visit the saved conversation at point."
+  (interactive nil ellm-sessions-mode)
+  (let ((file (get-text-property (point) 'ellm-sessions-file)))
+    (unless file
+      (user-error "ellm: No saved session at point"))
+    (ellm--find-file-or-switch-to-buffer file)))
+
+(defun ellm-sessions-kill ()
+  "Delete the saved conversation at point from disk.
+This removes the conversation directory, including its transcript, subagents,
+attachments, retained outputs, and local reasoning state.  It does not delete
+a backend session.  All live buffers belonging to the conversation, including
+its subagents, are killed."
+  (interactive nil ellm-sessions-mode)
+  (let ((file (get-text-property (point) 'ellm-sessions-file)))
+    (unless file
+      (user-error "ellm: No saved session at point"))
+    (let* ((start (line-beginning-position))
+           (end (line-beginning-position 2))
+           (directory (file-name-directory file))
+           (session-id (car (ellm--persisted-session-metadata file))))
+      (unless (file-directory-p directory)
+        (user-error "ellm: Session files are already gone"))
+      (unless (yes-or-no-p (format "Delete saved ellm conversation in %s? " directory))
+        (user-error "ellm: Session deletion cancelled"))
+      (let ((seeds (ellm--session-buffers session-id directory)))
+        (ellm--kill-session-buffers
+         (if (stringp session-id)
+             (ellm--related-session-buffers session-id seeds)
+           seeds)))
+      (delete-directory directory t)
+      (ellm-list--refresh-after-kill start end 'ellm-sessions-file
+                                     #'ellm-sessions-refresh)
+      (message "ellm: deleted saved conversation in %s" directory))))
+
+(defconst ellm-sessions--keybindings
+  '(("r" . ellm-sessions-refresh)
+    ("TAB" . ellm-sessions-toggle-group)
+    ("<backtab>" . ellm-sessions-cycle-groups)
+    ("RET" . ellm-sessions-visit)
+    ("x" . ellm-sessions-kill)
+    ("q" . quit-window))
+  "Bindings for the persisted session browser.")
+
+(defvar ellm-sessions-mode-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map special-mode-map)
+    (ellm-list--define-keybindings
+     (lambda (key command) (define-key map key command))
+     ellm-sessions--keybindings)
+    map)
+  "Keymap for `ellm-sessions-mode'.")
+
+(with-eval-after-load 'evil
+  (ellm-list--define-keybindings
+   (lambda (key command)
+     (evil-define-key* 'normal ellm-sessions-mode-map key command))
+   ellm-sessions--keybindings))
+
+(define-derived-mode ellm-sessions-mode special-mode "eLLM Saved Sessions"
+  "Mode for browsing persisted ellm conversations."
+  (setq-local truncate-lines t)
+  (hl-line-mode 1))
+
+;;;###autoload
+(defun ellm-sessions ()
+  "Browse saved sessions from the current project and global store."
+  (interactive)
+  (let ((roots (ellm--persistence-search-roots))
+        (buffer (get-buffer-create "*ellm saved sessions*")))
+    (with-current-buffer buffer
+      (unless (derived-mode-p 'ellm-sessions-mode)
+        (ellm-sessions-mode))
+      (setq ellm-sessions--roots roots)
+      (ellm-sessions-refresh))
     (pop-to-buffer buffer)))
 
 ;;;; Major mode
