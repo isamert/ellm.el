@@ -1322,14 +1322,21 @@ response, and ERROR-CALLBACK receives failures.  MULTI-OUTPUT has its standard
         ((send
           (retried)
           (unless (ellm-codex-request-cancelled request)
-            (let ((ellm-llm--transport-log-buffer log-buffer))
+            (let* ((ellm-llm--transport-log-buffer log-buffer)
+                   (data (llm-provider-chat-request provider prompt t))
+                   (cache-key (plist-get data :prompt_cache_key)))
               (setf
                (ellm-codex-request-process request)
                (ellm-llm--request-plz-advice
                 #'ellm-codex--stream-request
                 (llm-provider-chat-streaming-url provider)
-                :headers (llm-provider-headers provider)
-                :data (llm-provider-chat-request provider prompt t)
+                ;; ChatGPT derives cache affinity from this header, rather
+                ;; than the JSON key alone.  Use the final request's key so
+                ;; prompt overrides and authentication retries stay aligned.
+                :headers (append (llm-provider-headers provider)
+                                 (when cache-key
+                                   (list (cons "session-id" cache-key))))
+                :data data
                 :media-type
                 (llm-provider-streaming-media-handler
                  provider

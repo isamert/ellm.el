@@ -5162,6 +5162,8 @@ Search results may change and this may fail."
                    'llm-request-authentication-error "expired")
           (should (= (length requests) 2))
           (dolist (request requests)
+            (should (equal (cdr (assoc "session-id" (plist-get request :headers)))
+                           "conversation-key"))
             (should (equal (plist-get (plist-get request :data) :prompt_cache_key)
                            "conversation-key")))
           (let ((events (oref (cdr (plist-get (car requests) :media-type)) events)))
@@ -5175,6 +5177,35 @@ Search results may change and this may fail."
               (should (string-match-p ":cached_tokens 1024" log))
               (should-not (string-match-p "Bearer secret" log)))))
       (kill-buffer log-buffer))))
+
+(ert-deftest ellm-test-codex-session-header-follows-final-cache-policy ()
+  "Consecutive sends, prompt overrides, and disabled caching must agree."
+  (let ((provider (ellm-make-codex-provider
+                   :chat-model "gpt-5.6-terra"
+                   :default-chat-non-standard-params
+                   '((prompt_cache_key . "conversation-key"))))
+        requests)
+    (cl-letf (((symbol-function 'llm-provider-request-prelude) #'ignore)
+              ((symbol-function 'llm-provider-headers) (lambda (_) nil))
+              ((symbol-function 'ellm-codex--stream-request)
+               (lambda (_url &rest args) (push args requests) nil)))
+      (dotimes (_ 2)
+        (llm-chat-streaming provider (make-llm-chat-prompt)
+                            nil #'ignore #'ignore))
+      (dolist (request requests)
+        (should (equal (cdr (assoc "session-id" (plist-get request :headers)))
+                       "conversation-key")))
+      (llm-chat-streaming
+       provider (make-llm-chat-prompt
+                 :non-standard-params '((prompt_cache_key . "override-key")))
+       nil #'ignore #'ignore)
+      (should (equal (cdr (assoc "session-id" (plist-get (car requests) :headers)))
+                     "override-key"))
+      (llm-chat-streaming
+       (ellm-codex--provider-with-cache-policy provider nil nil)
+       (make-llm-chat-prompt) nil #'ignore #'ignore)
+      (should-not (assoc "session-id" (plist-get (car requests) :headers)))
+      (should-not (plist-get (plist-get (car requests) :data) :prompt_cache_key)))))
 
 (ert-deftest ellm-test-llm-restores-claude-tool-result-as-user-message ()
   "Reconstructed Claude tool results should have a valid provider role."
