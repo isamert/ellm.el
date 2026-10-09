@@ -34,6 +34,8 @@
 (require 'llm-provider-utils)
 (require 'llm-models)
 (require 'pp)
+(require 'json)
+(require 'plz-event-source)
 (require 'ellm)
 
 (declare-function ellm-mcp-session-tools "ellm-mcp" (frontmatter))
@@ -54,8 +56,10 @@ key overrides this setting for an individual conversation."
 
 (defcustom ellm-llm-log-messages nil
   "If non-nil, log `llm.el' requests and responses per conversation.
-Logs include final request bodies passed to the plz transport and parsed
-results delivered to ellm.  Authentication headers are redacted, but prompts,
+Logs include final transport request bodies, request comparison summaries,
+stream completion and usage events, and final results delivered to ellm.
+All sends in a conversation share one log buffer.  Text deltas are omitted.
+Authentication headers are redacted, but prompts,
 responses, tool arguments, and opaque reasoning state are not; enable this
 only while debugging.  Log buffers grow without bound."
   :type 'boolean
@@ -135,9 +139,6 @@ inherit media inputs from the conversation request."
   (title-started nil
                  :type boolean
                  :documentation "Non-nil once title generation has been attempted.")
-  (log-buffer nil
-              :type (or null buffer)
-              :documentation "Per-conversation diagnostic log buffer.")
   (tool-activity-timers nil
                         :type list
                         :documentation "Heartbeat timers for running llm.el tools."))
@@ -154,28 +155,127 @@ inherit media inputs from the conversation request."
 (defvar ellm-llm--transport-log-buffer nil
   "Log buffer for a dynamically scoped `llm.el' transport request.")
 
+(defvar-local ellm-llm--conversation-log-buffer nil
+  "Diagnostic log shared by all requests from this conversation.")
+
 (defun ellm-llm--driver-log-buffer (driver)
-  "Return DRIVER's diagnostic log buffer, creating it if needed."
-  (or (and (buffer-live-p (ellm-llm-driver-log-buffer driver))
-           (ellm-llm-driver-log-buffer driver))
-      (let* ((source (ellm-llm-driver-buffer driver))
-             (source-name (if (buffer-live-p source)
-                              (buffer-name source)
-                            "dead-buffer"))
-             (buffer (generate-new-buffer
-                      (format "%s<%s>" ellm-llm-log-buffer-name source-name))))
-        (setf (ellm-llm-driver-log-buffer driver) buffer)
-        buffer)))
+  "Return the conversation log for DRIVER, creating it if needed."
+  (let ((source (ellm-llm-driver-buffer driver)))
+    (when (buffer-live-p source)
+      (with-current-buffer source
+        (unless (buffer-live-p ellm-llm--conversation-log-buffer)
+          (setq ellm-llm--conversation-log-buffer
+                (generate-new-buffer
+                 (format "%s<%s>" ellm-llm-log-buffer-name (buffer-name)))))
+        ellm-llm--conversation-log-buffer))))
+
+(defvar-local ellm-llm--log-request-number 0
+  "Sequence number of transport requests in this log.")
+
+(defvar-local ellm-llm--log-previous-request nil
+  "Previous transport request's diagnostic signatures in this log.")
+
+(defun ellm-llm--log-data (data)
+  "Parse JSON DATA for readable logging, or return DATA unchanged."
+  (if (stringp data)
+      (condition-case nil
+          (json-parse-string data :object-type 'plist :array-type 'array
+                             :null-object nil :false-object :false)
+        (error data))
+    data))
+
+(defun ellm-llm--request-summary (data &optional headers)
+  "Summarize DATA, HEADERS, and changes since the previous request.
+Call in the log buffer.  Input item indices are zero-based.  Shared items
+measure request equality, not guaranteed server cache reuse."
+  (let* ((parsed (ellm-llm--log-data data))
+         (body (and (listp parsed) parsed))
+         (input (or (plist-get body :input) (plist-get body :messages)))
+         (items (cond ((vectorp input) (append input nil))
+                      ((listp input) input)
+                      (input (list input))))
+         (hash (lambda (value)
+                 (let ((print-length nil) (print-level nil))
+                   (secure-hash 'sha256 (prin1-to-string value)))))
+         (session-id (cdr (assoc-string "session-id" headers t)))
+         (fields (append
+                  (cl-loop for (key value) on body by #'cddr
+                           unless (memq key '(:input :messages))
+                           collect (cons key (funcall hash value)))
+                  (list (cons :session-id (funcall hash session-id)))))
+         (signatures (list :number ellm-llm--log-request-number
+                           :fields fields :input (mapcar hash items)))
+         (previous ellm-llm--log-previous-request)
+         (old (plist-get previous :input))
+         (old-count (length old))
+         (new (plist-get signatures :input))
+         (shared 0))
+    (while (and old new (equal (car old) (car new)))
+      (cl-incf shared)
+      (setq old (cdr old) new (cdr new)))
+    (setq ellm-llm--log-previous-request signatures)
+    (append
+     (list :model (plist-get body :model)
+           :prompt-cache-key (plist-get body :prompt_cache_key)
+           :session-id session-id :input-items (length items)
+           :instructions-sha256 (cdr (assq :instructions fields))
+           :tools-sha256 (cdr (assq :tools fields)))
+     (when previous
+       (let ((old-fields (plist-get previous :fields)))
+         (list :compared-with-request (plist-get previous :number)
+               :changed-fields
+               (cl-loop for key in (seq-uniq (mapcar #'car (append fields old-fields)))
+                        unless (equal (assq key fields) (assq key old-fields))
+                        collect key)
+               :previous-input-items old-count :shared-input-items shared
+               :input-prefix (cond ((and old new) 'changed)
+                                   (old 'shortened)
+                                   (new 'extended)
+                                   (t 'unchanged))
+               :added-input-items (if old 0 (length new))
+               :first-changed-input-item (and old new shared)))))))
+
+(defun ellm-llm--log-stream-events (media buffer label)
+  "Copy MEDIA and log diagnostic SSE events in BUFFER under LABEL."
+  (if (not (and (consp media)
+                (eieio-object-p (cdr media))
+                (object-of-class-p (cdr media) 'plz-event-source:text/event-stream)))
+      media
+    (let* ((copy (clone (cdr media)))
+           (types '(response.completed response.failed response.incomplete
+                    error message_start message_delta))
+           (events (copy-sequence (oref copy events))))
+      ;; Some providers ignore completion events entirely.
+      (dolist (type types)
+        (unless (assq type events)
+          (push (cons type #'ignore) events)))
+      (oset copy events
+            (mapcar
+             (lambda (entry)
+               (let ((type (car entry)) (handler (cdr entry)))
+                 (cons type
+                       (lambda (event)
+                         (when (or (memq type types) (eq type 'message))
+                           (let ((data (ellm-llm--log-data
+                                        (plz-event-source-event-data event))))
+                             (when (or (memq type types)
+                                       (and (listp data) (plist-get data :usage)))
+                               (ellm-llm--log
+                                buffer "<--" (format "%s %s" label type) data))))
+                         (funcall handler event)))))
+             events))
+      (cons (car media) copy))))
 
 (defun ellm-llm--log (buffer direction label value)
   "Append VALUE to BUFFER as a DIRECTION and LABEL log entry."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
-      (goto-char (point-max))
-      (insert (format "[%s] %s %s\n%s\n\n"
+      (let ((print-length nil) (print-level nil))
+        (goto-char (point-max))
+        (insert (format "[%s] %s %s\n%s\n\n"
                       (format-time-string "%Y-%m-%d %H:%M:%S")
                       direction label
-                      (pp-to-string value))))))
+                      (pp-to-string value)))))))
 
 (defun ellm-llm--redact-headers (headers)
   "Return a copy of HEADERS with credentials redacted."
@@ -193,25 +293,36 @@ inherit media inputs from the conversation request."
   (replace-regexp-in-string "[?].*\\'" "?<redacted>" url))
 
 (defun ellm-llm--request-plz-advice (original url &rest args)
-  "Log an `llm-request-plz-async' call before invoking ORIGINAL.
+  "Log a transport call before invoking ORIGINAL.
 URL and ARGS are the transport request.  Response callbacks retain the log
 buffer selected by the originating ellm request."
   (if (not (and ellm-llm-log-messages
                 (buffer-live-p ellm-llm--transport-log-buffer)))
       (apply original url args)
     (let* ((log-buffer ellm-llm--transport-log-buffer)
-           (safe-url (ellm-llm--log-url url))
+           (safe-url (format "request-%d %s"
+                             (with-current-buffer log-buffer
+                               (cl-incf ellm-llm--log-request-number))
+                             (ellm-llm--log-url url)))
            (on-success (plist-get args :on-success))
            (on-error (plist-get args :on-error)))
       (ellm-llm--log
        log-buffer "-->" safe-url
-       (list :headers (ellm-llm--redact-headers (plist-get args :headers))
-             :body (plist-get args :data)))
+       (list :summary (with-current-buffer log-buffer
+                        (ellm-llm--request-summary
+                         (plist-get args :data) (plist-get args :headers)))
+             :headers (ellm-llm--redact-headers (plist-get args :headers))
+             :body (ellm-llm--log-data (plist-get args :data))))
+      (when (plist-get args :media-type)
+        (setq args (plist-put args :media-type
+                             (ellm-llm--log-stream-events
+                              (plist-get args :media-type) log-buffer safe-url))))
       (setq args
             (plist-put
              args :on-success
              (lambda (response)
-               (ellm-llm--log log-buffer "<--" safe-url response)
+               (when response
+                 (ellm-llm--log log-buffer "<--" safe-url response))
                (when on-success
                  (funcall on-success response)))))
       (setq args
@@ -1219,15 +1330,13 @@ chat token limit supplies the corresponding context size when available."
        log-buffer "ellm --> llm.el" "prompt"
        (list :provider (type-of provider)
              :model (ellm-llm--provider-current-model provider)
-             :prompt prompt)))
+             :leg (ellm-llm-driver-leg driver)
+             :interactions (length (llm-chat-prompt-interactions prompt)))))
     (cl-labels
         ((live-p ()
                  (ellm-llm--driver-live-p driver serial))
          (partial (result)
                   (when (live-p)
-                    (when log-buffer
-                      (ellm-llm--log
-                       log-buffer "llm.el --> ellm" "partial" result))
                     ;; The request timeout guards an unresponsive provider, not the
                     ;; total duration of an active stream.
                     (setq leg-usage

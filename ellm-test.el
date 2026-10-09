@@ -5026,6 +5026,156 @@ Search results may change and this may fail."
       (when (buffer-live-p log-buffer)
         (kill-buffer log-buffer)))))
 
+(ert-deftest ellm-test-llm-log-reused-across-drivers-and-renames ()
+  "New sends should reuse the conversation log, even after a rename."
+  (let (log-buffer)
+    (unwind-protect
+        (with-temp-buffer
+          (let ((first (ellm-llm--make-driver :buffer (current-buffer)))
+                (second (ellm-llm--make-driver :buffer (current-buffer))))
+            (setq log-buffer (ellm-llm--driver-log-buffer first))
+            (rename-buffer "ellm-renamed-log-source" t)
+            (should (eq log-buffer (ellm-llm--driver-log-buffer second)))
+            (kill-buffer log-buffer)
+            (setq log-buffer (ellm-llm--driver-log-buffer second))
+            (should (buffer-live-p log-buffer))
+            (should (eq log-buffer (ellm-llm--driver-log-buffer first)))))
+      (when (buffer-live-p log-buffer) (kill-buffer log-buffer)))))
+
+(ert-deftest ellm-test-llm-log-omits-duplicate-partial-usage ()
+  "Usage-bearing partials should not duplicate the final backend result."
+  (let ((ellm-llm-log-messages t)
+        log-buffer)
+    (unwind-protect
+        (with-temp-buffer
+          (ellm-mode)
+          (let ((driver (ellm-llm--make-driver
+                         :buffer (current-buffer)
+                         :provider (make-llm-openai :key "test" :chat-model "test")
+                         :prompt (make-llm-chat-prompt))))
+            (cl-letf (((symbol-function 'llm-chat-streaming)
+                       (lambda (_provider _prompt partial final &rest _)
+                         (funcall partial '(:text "answer" :input-tokens 10
+                                           :cached-tokens 5))
+                         (funcall final '(:text "answer" :input-tokens 10
+                                         :cached-tokens 5)))))
+              (ellm-backend-start driver #'ignore))
+            (setq log-buffer (ellm-llm--driver-log-buffer driver))
+            (with-current-buffer log-buffer
+              (should (= (how-many "llm.el --> ellm final"
+                                   (point-min) (point-max)) 1))
+              (should-not (string-match-p "llm.el --> ellm usage" (buffer-string)))
+              (should (string-match-p ":cached-tokens 5" (buffer-string))))))
+      (when (buffer-live-p log-buffer) (kill-buffer log-buffer)))))
+
+(ert-deftest ellm-test-llm-log-compares-wire-prefix ()
+  "Summaries should distinguish growing history from prefix changes."
+  (with-temp-buffer
+    (let* ((first '(:instructions "stable" :tools [(:name "read")]
+                   :input [(:role "user" :content "first")]))
+           (second (plist-put (copy-tree first) :input
+                              [(:role "user" :content "first")
+                               (:role "assistant" :content "answer")]))
+           summary)
+      (ellm-llm--request-summary first)
+      (setq summary (ellm-llm--request-summary (json-serialize second)))
+      (should (= (plist-get summary :shared-input-items) 1))
+      (should-not (plist-get summary :changed-fields))
+      (should (eq (plist-get summary :input-prefix) 'extended))
+      (should (= (plist-get summary :added-input-items) 1))
+      (setq summary (ellm-llm--request-summary
+                     (plist-put (copy-tree second) :tools [(:name "write")])))
+      (should (equal (plist-get summary :changed-fields) '(:tools)))
+      (should (= (plist-get summary :shared-input-items) 2))
+      (should (eq (plist-get summary :input-prefix) 'unchanged))
+      (setq summary (ellm-llm--request-summary
+                     (plist-put (copy-tree second) :input
+                                [(:role "user" :content "edited")])
+                     '(("Session-Id" . "new-session"))))
+      (should (member :session-id (plist-get summary :changed-fields)))
+      (should (equal (plist-get summary :session-id) "new-session"))
+      (should (eq (plist-get summary :input-prefix) 'changed))
+      (should (= (plist-get summary :first-changed-input-item) 0))
+      (setq summary (ellm-llm--request-summary
+                     '(:input [(:role "user" :content "edited") "added"])))
+      (should (eq (plist-get summary :input-prefix) 'extended))
+      (setq summary (ellm-llm--request-summary
+                     '(:input [(:role "user" :content "edited")])))
+      (should (eq (plist-get summary :input-prefix) 'shortened)))))
+
+(ert-deftest ellm-test-llm-log-stream-callback-retains-request-owner ()
+  "SSE logging should preserve handlers and capture raw completion usage."
+  (let ((ellm-llm-log-messages t)
+        (log-buffer (generate-new-buffer " *ellm-stream-log-test*"))
+        media captured passed-args succeeded)
+    (unwind-protect
+        (let* ((original
+                (cons 'text/event-stream
+                      (plz-event-source:text/event-stream
+                       :events `((response.completed . ,(lambda (event)
+                                                          (setq captured event)))))))
+               (ellm-llm--transport-log-buffer log-buffer))
+          (ellm-llm--request-plz-advice
+           (lambda (_url &rest args)
+             (setq passed-args args media (plist-get args :media-type)))
+           "https://example.test/responses" :data '(:input ["hello"])
+           :media-type original :on-success (lambda (_) (setq succeeded t)))
+          (should-not (eq (cdr original) (cdr media)))
+          (should-not (assq 'response.created (oref (cdr original) events)))
+          ;; Simulate delivery after the initiating dynamic binding ends.
+          (let ((ellm-llm--transport-log-buffer nil))
+            (let ((event (plz-event-source-event
+                          :data "{\"response\":{\"id\":\"resp_test\",\"usage\":{\"input_tokens_details\":{\"cached_tokens\":0}}}}")))
+              (funcall (cdr (assq 'response.completed (oref (cdr media) events)))
+                       event)
+              (should (eq event captured)))
+            (funcall (plist-get passed-args :on-success) nil))
+          (should succeeded)
+          (with-current-buffer log-buffer
+            (should (string-match-p "request-1.*response.completed" (buffer-string)))
+            (should (string-match-p ":cached_tokens 0" (buffer-string)))
+            (should (= (how-many "^\\[" (point-min) (point-max)) 2))))
+      (kill-buffer log-buffer))))
+
+(ert-deftest ellm-test-codex-log-captures-wire-request-and-auth-retry ()
+  "Codex's custom transport and asynchronous retries should share a log."
+  (let ((ellm-llm-log-messages t)
+        (log-buffer (generate-new-buffer " *ellm-codex-log-test*"))
+        requests)
+    (unwind-protect
+        (cl-letf (((symbol-function 'llm-provider-request-prelude) #'ignore)
+                  ((symbol-function 'llm-provider-headers)
+                   (lambda (_) '(("Authorization" . "Bearer secret"))))
+                  ((symbol-function 'ellm-codex--refresh-auth) #'ignore)
+                  ((symbol-function 'ellm-codex--stream-request)
+                   (lambda (_url &rest args) (push args requests) nil)))
+          (let ((ellm-llm--transport-log-buffer log-buffer))
+            (llm-chat-streaming
+             (ellm-make-codex-provider
+              :chat-model "gpt-5.6-terra"
+              :default-chat-non-standard-params
+              '((prompt_cache_key . "conversation-key")))
+             (make-llm-chat-prompt :context "stable instructions")
+             nil #'ignore #'ignore))
+          (should (= (length requests) 1))
+          (funcall (plist-get (car requests) :on-error)
+                   'llm-request-authentication-error "expired")
+          (should (= (length requests) 2))
+          (dolist (request requests)
+            (should (equal (plist-get (plist-get request :data) :prompt_cache_key)
+                           "conversation-key")))
+          (let ((events (oref (cdr (plist-get (car requests) :media-type)) events)))
+            (funcall (cdr (assq 'response.completed events))
+                     (plz-event-source-event
+                      :data "{\"response\":{\"id\":\"resp_test\",\"usage\":{\"input_tokens\":1200,\"output_tokens\":1,\"input_tokens_details\":{\"cached_tokens\":1024}}}}")))
+          (with-current-buffer log-buffer
+            (let ((log (buffer-string)))
+              (should (string-match-p "request-2.*response.completed" log))
+              (should (string-match-p ":prompt_cache_key \"conversation-key\"" log))
+              (should (string-match-p ":cached_tokens 1024" log))
+              (should-not (string-match-p "Bearer secret" log)))))
+      (kill-buffer log-buffer))))
+
 (ert-deftest ellm-test-llm-restores-claude-tool-result-as-user-message ()
   "Reconstructed Claude tool results should have a valid provider role."
   (let ((provider (make-llm-claude :key "test" :chat-model "test")))
