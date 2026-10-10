@@ -2510,18 +2510,22 @@ Search results may change and this may fail."
     (should (string-match-p "\n>-| user\n\\'" contents))))
 
 (ert-deftest ellm-test-llm-stream-events-append-cumulative-partials ()
-  "LLM cumulative assistant partials emit only their appended text."
-  (let ((driver (ellm-llm--make-driver :leg 3)))
-    (let ((event (car (ellm-llm--stream-events
-                       driver '(:text "answer" :reasoning "thinking") "state"))))
-      (should (equal (plist-get event :id) '(llm . 3)))
-      (should (eq (plist-get event :mode) 'snapshot))
-      (should (equal (plist-get event :channels)
-                     '((reasoning . "thinking") (assistant . "answer"))))
-      (should (equal (plist-get event :reasoning-state) "state")))
+  "LLM cumulative assistant partials separate text and opaque metadata."
+  (let* ((driver (ellm-llm--make-driver :leg 3))
+         (state '(:version 1 :multi-turn (:thinking "thinking")))
+         (events (ellm-llm--stream-events
+                  driver '(:text "answer" :reasoning "thinking") state))
+         (event (car events)))
+    (should (equal (plist-get event :id) '(llm . 3)))
+    (should (eq (plist-get event :mode) 'snapshot))
+    (should (equal (plist-get event :channels)
+                   '((reasoning . "thinking") (assistant . "answer"))))
+    (should-not (plist-member event :reasoning-state))
+    (should (equal (cadr events)
+                   `(:type stream :mode metadata :id (llm . 3) :state ,state)))
     (should
      (equal (ellm-llm--stream-events
-             driver '(:text "answer more" :reasoning "thinking") "state")
+             driver '(:text "answer more" :reasoning "thinking"))
             '((:type stream :mode append :id (llm . 3)
                :channel assistant :text " more" :join t))))))
 
@@ -2615,6 +2619,55 @@ Search results may change and this may fail."
         (funcall emit '(:type complete)))
       (should (string-match-p (regexp-quote "answer more") (buffer-string)))
       (should-not (string-match-p "answeranswer" (buffer-string))))))
+
+(ert-deftest ellm-test-llm-stream-events-empty-initial-partials ()
+  "Role/usage-only initial partials must not establish an empty stream baseline."
+  (let ((driver (ellm-llm--make-driver)))
+    (should-not (ellm-llm--stream-events driver nil))
+    (should-not (ellm-llm--stream-events driver '(:text "" :reasoning "")))
+    (should-not (ellm-llm-driver-stream-channels driver))
+    (should (eq (plist-get
+                 (car (ellm-llm--stream-events driver '(:text "answer"))) :mode)
+                'snapshot))))
+
+(ert-deftest ellm-test-llm-stream-events-reasoning-appends-before-assistant ()
+  "Reasoning uses the same trusted suffix path as assistant text."
+  (let ((driver (ellm-llm--make-driver))
+        (ellm-llm-trust-cumulative-partials t))
+    (ellm-llm--stream-events driver '(:reasoning "why"))
+    (cl-letf (((symbol-function 'string-prefix-p)
+               (lambda (&rest _) (error "unexpected prefix scan"))))
+      (should
+       (equal (ellm-llm--stream-events
+               driver '(:reasoning "why more" :text "answer"))
+              '((:type stream :mode append :id (llm . 0)
+                 :channel reasoning :text " more" :join t)
+                (:type stream :mode append :id (llm . 0)
+                 :channel assistant :text "answer" :join t)))))
+    ;; Further reasoning would precede existing assistant text.
+    (should (eq (plist-get
+                 (car (ellm-llm--stream-events
+                       driver '(:reasoning "why more still" :text "answer")))
+                 :mode)
+                'snapshot))))
+
+(ert-deftest ellm-test-llm-stream-events-reasoning-revisions ()
+  "Both channels share shortening, removal and prefix-validation rules."
+  (dolist (channel '(:reasoning :text))
+    (dolist (new '("short" nil))
+      (let ((driver (ellm-llm--make-driver)))
+        (ellm-llm--stream-events driver (list channel "long explanation"))
+        (should (eq (plist-get
+                     (car (ellm-llm--stream-events driver (list channel new)))
+                     :mode)
+                    'snapshot))))
+    (let ((driver (ellm-llm--make-driver))
+          (ellm-llm-trust-cumulative-partials nil))
+      (ellm-llm--stream-events driver (list channel "abc"))
+      (should (eq (plist-get
+                   (car (ellm-llm--stream-events driver (list channel "xyz")))
+                   :mode)
+                  'snapshot)))))
 
 (ert-deftest ellm-test-llm-stream-events-snapshot-revisions-and-tool-legs ()
   "Validated LLM revisions fall back to snapshots and tool legs reset baselines."
@@ -6031,6 +6084,156 @@ Search results may change and this may fail."
       (should (equal (ellm-turn-role (car (last (ellm--parse-turns))))
                      "user")))))
 
+(ert-deftest ellm-test-llm-reasoning-state-terminal-boundaries ()
+  "Complete, cancel and fail persist only the latest partial's reasoning."
+  (dolist (outcome '(completed cancelled failed))
+    (let* ((root (make-temp-file "ellm-stream-state-" t))
+           (ellm-cache-directory root)
+           (ellm-provider (make-llm-claude :key "test" :chat-model "test"))
+           (ellm-llm-auto-title nil)
+           (ellm-request-retries 0)
+           (write-state (symbol-function 'ellm-reasoning-state-write))
+           (writes 0) partial final failure saved-id finished)
+      (unwind-protect
+          (with-temp-buffer
+            (ellm-mode)
+            (insert ">-| user\nhi\n")
+            (setq-local ellm-request-finished-hook
+                        (list (lambda (_request event)
+                                (setq finished (plist-get event :state))
+                                (should saved-id))))
+            (cl-letf (((symbol-function 'llm-chat-streaming)
+                       (lambda (_provider _prompt on-partial on-final on-error
+                                          &optional _multi-output)
+                         (setq partial on-partial final on-final failure on-error)
+                         'transport))
+                      ((symbol-function 'llm-cancel-request)
+                       (lambda (_raw)
+                         ;; A synchronous cancellation callback is already stale.
+                         (funcall partial
+                                  '(:reasoning "late" :multi-turn (:thinking "late")))))
+                      ((symbol-function 'ellm-reasoning-state-write)
+                       (lambda (state)
+                         (cl-incf writes)
+                         (setq saved-id (funcall write-state state)))))
+              (ellm-send)
+              (funcall partial '(:reasoning "first" :multi-turn (:thinking "first")))
+              (funcall partial '(:reasoning "first more"
+                                :multi-turn (:thinking "first more")))
+              (should (= writes 0))
+              (should-not (string-match-p ":reasoning-state" (buffer-string)))
+              (pcase outcome
+                ('completed
+                 (funcall final '(:reasoning "first more" :text "answer"
+                                  :multi-turn (:thinking "first more"))))
+                ('cancelled (ellm-cancel t))
+                ('failed (funcall failure 'llm-request-error "test failure")))
+              (should (= writes 1))
+              (should (eq finished outcome))
+              (should-not ellm--active-request)
+              (should-not buffer-read-only)
+              (should (equal (plist-get (ellm-reasoning-state-read saved-id) :multi-turn)
+                             '(:thinking "first more")))
+              (should (string-match-p (regexp-quote saved-id) (buffer-string)))
+              (should (= (length (directory-files
+                                  (ellm--reasoning-state-directory t) nil "\\.json\\'"))
+                         1))
+              (let ((transcript (buffer-string)))
+                (funcall partial '(:reasoning "late" :multi-turn (:thinking "late")))
+                (funcall final '(:text "late" :multi-turn (:thinking "late")))
+                (should (= writes 1))
+                (should (equal transcript (buffer-string))))))
+        (delete-directory root t)))))
+
+(ert-deftest ellm-test-llm-reasoning-state-save-during-stream ()
+  "Ordinary saves flush pending state without ending or replacing the stream."
+  (let* ((root (make-temp-file "ellm-stream-save-" t))
+         (ellm-cache-directory root)
+         (ellm-provider (make-llm-claude :key "test" :chat-model "test"))
+         (ellm-llm-auto-title nil)
+         partial final saved-id)
+    (unwind-protect
+        (with-temp-buffer
+          (ellm-mode)
+          (insert ">-| user\nhi\n")
+          (setq buffer-file-name (expand-file-name "conversation.ellm" root))
+          (cl-letf (((symbol-function 'llm-chat-streaming)
+                     (lambda (_provider _prompt on-partial on-final _error
+                                        &optional _multi-output)
+                       (setq partial on-partial final on-final)
+                       nil)))
+            (ellm-send)
+            (funcall partial '(:reasoning "why" :multi-turn (:thinking "why")))
+            (save-buffer)
+            (should ellm--active-request)
+            (setq saved-id
+                  (alist-get "reasoning-state"
+                             (ellm-turn-attrs
+                              (seq-find (lambda (turn)
+                                          (equal (ellm-turn-role turn) "reasoning"))
+                                        (ellm--parse-turns)))
+                             nil nil #'equal))
+            (should (equal (plist-get (ellm-reasoning-state-read saved-id) :multi-turn)
+                           '(:thinking "why")))
+            (should (with-temp-buffer
+                      (insert-file-contents (expand-file-name "conversation.ellm" root))
+                      (string-match-p (regexp-quote saved-id) (buffer-string))))
+            ;; A later snapshot must retain the checkpointed header while revising
+            ;; only the body that actually changed.
+            (funcall partial '(:reasoning "why more" :text "answer"
+                              :multi-turn (:thinking "why more")))
+            (funcall final '(:reasoning "why more" :text "answer"
+                            :multi-turn (:thinking "why more")))
+            (let* ((reasoning (seq-find
+                               (lambda (turn) (equal (ellm-turn-role turn) "reasoning"))
+                               (ellm--parse-turns)))
+                   (final-id (alist-get "reasoning-state" (ellm-turn-attrs reasoning)
+                                        nil nil #'equal)))
+              (should-not (equal saved-id final-id))
+              (should (equal (ellm-turn-content reasoning) "why more"))
+              (should (equal (plist-get (ellm-reasoning-state-read final-id) :multi-turn)
+                             '(:thinking "why more"))))))
+      (delete-directory root t))))
+
+(ert-deftest ellm-test-llm-reasoning-state-retry-clears-old-metadata ()
+  "A retry checkpoints the old attempt, but must not reuse its reasoning state."
+  (let* ((root (make-temp-file "ellm-stream-retry-" t))
+         (ellm-cache-directory root)
+         (ellm-provider (make-llm-claude :key "test" :chat-model "test"))
+         (ellm-llm-auto-title nil)
+         (ellm-request-retries 1)
+         (ellm-request-retry-delay 0)
+         (write-state (symbol-function 'ellm-reasoning-state-write))
+         (writes 0) (calls 0))
+    (unwind-protect
+        (with-temp-buffer
+          (ellm-mode)
+          (insert ">-| user\nhi\n")
+          (cl-letf (((symbol-function 'ellm-reasoning-state-write)
+                     (lambda (state) (cl-incf writes) (funcall write-state state)))
+                    ((symbol-function 'llm-chat-streaming)
+                     (lambda (_provider _prompt partial final failure
+                                        &optional _multi-output)
+                       (if (= (cl-incf calls) 1)
+                           (progn
+                             (funcall partial '(:reasoning "aborted"
+                                               :multi-turn (:thinking "aborted")))
+                             (should (= writes 0))
+                             (funcall failure 'llm-request-timeout "temporary")
+                             (should (= writes 1)))
+                         (should (= writes 1))
+                         (funcall final '(:text "after retry")))
+                       nil)))
+            (ellm-send)
+            (should (ellm-test--wait-for (lambda () (not ellm--active-request))))
+            (should (= calls 2))
+            (should (= writes 1))
+            (should (string-match-p "after retry" (buffer-string)))
+            (should-not (string-match-p ":reasoning-state" (buffer-string)))
+            (should-not (seq-find (lambda (turn) (equal (ellm-turn-role turn) "reasoning"))
+                                  (ellm--parse-turns)))))
+      (delete-directory root t))))
+
 (ert-deftest ellm-test-cancelled-llm-request-ignores-late-callbacks ()
   "Cancellation should make every callback from the old request inert."
   (let ((ellm-provider (make-llm-claude :key "test" :chat-model "test"))
@@ -6289,6 +6492,167 @@ Search results may change and this may fail."
                                 (buffer-string)))
         (should-not (ellm-request-open-stream-start request))
         (should-not (ellm-request-open-stream-end request))))))
+
+(ert-deftest ellm-test-core-reasoning-state-updates-only-header ()
+  "Changing a snapshot's state ID must not replace its unchanged body."
+  (with-temp-buffer
+    (ellm-mode)
+    (let* ((request (ellm--make-request :buffer (current-buffer)))
+           (body (concat "BODY " (make-string 10000 ?x)))
+           (event `(:type stream :mode snapshot :id response
+                    :channels ((reasoning . ,body) (assistant . "answer"))
+                    :reasoning-state "rs-first"))
+           (deleted 0))
+      (ellm--request-render-snapshot request event)
+      (goto-char (point-min))
+      (search-forward "BODY")
+      (let* ((marker (copy-marker (point)))
+             (overlay (make-overlay (1- marker) marker)))
+        (put-text-property (1- marker) marker 'ellm-test-property t)
+        (add-hook 'after-change-functions
+                  (lambda (_beg _end old-len) (cl-incf deleted old-len)) nil t)
+        (ellm--request-render-snapshot
+         request (plist-put (copy-sequence event) :reasoning-state "rs-second"))
+        (should (< deleted 100))
+        (should (get-text-property (1- marker) 'ellm-test-property))
+        (should (= (overlay-end overlay) marker))
+        (should (string-match-p ":reasoning-state rs-second" (buffer-string)))
+        (should-not (string-match-p "rs-first" (buffer-string)))
+        (delete-overlay overlay)
+        (set-marker marker nil))
+      (ellm--request-release-streams request))))
+
+(ert-deftest ellm-test-core-reasoning-append-snapshot-preserves-prefix ()
+  "Append-created headers agree with snapshots, preserving unchanged text."
+  (with-temp-buffer
+    (ellm-mode)
+    (let ((request (ellm--make-request :buffer (current-buffer)))
+          (driver (ellm-llm--make-driver))
+          (ellm-llm-trust-cumulative-partials nil))
+      (dolist (result '((:reasoning "why")
+                        (:reasoning "why" :text "answer")
+                        (:reasoning "why" :text "answers")))
+        (dolist (event (ellm-llm--stream-events driver result))
+          (ellm--request-reduce-event request event)))
+      (goto-char (point-min))
+      (search-forward "answer")
+      (let ((marker (copy-marker (point))))
+        (put-text-property (- marker 6) marker 'ellm-test-property t)
+        (dolist (event (ellm-llm--stream-events
+                        driver '(:reasoning "why" :text "answerZ")))
+          (ellm--request-reduce-event request event))
+        (should (get-text-property (1- marker) 'ellm-test-property))
+        (should (string-match-p "answerZ" (buffer-string)))
+        (should-not (string-match-p ":message-id" (buffer-string)))
+        (set-marker marker nil))
+      (ellm--request-release-streams request))))
+
+(ert-deftest ellm-test-core-reasoning-placeholder-joins-visible-text ()
+  "State-only reasoning placeholders do not add a blank line before text."
+  (with-temp-buffer
+    (ellm-mode)
+    (let ((request (ellm--make-request :buffer (current-buffer)))
+          (driver (ellm-llm--make-driver))
+          (state '(:version 1 :thinking "opaque")))
+      (dolist (event (ellm-llm--stream-events driver nil state))
+        (ellm--request-reduce-event request event))
+      (dolist (event (ellm-llm--stream-events driver '(:reasoning "think")))
+        (ellm--request-reduce-event request event))
+      (should (equal (buffer-string) ">>-| reasoning\nthink"))
+      (ellm--request-release-streams request))))
+
+(ert-deftest ellm-test-core-reasoning-state-invalid-summary-fallback ()
+  "Unserializable state falls back to the summary without aborting tool legs."
+  (let ((ellm-provider (make-ellm-test-pending-provider))
+        (warnings 0))
+    (with-temp-buffer
+      (ellm-mode)
+      (insert ">-| user\nhi\n")
+      (ellm-send)
+      (let* ((request ellm--active-request)
+             (emit (ellm-test-pending-request-emit (ellm-request-backend request))))
+        (funcall emit '(:type stream :mode snapshot :id first
+                        :channels ((reasoning . "visible summary"))
+                        :reasoning-state "rs-old"))
+        (funcall emit '(:type stream :mode metadata :id first
+                        :state (:version 1 :opaque unsupported-symbol)))
+        (cl-letf (((symbol-function 'lwarn)
+                   (lambda (&rest _) (cl-incf warnings))))
+          (funcall emit '(:type continue)))
+        (should (= warnings 1))
+        (should (eq ellm--active-request request))
+        (should-not (ellm--request-terminal-p request))
+        (should (string-match-p "visible summary" (buffer-string)))
+        (should-not (string-match-p ":reasoning-state" (buffer-string)))
+        (should-not (ellm-stream-region-reasoning-state
+                     (gethash 'first (ellm-request-streams request))))
+        (ellm-cancel t)))))
+
+(ert-deftest ellm-test-core-reasoning-state-flushed-per-leg ()
+  "Continue persists the completed leg before a new leg begins."
+  (let ((ellm-provider (make-ellm-test-pending-provider))
+        (writes nil))
+    (with-temp-buffer
+      (ellm-mode)
+      (insert ">-| user\nhi\n")
+      (ellm-send)
+      (let* ((request ellm--active-request)
+             (backend (ellm-request-backend request))
+             (emit (ellm-test-pending-request-emit backend)))
+        (cl-letf (((symbol-function 'ellm-reasoning-state-write)
+                   (lambda (state)
+                     (push state writes)
+                     (format "rs-leg-%d" (length writes)))))
+          (funcall emit '(:type stream :mode snapshot :id first
+                          :channels ((reasoning . "first summary"))))
+          (funcall emit '(:type stream :mode metadata :id first :state (:version 1)))
+          (should-not writes)
+          (funcall emit '(:type continue))
+          (should (equal writes '((:version 1))))
+          (setq emit (ellm-test-pending-request-emit backend))
+          (funcall emit '(:type stream :mode snapshot :id second
+                          :channels ((reasoning . "second summary"))))
+          (funcall emit '(:type stream :mode metadata :id second :state (:version 2)))
+          (funcall emit '(:type complete))
+          (should (equal writes '((:version 2) (:version 1))))
+          (should (string-match-p ":reasoning-state rs-leg-1" (buffer-string)))
+          (should (string-match-p ":reasoning-state rs-leg-2" (buffer-string))))))))
+
+(ert-deftest ellm-test-core-reasoning-stream-does-not-rebuild-per-chunk ()
+  "Long reasoning appends should neither persist nor rebuild on every chunk."
+  (let ((ellm-provider (make-ellm-test-pending-provider))
+        (driver (ellm-llm--make-driver))
+        (rebuild (symbol-function 'ellm--rebuild-turn-body-cache))
+        (rebuilds 0) (writes 0) (text ""))
+    (with-temp-buffer
+      (ellm-mode)
+      (ellm--insert-turn "user")
+      (insert "hi\n")
+      (ellm-send)
+      (let* ((request ellm--active-request)
+             (emit (ellm-test-pending-request-emit (ellm-request-backend request))))
+        (cl-letf (((symbol-function 'ellm--rebuild-turn-body-cache)
+                   (lambda () (cl-incf rebuilds) (funcall rebuild)))
+                  ((symbol-function 'ellm-reasoning-state-write)
+                   (lambda (_state) (cl-incf writes) "rs-final")))
+          (dotimes (_ 200)
+            (setq text (concat text "reasoning words\n"))
+            (dolist (event (ellm-llm--stream-events
+                            driver (list :reasoning text)
+                            (list :version 1 :thinking text)))
+              (funcall emit event)))
+          (should (= writes 0))
+          (should (< rebuilds 5))
+          ;; Introducing assistant output folds the completed reasoning turn.
+          (dolist (event (ellm-llm--stream-events
+                          driver (list :reasoning text :text "answer")))
+            (funcall emit event))
+          (goto-char (point-min))
+          (search-forward "reasoning words")
+          (should (invisible-p (1- (point))))
+          (funcall emit '(:type complete))
+          (should (= writes 1))
+          (should (string-match-p ":reasoning-state rs-final" (buffer-string))))))))
 
 (ert-deftest ellm-test-core-snapshot-append-join-keeps-open-turn ()
   "An append joined to a snapshot extends its final turn without a scan."

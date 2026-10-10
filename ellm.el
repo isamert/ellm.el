@@ -3908,9 +3908,14 @@ GLOBAL has the same meaning as in `ellm--reasoning-state-root'."
        (expand-file-name (concat id ".json")
                          (ellm--reasoning-state-directory global))))
 
+(define-error 'ellm-invalid-reasoning-state "Unsupported reasoning state")
+
 (defun ellm--reasoning-state-json (state)
-  "Return canonical JSON text for reasoning STATE."
-  (json-serialize state :null-object nil :false-object :json-false))
+  "Return canonical JSON text for reasoning STATE.
+Signal `ellm-invalid-reasoning-state' when STATE cannot be serialized."
+  (condition-case err
+      (json-serialize state :null-object nil :false-object :json-false)
+    (error (signal 'ellm-invalid-reasoning-state err))))
 
 (defun ellm--reasoning-state-id (json)
   "Return the content-addressed identifier for reasoning state JSON."
@@ -4140,6 +4145,7 @@ draft.  Frontmatter and default system prompts alone do not create sessions."
   "Mark this transcript dirty and coalesce routine saves.
 Wait five seconds from the first checkpoint, then save once Emacs has been
 idle for three seconds.  Further checkpoints do not restart either wait."
+  (ellm--reasoning-state-before-write)
   (when (and ellm-persistence-enabled
              (not ellm--persistence-ephemeral-p)
              (not ellm--persistence-saving-p))
@@ -4177,6 +4183,7 @@ ROOT and SESSION-ID have the same meanings as in `ellm--persistence-prepare'."
     (condition-case err
         (progn
           (ellm--persistence-prepare force root session-id)
+          (ellm--reasoning-state-before-write)
           (ellm-attachment-localize)
           (ellm--localize-reasoning-state-files)
           (ellm--persist-tool-output-buffers)
@@ -5165,9 +5172,9 @@ pairs, e.g. `:ts 2025-01-01T00:00:00 :id call_1'."
 
 (defun ellm--set-turn-header-attrs (position attrs)
   "Set keyword ATTRS on the turn delimiter at POSITION.
-ATTRS is an alist of string keys and single-token string values.  Existing
-occurrences are replaced, while positional and pipe-delimited title text is
-preserved."
+ATTRS is an alist of string keys and single-token string values; a nil value
+removes the key.  Existing occurrences are replaced, while positional and
+pipe-delimited title text is preserved."
   (save-excursion
     (goto-char position)
     (beginning-of-line)
@@ -5183,7 +5190,8 @@ preserved."
                    (format "[ \t]+:%s\\(?:[ \t]+[^ \t\n]+\\)?"
                            (regexp-quote key))
                    "" line t t))
-            (setq line (concat line " :" key " " value))))
+            (when value
+              (setq line (concat line " :" key " " value)))))
         (let ((inhibit-read-only t))
           (delete-region beg end)
           (insert line))
@@ -5348,7 +5356,13 @@ keep protocol-specific mutable state there, but lifecycle state lives here."
          :documentation "Marker at the beginning of the rendered stream.")
   (end nil
        :type marker
-       :documentation "Insertion-type marker at the end of the rendered stream."))
+       :documentation "Insertion-type marker at the end of the rendered stream.")
+  (reasoning-state nil
+                   :type t
+                   :documentation "Latest opaque reasoning state awaiting persistence.")
+  (reasoning-state-id nil
+                      :type (or null string)
+                      :documentation "Persisted reasoning state referenced by this stream."))
 
 (defun ellm--yolo-p (frontmatter)
   "Return non-nil when FRONTMATTER enables unconditional tool approval.
@@ -5467,7 +5481,12 @@ allow-for-session, and deny choices through the core permission UI."
   "Event types accepted by the core request reducer.
 
 `stream' uses `:mode' `append' with `:channel', `:text', and optional `:id',
-or `snapshot' with an ordered `:channels' alist and stable `:id'.  `usage'
+or `snapshot' with an ordered `:channels' alist and stable `:id'.
+Snapshots may include a persisted `:reasoning-state' ID or `:reasoning-present'
+to retain a reasoning turn without visible text; `:reset' discards metadata
+from a previous attempt using the same stream ID.  `metadata' queues opaque
+reasoning `:state' for the stream `:id' without editing its body; core persists
+it at lifecycle/save boundaries.  `usage'
 accepts normalized token, context, and cost fields.  Tool events may carry
 `:observations', a list of normalized `tool-call' or `tool-finished' plists.
 `tool-observation' is lifecycle-only and is not rendered; tool and `extension'
@@ -5996,10 +6015,82 @@ that the turn body is empty."
           (puthash id region streams)
           region))))
 
-(defun ellm--request-snapshot-string (event)
-  "Return serialized continuation turns for snapshot EVENT."
+(defun ellm--request-set-reasoning-state-id (request id state-id)
+  "Attach STATE-ID to REQUEST's reasoning header in stream ID.
+Only the header is edited; the streamed body and its text properties survive."
+  (let* ((region (ellm--request-stream-region request id))
+         (start (ellm-stream-region-start region))
+         (end (ellm-stream-region-end region)))
+    (unless (equal state-id (ellm-stream-region-reasoning-state-id region))
+      (save-excursion
+        (goto-char start)
+        (if (re-search-forward
+             (concat "^" (ellm--turn-header-prefix-regexp ellm-turn-header-2)
+                     "reasoning\\b")
+             end t)
+            (ellm--set-turn-header-attrs
+             (match-beginning 0) `(("reasoning-state" . ,state-id)))
+          ;; Some providers return replay state without a visible summary.
+          (when state-id
+            (goto-char start)
+            (insert (ellm--get-turn "reasoning" :continuation t
+                                    :reasoning-state state-id)
+                    "\n\n")
+            (ellm--request-clear-open-stream-turn request)
+            (if (= (point) (point-max))
+                (let ((key (cons "reasoning" id)))
+                  (setf (ellm-request-last-stream-key request) key)
+                  (ellm--request-set-open-stream-turn
+                   request "reasoning" key start end t)
+                  (ellm--mark-pending-fold start "reasoning" 2))
+              (when ellm-fold-reasoning-blocks
+                (ellm--fold-subtree-at start))))))
+      (setf (ellm-stream-region-reasoning-state-id region) state-id))))
+
+(defun ellm--request-flush-reasoning-state (request &optional noerror)
+  "Persist REQUEST's pending reasoning metadata and update its headers.
+When NOERROR is non-nil, report errors without interrupting terminal cleanup."
+  (save-restriction
+    (widen)
+    (when-let* ((streams (ellm-request-streams request)))
+      (maphash
+       (lambda (id region)
+         (when-let* ((state (ellm-stream-region-reasoning-state region)))
+           (condition-case err
+               (progn
+                 (ellm--request-set-reasoning-state-id
+                  request id (ellm-reasoning-state-write state))
+                 (setf (ellm-stream-region-reasoning-state region) nil))
+             (ellm-invalid-reasoning-state
+              ;; Keep the visible summary usable when a provider emits opaque
+              ;; objects that cannot be stored as JSON.  Do not abort tool legs.
+              (ellm--request-set-reasoning-state-id request id nil)
+              (setf (ellm-stream-region-reasoning-state region) nil)
+              (lwarn 'ellm :warning "%s; using reasoning summary instead"
+                     (error-message-string err)))
+             (error
+              (if noerror
+                  (lwarn 'ellm :warning "Failed to persist reasoning state: %s"
+                         (error-message-string err))
+                (signal (car err) (cdr err)))))))
+       streams))))
+
+(defun ellm--reasoning-state-before-write ()
+  "Persist active reasoning metadata before writing a transcript.
+Return nil so normal `write-contents-functions' processing continues."
+  (when ellm--active-request
+    (ellm--preserve-user-position
+      (ellm--request-flush-reasoning-state ellm--active-request)))
+  nil)
+
+(defun ellm--request-snapshot-string (event &optional reasoning-state-id)
+  "Return serialized continuation turns for snapshot EVENT.
+REASONING-STATE-ID is the already rendered ID, not newly arriving metadata."
   (let ((channels (plist-get event :channels))
-        (reasoning-state (plist-get event :reasoning-state)))
+        (reasoning-state reasoning-state-id)
+        (reasoning-present (or reasoning-state-id
+                               (plist-get event :reasoning-state)
+                               (plist-get event :reasoning-present))))
     (mapconcat
      (lambda (entry)
        (let* ((channel (car entry))
@@ -6007,7 +6098,7 @@ that the turn body is empty."
               (content (cdr entry)))
          (when (or (and (stringp content)
                         (not (string-empty-p content)))
-                   (and (equal role "reasoning") reasoning-state))
+                   (and (equal role "reasoning") reasoning-present))
            (concat
             (if (and (equal role "reasoning") reasoning-state)
                 (ellm--get-turn "reasoning" :continuation t
@@ -6026,10 +6117,15 @@ that the turn body is empty."
          (region (ellm--request-stream-region request id))
          (start (ellm-stream-region-start region))
          (end (ellm-stream-region-end region))
-         (new-text (ellm--request-snapshot-string event))
+         (new-text (ellm--request-snapshot-string
+                    event (unless (plist-get event :reset)
+                            (ellm-stream-region-reasoning-state-id region))))
          (current-text (buffer-substring-no-properties start end))
          (prefix-length
           (length (fill-common-string-prefix current-text new-text))))
+    (when (plist-get event :reset)
+      (setf (ellm-stream-region-reasoning-state region) nil
+            (ellm-stream-region-reasoning-state-id region) nil))
     (goto-char (+ start prefix-length))
     (delete-region (point) end)
     (insert (substring new-text prefix-length))
@@ -6058,7 +6154,10 @@ that the turn body is empty."
                     (let ((content (cdr entry)))
                       (or (and (stringp content)
                                (not (string-empty-p content)))
-                          (and (eq (car entry) 'reasoning) reasoning-state))))
+                          (and (eq (car entry) 'reasoning)
+                               (or reasoning-state
+                                   (ellm-stream-region-reasoning-state-id region)
+                                   (plist-get event :reasoning-present))))))
                   (reverse (plist-get event :channels)))))
       (let ((role (if (symbolp (car entry))
                       (symbol-name (car entry))
@@ -6075,7 +6174,11 @@ that the turn body is empty."
         (when last-header
           (ellm--request-set-open-stream-turn
            request role (ellm-request-last-stream-key request)
-           (+ start last-header) end))))))
+           (+ start last-header) end)
+          (when (equal role "reasoning")
+            (ellm--mark-pending-fold (+ start last-header) role 2)))))
+    (when reasoning-state
+      (ellm--request-set-reasoning-state-id request id reasoning-state))))
 
 (defun ellm--request-find-final-stream-turn (request)
   "Cache REQUEST's final turn when append state was not initialized.
@@ -6137,7 +6240,13 @@ normal requests initialize the cache when their assistant turn is inserted."
                        (not (and (equal role "assistant")
                                  (equal previous-role "user"))))
               (list :continuation t))
-            (when message-id (list :message-id message-id))))
+            ;; An ID already registered by a snapshot names a cumulative
+            ;; region, not a transcript message.  Keep its headers identical
+            ;; across snapshot and append rendering.
+            (when (and message-id
+                       (not (and (ellm-request-streams request)
+                                 (gethash message-id (ellm-request-streams request)))))
+              (list :message-id message-id))))
           (ellm--request-set-open-stream-turn request role key start (point))))
       (setf (ellm-request-last-stream-key request) key
             (ellm-request-open-stream-key request) key
@@ -6206,6 +6315,7 @@ MESSAGE-TEXT is reported after cleanup when non-nil."
       (with-current-buffer buffer
         (when (eq ellm--active-request request)
           (ellm--preserve-user-position
+            (ellm--request-flush-reasoning-state request t)
             (ellm--request-record-usage request)
             (ellm--cancel-pending-user-prompt)
             ;; The last streamed fence may still be open.  Do not leave its
@@ -6227,6 +6337,7 @@ MESSAGE-TEXT is reported after cleanup when non-nil."
 
 (defun ellm--request-schedule-retry (request message-text)
   "Put REQUEST in retry wait after MESSAGE-TEXT."
+  (ellm--request-flush-reasoning-state request)
   (cl-incf (ellm-request-retries request))
   ;; Invalidate the failed attempt immediately; it may still have queued
   ;; transport callbacks while the retry timer is waiting.
@@ -6268,18 +6379,26 @@ MESSAGE-TEXT is reported after cleanup when non-nil."
   "Return non-nil when handling EVENT can edit the conversation buffer.
 Lifecycle-only events, including `tool-observation', must not modify the
 conversation buffer, including from their observer hooks."
-  (not (memq (plist-get event :type)
-             '(activity usage tool-observation operation continue))))
+  (not (or (memq (plist-get event :type)
+                 '(activity usage tool-observation operation continue))
+           (and (eq (plist-get event :type) 'stream)
+                (eq (plist-get event :mode) 'metadata)))))
 
 (defun ellm--request-reduce-event (request event)
   "Reduce current backend EVENT for REQUEST."
   (pcase (plist-get event :type)
     ('activity nil)
     ('stream
-     (setf (ellm-request-state request) 'streaming)
+     (unless (eq (plist-get event :mode) 'metadata)
+       (setf (ellm-request-state request) 'streaming))
      (pcase (plist-get event :mode)
        ('snapshot (ellm--request-render-snapshot request event))
        ('append (ellm--request-render-chunk request event))
+       ('metadata
+        (setf (ellm-stream-region-reasoning-state
+               (ellm--request-stream-region
+                request (or (plist-get event :id) (ellm-request-attempt request))))
+              (plist-get event :state)))
        (_ (error "ellm: Invalid stream event mode: %S"
                  (plist-get event :mode)))))
     ('usage
@@ -10723,7 +10842,8 @@ its subagents, are killed."
   (setq-local font-lock-extend-after-change-region-function
               #'ellm--extend-after-change-region)
   (setq-local header-line-format '((:eval (ellm--header-line-status))))
-  (add-hook 'write-contents-functions #'ellm-attachment-before-write nil t)
+  (add-hook 'write-contents-functions #'ellm--reasoning-state-before-write nil t)
+  (add-hook 'write-contents-functions #'ellm-attachment-before-write t t)
   (add-hook 'before-change-functions #'ellm--before-change-function nil t)
   (add-hook 'after-change-functions #'ellm--after-change-function nil t)
   (add-hook 'kill-buffer-hook #'ellm--kill-composer nil t)

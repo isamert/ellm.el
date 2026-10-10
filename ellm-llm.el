@@ -67,12 +67,12 @@ only while debugging.  Log buffers grow without bound."
 
 (defcustom ellm-llm-trust-cumulative-partials t
   "Whether to trust `llm.el' multi-output partials to extend monotonically.
-When non-nil, emit the suffix after the previous assistant length without
+When non-nil, emit the suffix after the previous channel length without
 comparing the old and new strings.  This avoids quadratic work while streaming
 long responses.  `llm-chat-streaming' documents multi-output partials as
 cumulative snapshots, so this is the normal and fastest mode.
 
-Set this to nil to validate every assistant partial with `string-prefix-p'.
+Set this to nil to validate every channel partial with `string-prefix-p'.
 A non-monotonic provider then falls back to snapshot rendering, at the cost of
 work proportional to the accumulated response on every partial."
   :type 'boolean
@@ -124,9 +124,6 @@ inherit media inputs from the conversation request."
   (stream-channels nil
                    :type list
                    :documentation "Most recent cumulative partial channels for this leg.")
-  (stream-reasoning-state-id nil
-                             :type (or null string)
-                             :documentation "Reasoning state ID rendered with the current stream snapshot.")
   (title-enabled nil
                  :type boolean
                  :documentation "Whether this request may generate a title.")
@@ -425,12 +422,9 @@ In this case there is no real session, so we just close the in-flight requests."
   ((provider llm-standard-chat-provider) result)
   "Return durable generic `llm.el' reasoning metadata from RESULT."
   (when-let* ((multi-turn (plist-get result :multi-turn)))
-    (let ((state
-           (list :version 1
-                 :provider (symbol-name (type-of provider))
-                 :multi-turn multi-turn)))
-      (and (ignore-errors (ellm--reasoning-state-json state))
-           state))))
+    (list :version 1
+          :provider (symbol-name (type-of provider))
+          :multi-turn multi-turn)))
 
 (cl-defmethod ellm-provider-restore-reasoning
   ((provider llm-standard-chat-provider) prompt summary state)
@@ -1236,61 +1230,68 @@ Return (TOOL-USES TOOL-RESULTS IDS), or nil when no call was recoverable."
 
 (defun ellm-llm--reset-stream (driver)
   "Forget cumulative partial state for DRIVER's next request leg."
-  (setf (ellm-llm-driver-stream-channels driver) nil
-        (ellm-llm-driver-stream-reasoning-state-id driver) nil))
+  (setf (ellm-llm-driver-stream-channels driver) nil))
 
-(defun ellm-llm--stream-events (driver result reasoning-state-id)
+(defun ellm-llm--channel-revised-p (old new)
+  "Return non-nil when cumulative channel NEW cannot append to OLD."
+  (or (and new (not (stringp new)))
+      (and (stringp old)
+           (or (not (stringp new))
+               (if ellm-llm-trust-cumulative-partials
+                   (< (length new) (length old))
+                 (not (string-prefix-p old new)))))))
+
+(defun ellm-llm--stream-events (driver result &optional state)
   "Return normalized stream events for cumulative llm.el RESULT.
-
-llm.el's partial results are snapshots.  Emit only their newly appended text
-when the assistant channel extends its previous value.  Reasoning changes
-remain snapshots because its turn precedes the assistant turn in the core's
-ordered snapshot rendering.  A first partial, a shorter value, or changed
-durable reasoning state emits a snapshot.  When
-`ellm-llm-trust-cumulative-partials' is nil, revised assistant text also emits
-a snapshot after prefix validation."
+Append monotonic reasoning and assistant suffixes using the same rules.
+Reasoning changes after assistant text exists require an ordered snapshot,
+as do channel revisions or removals.  STATE is opaque reasoning metadata;
+it is queued separately and persisted by core at lifecycle/save boundaries."
   (let* ((channels `((reasoning . ,(plist-get result :reasoning))
                      (assistant . ,(plist-get result :text))))
          (previous (ellm-llm-driver-stream-channels driver))
-         (previous-state (ellm-llm-driver-stream-reasoning-state-id driver))
          (id (cons 'llm (ellm-llm-driver-leg driver)))
          (snapshot-p
           (or (null previous)
-              (not (equal reasoning-state-id previous-state))
-              ;; An append event can add only at buffer end, while reasoning
-              ;; belongs before the assistant turn in a snapshot.
-              (not (equal (alist-get 'reasoning channels)
-                          (alist-get 'reasoning previous)))
-              (let ((old (alist-get 'assistant previous))
-                    (new (alist-get 'assistant channels)))
-                (or (and new (not (stringp new)))
-                    (and (stringp old)
-                         (or (not (stringp new))
-                             (if ellm-llm-trust-cumulative-partials
-                                 (< (length new) (length old))
-                               (not (string-prefix-p old new))))))))))
-    (setf (ellm-llm-driver-stream-channels driver) channels
-          (ellm-llm-driver-stream-reasoning-state-id driver) reasoning-state-id)
-    (if snapshot-p
-        (list `(:type stream :mode snapshot :id ,id
-                :channels ,channels :reasoning-state ,reasoning-state-id))
-      (delq nil
-            (mapcar
-             (lambda (entry)
-               (let* ((channel (car entry))
-                      (new (cdr entry))
-                      (old (alist-get channel previous))
-                      (delta (and (stringp new)
-                                  (substring new (if (stringp old)
-                                                     (length old) 0)))))
-                 (and (stringp delta) (not (string-empty-p delta))
-                      `(:type stream :mode append :id ,id
-                        :channel ,channel :text ,delta
-                        ,@(when (and (eq channel 'assistant)
-                                     (stringp old)
-                                     (not (string-suffix-p "\n" old)))
-                            '(:join t))))))
-             channels)))))
+              (seq-some
+               (lambda (entry)
+                 (ellm-llm--channel-revised-p
+                  (alist-get (car entry) previous) (cdr entry)))
+               channels)
+              ;; Once assistant text exists, reasoning is no longer at EOF.
+              (and (not (string-empty-p
+                         (or (alist-get 'assistant previous) "")))
+                   (not (equal (alist-get 'reasoning channels)
+                               (alist-get 'reasoning previous)))))))
+    ;; Empty initial partials have no rendered turn to append to yet.
+    (when (or previous state
+              (seq-some (lambda (entry)
+                          (and (stringp (cdr entry))
+                               (not (string-empty-p (cdr entry)))))
+                        channels))
+      (setf (ellm-llm-driver-stream-channels driver) channels)
+      (append
+       (if snapshot-p
+           (list `(:type stream :mode snapshot :id ,id :channels ,channels
+                         ,@(when (null previous) '(:reset t))
+                         ,@(when state '(:reasoning-present t))))
+         (delq nil
+               (mapcar
+                (lambda (entry)
+                  (let* ((channel (car entry))
+                         (new (cdr entry))
+                         (old (alist-get channel previous))
+                         (delta (and (stringp new)
+                                     (substring new (if (stringp old)
+                                                        (length old) 0)))))
+                    (and (stringp delta) (not (string-empty-p delta))
+                         `(:type stream :mode append :id ,id
+                                 :channel ,channel :text ,delta
+                                 ,@(unless (string-suffix-p "\n" (or old ""))
+                                     '(:join t))))))
+                channels)))
+       (when state
+         (list `(:type stream :mode metadata :id ,id :state ,state)))))))
 
 (defun ellm-llm--usage-event (provider usage)
   "Return a normalized usage event for PROVIDER from llm.el USAGE.
@@ -1321,7 +1322,6 @@ chat token limit supplies the corresponding context size when available."
          (previous-interaction
           (car (last (llm-chat-prompt-interactions prompt))))
          (log-buffer (ellm-llm--driver-log-buffer driver))
-         reasoning-state-id
          leg-usage)
     (when log-buffer
       (ellm-llm--log
@@ -1339,12 +1339,9 @@ chat token limit supplies the corresponding context size when available."
                     ;; total duration of an active stream.
                     (setq leg-usage
                           (ellm-llm--merge-leg-usage leg-usage result))
-                    (when-let* ((state
-                                 (ellm-provider-reasoning-state provider result)))
-                      (setq reasoning-state-id
-                            (ellm-reasoning-state-write state)))
                     (dolist (event (ellm-llm--stream-events
-                                    driver result reasoning-state-id))
+                                    driver result
+                                    (ellm-provider-reasoning-state provider result)))
                       (ellm-llm--emit driver event))))
          (continue-with-tools (tool-uses tool-results call-ids)
                               (when (live-p)
