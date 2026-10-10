@@ -855,7 +855,7 @@ Hidden files are included, while common dependency and repository directories
 are excluded."
   (ellm-tools--validate-pattern pattern "pattern")
   (let* ((default-directory (ellm-tools--default-directory))
-         (search-path (ellm-tools--search-path path))
+         (search-path (ellm-tools--search-path path t))
          (limit (ellm-tools--normalized-limit
                  max-results ellm-tools-search-result-limit))
          (command (ellm-tools--glob-command pattern search-path)))
@@ -1190,11 +1190,28 @@ Use this to read a specific web page, document, or text resource."
             (ellm-tools--blank-p pattern))
     (ellm-tools--error "%s must be a non-empty string" name)))
 
-(defun ellm-tools--search-path (path)
-  "Return PATH or `.' for file search tools."
-  (if (and (stringp path) (not (ellm-tools--blank-p path)))
-      path
-    "."))
+(defun ellm-tools--search-path (path &optional directory-only)
+  "Validate search PATH, defaulting to `.' only when omitted.
+When DIRECTORY-ONLY is non-nil, require a directory rather than a file."
+  (let ((path (if (null path) "." path)))
+    (unless (and (stringp path) (not (ellm-tools--blank-p path)))
+      (ellm-tools--error "path must be a non-empty string; omit it to search the working directory"))
+    (when (equal path "-")
+      (ellm-tools--error "path \"-\" means stdin, which search tools do not support; use \"./-\" for a file named -"))
+    (when (string-match-p "\0" path)
+      (ellm-tools--error "path must not contain NUL characters"))
+    (when (file-remote-p path)
+      (ellm-tools--error "path must be local; remote paths are not supported by search tools"))
+    (unless (file-exists-p path)
+      (ellm-tools--error "path %S does not exist (relative paths are resolved from %S)"
+                         path default-directory))
+    (unless (or (file-directory-p path)
+                (and (not directory-only) (file-regular-p path)))
+      (ellm-tools--error "path %S must be %s; special files such as devices and FIFOs are not supported"
+                         path (if directory-only "a directory" "a regular file or directory")))
+    (unless (file-readable-p path)
+      (ellm-tools--error "path %S is not readable" path))
+    path))
 
 (defun ellm-tools--normalized-limit (limit default)
   "Return LIMIT normalized against DEFAULT."
@@ -1815,7 +1832,7 @@ default fd command; configured commands receive the original PATTERN."
           (if (ellm-tools--command-template-p options)
               (append glob-options
                       (ellm-tools--expand-command-template options pattern path))
-            (append options glob-options (list "--" pattern path))))))
+            (append glob-options options (list "--" pattern path))))))
 
 ;;;;;; External command handling
 

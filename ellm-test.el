@@ -1184,7 +1184,50 @@
         (ellm-tools-grep-options '("-R" "-n"))
         (ellm-tools-grep-glob-options '("--include=%s")))
     (should (equal (ellm-tools--grep-command "needle" "." "*.el")
-                   '("grep" "-R" "-n" "--include=*.el" "--" "needle" ".")))))
+                   '("grep" "--include=*.el" "-R" "-n" "--" "needle" ".")))))
+
+(ert-deftest ellm-test-tools-search-path-validation ()
+  "Search paths reject invalid inputs and distinguish files from directories."
+  (let ((dir (file-name-as-directory (make-temp-file "ellm-search-path-" t))))
+    (unwind-protect
+        (let ((default-directory dir))
+          (with-temp-file (expand-file-name "file.txt" dir)
+            (insert "needle\n"))
+          (should (equal (ellm-tools--search-path nil) "."))
+          (should (equal (ellm-tools--search-path "file.txt") "file.txt"))
+          (should (equal (ellm-tools--search-path dir t) dir))
+          (dolist (path '(42 "" "  " "-" "missing" "/ssh:host:/tmp"))
+            (should-error (ellm-tools--search-path path)))
+          (should-error (ellm-tools--search-path (concat "file.txt" (string 0))))
+          (should-error (ellm-tools--search-path "file.txt" t))
+          (when (file-exists-p "/dev/null")
+            (should-error (ellm-tools--search-path "/dev/null")))
+          (dolist (tool '(ellm-tools/glob-tool ellm-tools/grep-tool))
+            (let (result)
+              (funcall tool (lambda (value) (setq result value)) "needle" "missing" 10)
+              (should (string-match-p "does not exist" result))
+              (should (string-match-p "relative paths are resolved" result)))))
+      (delete-directory dir t))))
+
+(ert-deftest ellm-test-tools-grep-glob-preserves-exclusions ()
+  "A broad requested glob cannot override the configured exclusions."
+  (let ((dir (file-name-as-directory (make-temp-file "ellm-grep-exclusions-" t)))
+        result)
+    (unwind-protect
+        (let ((default-directory dir)
+              (ellm-current-project-function (lambda () dir)))
+          (with-temp-file (expand-file-name "match.txt" dir)
+            (insert "needle\n"))
+          (dolist (excluded '(".git" "node_modules" ".cache" ".venv" "venv"
+                              ".direnv" ".next" ".terraform" "__pycache__"))
+            (make-directory (expand-file-name excluded dir))
+            (with-temp-file (expand-file-name "ignored.txt" (expand-file-name excluded dir))
+              (insert "needle\n")))
+          (ellm-tools/grep-tool (lambda (value) (setq result value)) "needle" "." 20 "**")
+          (should (ellm-test--wait-for (lambda () result)))
+          (should (string-match-p "match.txt" result))
+          (should-not (string-match-p "ignored.txt" result)))
+      (delete-directory dir t))))
 
 (ert-deftest ellm-test-tools-grep-caps-long-matching-lines ()
   "The default grep options should preview rather than return very long lines."
