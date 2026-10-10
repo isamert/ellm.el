@@ -328,6 +328,12 @@ closest parent containing a `.git' directory."
   :type 'function
   :group 'ellm)
 
+(defcustom ellm-session-title-changed-hook nil
+  "Normal hook run after a session title renames its conversation buffer.
+Functions run without arguments in the renamed conversation buffer."
+  :type 'hook
+  :group 'ellm)
+
 (defcustom ellm-side-window-side 'right
   "Side used by `ellm-toggle-side-window' for the side conversation window."
   :type '(choice (const :tag "Left" left)
@@ -2834,6 +2840,44 @@ DIRECTORY defaults to the current conversation's base directory."
           (format "*ellm (%s): %s*" project-name title)
         (format "*ellm: %s*" title)))))
 
+;;;; Diagnostic logs
+
+(defvar-local ellm--log-buffer nil
+  "Diagnostic log owned by this conversation.")
+
+(defvar-local ellm--log-buffer-base-name nil
+  "Backend's base name for this conversation's diagnostic log.")
+
+(defun ellm--rename-log-buffer ()
+  "Update this conversation's existing diagnostic log name."
+  (when (buffer-live-p ellm--log-buffer)
+    (let ((name (format "%s<%s>" ellm--log-buffer-base-name (buffer-name))))
+      (with-current-buffer ellm--log-buffer
+        (unless (equal (buffer-name) name)
+          (rename-buffer name t))))))
+
+(defun ellm--get-log-buffer (base-name)
+  "Return this conversation's diagnostic log using BASE-NAME."
+  (setq ellm--log-buffer-base-name base-name)
+  (unless (buffer-live-p ellm--log-buffer)
+    (setq ellm--log-buffer (generate-new-buffer base-name)))
+  (add-hook 'ellm-session-title-changed-hook #'ellm--rename-log-buffer nil t)
+  (ellm--rename-log-buffer)
+  ellm--log-buffer)
+
+;;;###autoload
+(defun ellm-show-log ()
+  "Enable logging in this conversation and display its backend's log.
+Logging is enabled buffer-locally for subsequent requests.  Previously sent
+requests cannot be recovered.  Opening a log does not start a connection."
+  (interactive nil ellm-mode)
+  (unless (derived-mode-p 'ellm-mode)
+    (user-error "Not in an ellm conversation buffer"))
+  (let ((provider (ellm--resolve-provider (ellm--effective-frontmatter))))
+    (pop-to-buffer (ellm-provider-enable-logging provider (current-buffer)))))
+
+;;;; Session titles
+
 (defvar-local ellm--session-title nil
   "Current generic session title, or nil.")
 
@@ -2867,7 +2911,8 @@ returns nil."
       (with-current-buffer buffer
         (when ellm--session-titling-p
           (when-let* ((name (funcall ellm-buffer-name-function title)))
-            (rename-buffer name t)))))))
+            (rename-buffer name t)
+            (run-hooks 'ellm-session-title-changed-hook)))))))
 
 (defvar-local ellm--frontmatter-cwd-directory nil
   "Resolved directory from frontmatter `cwd:', or nil when unset.")
@@ -9311,6 +9356,14 @@ ON-ERROR with an error object on failure.")
   (funcall on-ready
            (or (ellm-provider-config-effect provider path buffer)
                'next-send)))
+
+(cl-defgeneric ellm-provider-enable-logging (provider buffer)
+  "Enable PROVIDER's logging locally in BUFFER and return its log buffer.
+Implementations must not start a connection or send a request.")
+
+(cl-defmethod ellm-provider-enable-logging (_provider _buffer)
+  "Report unsupported logging for providers without an implementation."
+  (user-error "This backend does not support diagnostic logging"))
 
 (cl-defgeneric ellm-provider-start-session (provider frontmatter buffer)
   "Start PROVIDER's session for BUFFER without sending a prompt.

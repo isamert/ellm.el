@@ -52,7 +52,7 @@
 
 (defcustom ellm-acp-log-buffer-name "*ellm-acp-log*"
   "Base buffer name used when `ellm-acp-log-messages' is non-nil.
-Each ACP connection gets its own log buffer derived from this name."
+Each conversation gets its own log buffer derived from this name."
   :type 'string
   :group 'ellm-acp)
 
@@ -166,9 +166,6 @@ an optional list of model candidates used for frontmatter completion."
    (extension-state
     :initform (make-hash-table :test 'equal)
     :accessor ellm-acp--connection-extension-state)
-   (log-buffer
-    :initform nil
-    :accessor ellm-acp--connection-log-buffer)
    (current-request
     :initform nil
     :accessor ellm-acp--connection-current-request))
@@ -704,25 +701,28 @@ Return non-nil when an event sink accepted it."
                     (ellm-acp--connection-current-request connection)))
         (ellm-acp--emit-event request '(:type complete))))))
 
+(cl-defmethod ellm-provider-enable-logging ((_provider ellm-acp-provider) buffer)
+  "Enable ACP wire logging for BUFFER without starting its agent."
+  (with-current-buffer buffer
+    (setq-local ellm-acp-log-messages t)
+    (ellm--get-log-buffer ellm-acp-log-buffer-name)))
+
 (defun ellm-acp--log-wire (connection direction line)
   "Log raw ACP JSON LINE for CONNECTION with DIRECTION when enabled."
-  (when ellm-acp-log-messages
-    (with-current-buffer (ellm-acp--log-buffer connection)
-      (goto-char (point-max))
-      (insert (format "%s %s\n" direction line)))))
+  (when-let* ((source (ellm-acp--connection-buffer connection))
+              ((buffer-live-p source)))
+    (with-current-buffer source
+      (when ellm-acp-log-messages
+        (with-current-buffer (ellm-acp--log-buffer connection)
+          (goto-char (point-max))
+          (insert (format "%s %s\n" direction line)))))))
 
 (defun ellm-acp--log-buffer (connection)
-  "Return CONNECTION's wire log buffer, creating it if needed."
-  (or (and (buffer-live-p (ellm-acp--connection-log-buffer connection))
-           (ellm-acp--connection-log-buffer connection))
-      (let* ((source-buffer (ellm-acp--connection-buffer connection))
-             (source-name (if (buffer-live-p source-buffer)
-                              (buffer-name source-buffer)
-                            "dead-buffer"))
-             (buffer (generate-new-buffer
-                      (format "%s<%s>" ellm-acp-log-buffer-name source-name))))
-        (setf (ellm-acp--connection-log-buffer connection) buffer)
-        buffer)))
+  "Return CONNECTION's conversation log, creating it if needed."
+  (when-let* ((source (ellm-acp--connection-buffer connection))
+              ((buffer-live-p source)))
+    (with-current-buffer source
+      (ellm--get-log-buffer ellm-acp-log-buffer-name))))
 
 (defun ellm-acp--process-sentinel (process event)
   "Handle ACP PROCESS EVENT."

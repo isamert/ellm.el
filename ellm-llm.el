@@ -155,19 +155,20 @@ inherit media inputs from the conversation request."
 (defvar ellm-llm--transport-log-buffer nil
   "Log buffer for a dynamically scoped `llm.el' transport request.")
 
-(defvar-local ellm-llm--conversation-log-buffer nil
-  "Diagnostic log shared by all requests from this conversation.")
+(cl-defmethod ellm-provider-enable-logging
+  ((_provider llm-standard-chat-provider) buffer)
+  "Enable llm.el logging for BUFFER and return its conversation log."
+  (with-current-buffer buffer
+    (setq-local ellm-llm-log-messages t)
+    (ellm--get-log-buffer ellm-llm-log-buffer-name)))
 
 (defun ellm-llm--driver-log-buffer (driver)
-  "Return the conversation log for DRIVER, creating it if needed."
+  "Return DRIVER's conversation log when logging is enabled there."
   (let ((source (ellm-llm-driver-buffer driver)))
     (when (buffer-live-p source)
       (with-current-buffer source
-        (unless (buffer-live-p ellm-llm--conversation-log-buffer)
-          (setq ellm-llm--conversation-log-buffer
-                (generate-new-buffer
-                 (format "%s<%s>" ellm-llm-log-buffer-name (buffer-name)))))
-        ellm-llm--conversation-log-buffer))))
+        (when ellm-llm-log-messages
+          (ellm--get-log-buffer ellm-llm-log-buffer-name))))))
 
 (defvar-local ellm-llm--log-request-number 0
   "Sequence number of transport requests in this log.")
@@ -296,8 +297,7 @@ measure request equality, not guaranteed server cache reuse."
   "Log a transport call before invoking ORIGINAL.
 URL and ARGS are the transport request.  Response callbacks retain the log
 buffer selected by the originating ellm request."
-  (if (not (and ellm-llm-log-messages
-                (buffer-live-p ellm-llm--transport-log-buffer)))
+  (if (not (buffer-live-p ellm-llm--transport-log-buffer))
       (apply original url args)
     (let* ((log-buffer ellm-llm--transport-log-buffer)
            (safe-url (format "request-%d %s"
@@ -1074,8 +1074,7 @@ IDS, when non-nil, are the stable rendered IDs for TOOL-USES."
           (setf
            (ellm-llm-driver-title-request driver)
            (let ((ellm-llm--transport-log-buffer
-                  (and ellm-llm-log-messages
-                       (ellm-llm--driver-log-buffer driver))))
+                  (ellm-llm--driver-log-buffer driver)))
              (llm-chat-streaming
               title-provider prompt #'ignore
               (lambda (result)
@@ -1321,8 +1320,7 @@ chat token limit supplies the corresponding context size when available."
          (prompt (ellm-llm-driver-prompt driver))
          (previous-interaction
           (car (last (llm-chat-prompt-interactions prompt))))
-         (log-buffer (and ellm-llm-log-messages
-                          (ellm-llm--driver-log-buffer driver)))
+         (log-buffer (ellm-llm--driver-log-buffer driver))
          reasoning-state-id
          leg-usage)
     (when log-buffer

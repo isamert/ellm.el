@@ -5028,7 +5028,8 @@ Search results may change and this may fail."
 
 (ert-deftest ellm-test-llm-log-reused-across-drivers-and-renames ()
   "New sends should reuse the conversation log, even after a rename."
-  (let (log-buffer)
+  (let ((ellm-llm-log-messages t)
+        log-buffer)
     (unwind-protect
         (with-temp-buffer
           (let ((first (ellm-llm--make-driver :buffer (current-buffer)))
@@ -5036,11 +5037,93 @@ Search results may change and this may fail."
             (setq log-buffer (ellm-llm--driver-log-buffer first))
             (rename-buffer "ellm-renamed-log-source" t)
             (should (eq log-buffer (ellm-llm--driver-log-buffer second)))
+            (should (string-match-p "ellm-renamed-log-source"
+                                    (buffer-name log-buffer)))
+            (let ((ellm-buffer-name-function
+                   (lambda (_title) "ellm-auto-titled-log-source")))
+              (ellm-update-session-title "Automatic title"))
+            ;; A title callback renames the existing log immediately.
+            (should (string-match-p "ellm-auto-titled-log-source"
+                                    (buffer-name log-buffer)))
             (kill-buffer log-buffer)
             (setq log-buffer (ellm-llm--driver-log-buffer second))
             (should (buffer-live-p log-buffer))
             (should (eq log-buffer (ellm-llm--driver-log-buffer first)))))
       (when (buffer-live-p log-buffer) (kill-buffer log-buffer)))))
+
+(ert-deftest ellm-test-llm-show-log-enables-only-current-conversation ()
+  "Showing a log should enable local logging and reuse it on later sends."
+  (let ((ellm-llm-log-messages nil)
+        (ellm-provider (ellm-make-codex-provider :chat-model "gpt-5.6-terra"))
+        log-buffer shown)
+    (unwind-protect
+        (with-temp-buffer
+          (ellm-mode)
+          (let ((source (current-buffer))
+                (driver (ellm-llm--make-driver :buffer (current-buffer))))
+            (should-not (ellm-llm--driver-log-buffer driver))
+            (cl-letf (((symbol-function 'pop-to-buffer)
+                       (lambda (buffer &rest _) (setq shown buffer))))
+              (ellm-show-log)
+              (setq log-buffer ellm--log-buffer)
+              (should (eq shown log-buffer))
+              (should ellm-llm-log-messages)
+              (should (local-variable-p 'ellm-llm-log-messages))
+              (ellm-show-log)
+              (should (eq shown log-buffer)))
+            ;; A callback may run in a different buffer with logging disabled.
+            (with-temp-buffer
+              (should-not ellm-llm-log-messages)
+              (should (eq log-buffer (ellm-llm--driver-log-buffer driver)))
+              (let ((ellm-llm--transport-log-buffer log-buffer))
+                (ellm-llm--request-plz-advice
+                 (lambda (&rest _) nil) "https://example.test/chat"
+                 :data '(:input ["hello"]))))
+            (should (buffer-live-p source))
+            (with-current-buffer log-buffer
+              (should (string-match-p "request-1" (buffer-string))))))
+      (when (buffer-live-p log-buffer) (kill-buffer log-buffer)))))
+
+(ert-deftest ellm-test-show-log-acp-before-connection ()
+  "ACP logging should be enabled locally before any process is started."
+  (let ((ellm-provider (ellm-make-acp-provider :command "unused"))
+        (ellm-acp-log-messages nil)
+        log-buffer shown process)
+    (unwind-protect
+        (with-temp-buffer
+          (ellm-mode)
+          (let ((source (current-buffer)))
+            (cl-letf (((symbol-function 'make-process)
+                       (lambda (&rest _) (error "Opening a log must not start a process")))
+                      ((symbol-function 'pop-to-buffer)
+                       (lambda (buffer &rest _) (setq shown buffer))))
+              (ellm-show-log))
+            (setq log-buffer ellm--log-buffer)
+            (should (eq shown log-buffer))
+            (should ellm-acp-log-messages)
+            (should-not ellm-acp--connection)
+            (setq process (start-process "ellm-acp-log-test" nil "sleep" "10"))
+            (let ((connection (ellm-acp-connection
+                               :name "log-test" :process process :buffer source)))
+              (with-temp-buffer
+                (should-not ellm-acp-log-messages)
+                (ellm-acp--log-wire connection "-->" "request")
+                (should (eq log-buffer (ellm-acp--log-buffer connection))))
+              (with-current-buffer log-buffer
+                (should (equal (buffer-string) "--> request\n"))))
+            (let ((ellm-buffer-name-function (lambda (_) "ellm-acp-log-renamed")))
+              (ellm-update-session-title "New title"))
+            (should (string-match-p "ellm-acp-log-renamed" (buffer-name log-buffer)))))
+      (when (process-live-p process) (delete-process process))
+      (when (buffer-live-p log-buffer) (kill-buffer log-buffer)))))
+
+(ert-deftest ellm-test-show-log-kagi-unsupported ()
+  "Unsupported Kagi logging should fail without creating a log."
+  (let ((ellm-provider (ellm-make-kagi-provider)))
+    (with-temp-buffer
+      (ellm-mode)
+      (should-error (ellm-show-log) :type 'user-error)
+      (should-not ellm--log-buffer))))
 
 (ert-deftest ellm-test-llm-log-omits-duplicate-partial-usage ()
   "Usage-bearing partials should not duplicate the final backend result."
@@ -7843,7 +7926,7 @@ The parent provider remains buffer-local fallback only when the profile omits on
       (when (jsonrpc-running-p connection)
         (jsonrpc-shutdown connection)))))
 
-(ert-deftest ellm-test-acp-wire-log-is-per-connection ()
+(ert-deftest ellm-test-acp-wire-log-is-per-conversation ()
   "ACP wire logs should be separated per ellm buffer/connection."
   (let ((agent-file (ellm-test--make-fake-acp-agent))
         (ellm-acp-log-messages t)
@@ -7861,7 +7944,7 @@ The parent provider remains buffer-local fallback only when the profile omits on
               (insert "hi\n")
               (ellm-send)
               (ellm-test--wait-for-request)
-              (push (ellm-acp--connection-log-buffer ellm-acp--connection)
+              (push (ellm-acp--log-buffer ellm-acp--connection)
                     log-buffers)
               (delete-process (ellm-acp--connection-process ellm-acp--connection)))))
       (dolist (buf buffers)

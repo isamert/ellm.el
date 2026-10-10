@@ -206,6 +206,10 @@ provide request defaults that may be overridden by `kagi:' frontmatter."
   "Select and import a Kagi conversation for PROVIDER."
   (ellm-kagi-import-session provider frontmatter))
 
+(cl-defmethod ellm-provider-enable-logging ((_provider ellm-kagi-provider) _buffer)
+  "Report that Kagi diagnostic logging is not implemented."
+  (user-error "ellm Kagi: diagnostic logging is not supported yet"))
+
 (cl-defmethod ellm-backend-create
   ((provider ellm-kagi-provider) frontmatter buffer)
   "Create a Kagi driver for BUFFER using FRONTMATTER."
