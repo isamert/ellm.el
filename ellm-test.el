@@ -7367,6 +7367,42 @@ The parent provider remains buffer-local fallback only when the profile omits on
         (should (string-match-p "name=\\\"explore\\\" description=\\\"Local exploration\\\" model=\\\"small\\\"" result))
         (should (string-match-p "name=\\\"reviewer\\\" description=\\\"Review changes\\\" tools=(\"@files\")" result))))))
 
+(ert-deftest ellm-test-subagent-target-resolves-display-name ()
+  "Display names should resolve only within the current conversation history."
+  (with-temp-buffer
+    (setq-local ellm-subagent-history
+                '((:id "subagent_1" :name "Research"
+                   :buffer-name " *ellm-research*")))
+    (dolist (key '("subagent_1" " *ellm-research*" "Research"))
+      (should (equal (plist-get (ellm-tools--subagent-target key) :id)
+                     "subagent_1")))
+    (with-temp-buffer
+      (should-error (ellm-tools--subagent-target "Research")))))
+
+(ert-deftest ellm-test-subagent-target-rejects-ambiguous-display-name ()
+  "Duplicate names should report candidate ids, not select a child silently."
+  (with-temp-buffer
+    (setq-local ellm-subagent-history
+                '((:id "subagent_1" :name "Research")
+                  (:id "subagent_2" :name "Research")))
+    (let* ((err (should-error (ellm-tools--subagent-target "Research")))
+           (message (error-message-string err)))
+      (should (string-match-p "ambiguous subagent name" message))
+      (should (string-match-p "subagent_1" message))
+      (should (string-match-p "subagent_2" message)))))
+
+(ert-deftest ellm-test-subagent-target-prefers-id-and-buffer-name ()
+  "Explicit identifiers should take precedence over conflicting display names."
+  (with-temp-buffer
+    (setq-local ellm-subagent-history
+                '((:id "subagent_1" :buffer-name " *ellm-research*")
+                  (:id "subagent_2" :name "subagent_1")
+                  (:id "subagent_3" :name "subagent_1")
+                  (:id "subagent_4" :name " *ellm-research*")))
+    (dolist (key '("subagent_1" " *ellm-research*"))
+      (should (equal (plist-get (ellm-tools--subagent-target key) :id)
+                     "subagent_1")))))
+
 (ert-deftest ellm-test-send-subagent-reprompts-subagent ()
   "`send' should append a required prompt and send it to a known subagent."
   (let* ((provider (make-ellm-test-sync-provider))

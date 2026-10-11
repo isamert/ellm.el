@@ -1143,12 +1143,12 @@ child inherits the current effective configuration."
   (ellm-tools--format-subagent-history ellm-subagent-history))
 
 (ellm-deftool agents/wait-subagent (:async t)
-  ((subagent :string "Subagent id from `subagents' or its conversation name."))
+  ((subagent :string "Subagent id from `subagents', exact buffer name, or unique display name."))
   "Wait for SUBAGENT to finish and return its latest result."
   (ellm-tools--wait-subagent subagent callback))
 
 (ellm-deftool agents/send-subagent ()
-  ((subagent :string "Subagent id from `subagents' or its conversation name.")
+  ((subagent :string "Subagent id from `subagents', exact buffer name, or unique display name.")
    (prompt :string "Prompt to add as a new user turn before sending."))
   "Send PROMPT to SUBAGENT."
   (ellm-tools--send-subagent subagent prompt))
@@ -2494,7 +2494,8 @@ than PARENT; profiles therefore remain live configuration baselines."
 
 (defun ellm-tools--subagent-target (subagent)
   "Return plist describing SUBAGENT from current buffer history.
-SUBAGENT may be a remembered id or a live buffer name."
+SUBAGENT may be a remembered id, a live buffer name, or a unique display
+name in the current buffer history.  Id and buffer-name matches take precedence."
   (let* ((key (ellm-tools--present-string subagent))
          (entry (and key
                      (cl-find-if
@@ -2502,13 +2503,27 @@ SUBAGENT may be a remembered id or a live buffer name."
                         (or (equal key (plist-get entry :id))
                             (equal key (plist-get entry :buffer-name))))
                       ellm-subagent-history)))
+         (entry
+          (or entry
+              (when key
+                (let ((matches (cl-remove-if-not
+                                (lambda (entry)
+                                  (equal key (plist-get entry :name)))
+                                ellm-subagent-history)))
+                  (when (cdr matches)
+                    (ellm-tools--error
+                     "ambiguous subagent name: %s; use one of these ids: %s"
+                     key (string-join
+                          (mapcar (lambda (entry) (plist-get entry :id)) matches)
+                          ", ")))
+                  (car matches)))))
          (file (plist-get entry :file))
          (buffer-name (or (plist-get entry :buffer-name) key))
          (buffer (or (and buffer-name (get-buffer buffer-name))
                      (and file (file-readable-p file)
                           (find-file-noselect file)))))
     (unless key
-      (ellm-tools--error "subagent must be a non-empty id or buffer name"))
+      (ellm-tools--error "subagent must be a non-empty id, buffer name, or display name"))
     (unless (or entry buffer)
       (ellm-tools--error "unknown subagent: %s" key))
     (when (and entry buffer)
