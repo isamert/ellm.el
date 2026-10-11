@@ -658,6 +658,11 @@ Return non-nil when an event sink accepted it."
                         :buffer buffer
                         :request-dispatcher #'ellm-acp--dispatch-request
                         :notification-dispatcher #'ellm-acp--dispatch-notification)))
+      (ellm-register-process
+       process :buffer buffer :name "ACP transport" :persistent t
+       :busy-p (lambda ()
+                 (and (buffer-live-p buffer)
+                      (buffer-local-value 'ellm--active-request buffer))))
       (process-put process 'ellm-acp-connection connection)
       (set-process-filter process #'ellm-acp--process-filter)
       (set-process-sentinel process #'ellm-acp--process-sentinel)

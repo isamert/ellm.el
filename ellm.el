@@ -110,6 +110,7 @@
 (require 'url-util)
 (require 'yank-media)
 (require 'mailcap)
+(require 'vtable)
 
 ;;;; Customization
 
@@ -5332,6 +5333,9 @@ keep protocol-specific mutable state there, but lifecycle state lives here."
   (idle-timer nil
               :type (or null timer)
               :documentation "Timer waiting for backend activity, or nil.")
+  (running-work nil
+                :type list
+                :documentation "Cancellable operations owned by this request.")
   (state 'starting
          :type symbol
          :documentation "Current core lifecycle state.")
@@ -5485,6 +5489,98 @@ allow-for-session, and deny choices through the core permission UI."
 
 (defconst ellm--request-terminal-states '(completed failed cancelled)
   "Terminal values of `ellm-request-state'.")
+
+;;;; Owned work and processes
+
+(cl-defstruct (ellm-work (:constructor ellm--make-work))
+  "One cancellable operation owned by a request."
+  cancel-function name (active t))
+
+(cl-defstruct (ellm-owned-process (:constructor ellm--make-owned-process))
+  "A process owned by a conversation, independently of its current operation."
+  process name persistent busy-p)
+
+(defvar-local ellm--owned-processes nil
+  "Processes explicitly registered to this conversation.")
+
+(cl-defun ellm-register-process (process &key (buffer (current-buffer)) name
+                                       persistent busy-p)
+  "Record PROCESS as owned by conversation BUFFER and return PROCESS.
+NAME is a display label.  PERSISTENT means the process survives operations.
+BUSY-P optionally reports activity for a persistent worker.
+Registration does not change sentinels or cancellation behavior.
+Processes remain visible until they exit, even after an operation finishes.  Backends should register only their own local processes."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (ellm--live-owned-processes buffer)
+      (let ((entry (cl-find process ellm--owned-processes
+                            :key #'ellm-owned-process-process)))
+        (unless entry
+          (setq entry (ellm--make-owned-process :process process))
+          (push entry ellm--owned-processes))
+        (setf (ellm-owned-process-name entry) (or name (process-name process))
+              (ellm-owned-process-persistent entry) persistent
+              (ellm-owned-process-busy-p entry) busy-p))))
+  process)
+
+(defun ellm--live-owned-processes (buffer)
+  "Return BUFFER's registered live processes, pruning exited entries."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (setq ellm--owned-processes
+            (cl-delete-if-not
+             (lambda (entry) (process-live-p (ellm-owned-process-process entry)))
+             ellm--owned-processes)))))
+
+(cl-defun ellm-request-register-work (request cancel-function &key process name)
+  "Register running work owned by REQUEST with CANCEL-FUNCTION.
+Return a function that unregisters the work without cancelling it.  Call that
+function when the work completes normally.  CANCEL-FUNCTION must be an
+idempotent, zero-argument function which stops the work and suppresses late
+callbacks.  If REQUEST is already stopping or terminal, invoke it immediately.
+Optional PROCESS is also recorded as owned by the conversation; NAME labels
+its operation.  Backends and tools should register before starting work."
+  (let ((work (ellm--make-work :cancel-function cancel-function :name name)))
+    (when process
+      (ellm-register-process process :buffer (ellm-request-buffer request)
+                             :name name))
+    (ellm--request-register-work request work)))
+
+(defun ellm--request-stopping-p (request)
+  "Return non-nil when REQUEST cannot start work or accept its results."
+  (or (ellm--request-terminal-p request)
+      (memq (ellm-request-state request) '(cancelling retry-wait))))
+
+(defun ellm--finish-work (work)
+  "Mark WORK inactive and release its cancellation machinery."
+  (setf (ellm-work-active work) nil
+        (ellm-work-cancel-function work) nil))
+
+(defun ellm--request-register-work (request work)
+  "Register operation WORK with REQUEST and return its unregister function."
+  (if (ellm--request-stopping-p request)
+      (ellm--request-invoke-cancellation work)
+    (push work (ellm-request-running-work request)))
+  (lambda ()
+    (ellm--finish-work work)
+    (setf (ellm-request-running-work request)
+          (delq work (ellm-request-running-work request)))))
+
+(defun ellm--request-invoke-cancellation (work)
+  "Stop WORK without letting errors interrupt other cancellations."
+  (when (ellm-work-active work)
+    (let ((cancel (ellm-work-cancel-function work)))
+      (ellm--finish-work work)
+      (condition-case err
+          (funcall cancel)
+        (error (message "ellm: work cancellation error: %s"
+                        (error-message-string err)))))))
+
+(defun ellm--request-cancel-work (request)
+  "Stop all work registered with REQUEST, once."
+  (let ((running-work (ellm-request-running-work request)))
+    (setf (ellm-request-running-work request) nil)
+    (mapc #'ellm--request-invoke-cancellation running-work)))
 
 (defconst ellm-backend-event-types
   '(stream usage tool-call tool-update tool-observation tool-result extension
@@ -5892,6 +5988,8 @@ Return non-nil when a live top-level assistant header was updated."
 (defun ellm--notify-active-request-finished-on-kill ()
   "Finalize an active request if buffer teardown bypassed normal cleanup."
   (when ellm--active-request
+    (setf (ellm-request-state ellm--active-request) 'cancelled)
+    (ellm--request-cancel-work ellm--active-request)
     (ellm--notify-request-finished ellm--active-request '(:state cancelled))))
 
 (defun ellm--permission-automatic-outcome (permission)
@@ -6317,6 +6415,7 @@ normal requests initialize the cache when their assistant turn is inserted."
 MESSAGE-TEXT is reported after cleanup when non-nil."
   (unless (ellm--request-terminal-p request)
     (setf (ellm-request-state request) state)
+    (ellm--request-cancel-work request)
     (ellm--request-cancel-retry-timer request)
     (ellm--request-cancel-idle-timer request)
     (ignore-errors
@@ -6354,6 +6453,7 @@ MESSAGE-TEXT is reported after cleanup when non-nil."
   ;; transport callbacks while the retry timer is waiting.
   (cl-incf (ellm-request-attempt request))
   (setf (ellm-request-state request) 'retry-wait)
+  (ellm--request-cancel-work request)
   (ellm--request-cancel-idle-timer request)
   (ellm--request-cancel-retry-timer request)
   (setf
@@ -8440,6 +8540,7 @@ If QUIET is non-nil, then do not print any messages."
       ;; stale before the backend is asked to stop its transport.
       (cl-incf (ellm-request-attempt request))
       (setf (ellm-request-state request) 'cancelling)
+      (ellm--request-cancel-work request)
       (ellm--request-cancel-retry-timer request)
       (ellm--run-observer-hook 'ellm-request-cancelling-hook request)
       (unwind-protect
@@ -8447,6 +8548,74 @@ If QUIET is non-nil, then do not print any messages."
         (ellm--request-terminal-transition request 'cancelled)))
     (unless quiet
       (message "ellm: request cancelled"))))
+
+;;;; Conversation process list
+
+(defvar-local ellm-process-list--owner nil
+  "Conversation whose processes are displayed in this buffer.")
+
+(defvar-local ellm-process-list--table nil
+  "Vtable displaying the conversation's processes.")
+
+(defun ellm-process-list--objects ()
+  "Return live process objects for `ellm-process-list--owner'."
+  (or (reverse (ellm--live-owned-processes ellm-process-list--owner))
+      (progn
+        (message "ellm: No live processes owned by this conversation")
+        nil)))
+
+(defun ellm-process-list--get (entry column _table)
+  "Return ENTRY's value for vtable COLUMN."
+  (let ((process (ellm-owned-process-process entry)))
+    (pcase column
+      (0 (ellm-owned-process-name entry))
+      (1 (or (process-id process) "—"))
+      (2 (symbol-name (process-status process)))
+      (3 (if (ellm-owned-process-persistent entry)
+             (if (when-let* ((predicate (ellm-owned-process-busy-p entry)))
+                   (ignore-errors (funcall predicate)))
+                 "Persistent (active)" "Persistent (idle)")
+           "Request"))
+      (4 (mapconcat #'identity (process-command process) " ")))))
+
+(defun ellm-process-list-refresh (&optional _ignore-auto _noconfirm)
+  "Re-query and refresh the current conversation's process table."
+  (interactive)
+  (vtable-revert-command ellm-process-list--table))
+
+(defvar ellm-process-list-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "g") #'ellm-process-list-refresh)
+    map)
+  "Keymap for `ellm-process-list-mode'.")
+
+(define-derived-mode ellm-process-list-mode special-mode "eLLM Processes"
+  "List processes owned by one conversation.  Press `g' to refresh."
+  (setq-local revert-buffer-function #'ellm-process-list-refresh))
+
+(defun ellm-list-processes ()
+  "Show live processes owned by the current conversation.
+Includes idle persistent workers.  Processes from other conversations or
+packages, unregistered descendants, and remote ACP tools are not included.
+Press `g' to refresh.  Listing does not change cancellation behavior."
+  (interactive nil ellm-mode)
+  (unless (derived-mode-p 'ellm-mode)
+    (user-error "ellm: Run this command in a conversation buffer"))
+  (let* ((owner (current-buffer))
+         (buffer (get-buffer-create (format "*ellm processes: %s*" (buffer-name owner)))))
+    (with-current-buffer buffer
+      (ellm-process-list-mode)
+      (setq ellm-process-list--owner owner)
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (setq ellm-process-list--table
+              (make-vtable
+               :columns '("Name" "PID" "Status" "Ownership" "Command")
+               :objects-function #'ellm-process-list--objects
+               :getter #'ellm-process-list--get
+               :keymap ellm-process-list-mode-map))
+        (goto-char (point-min))))
+    (pop-to-buffer buffer)))
 
 ;;;; Attachments
 

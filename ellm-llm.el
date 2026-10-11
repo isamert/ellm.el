@@ -37,6 +37,7 @@
 (require 'json)
 (require 'plz-event-source)
 (require 'ellm)
+(require 'ellm-tools)
 
 (declare-function ellm-mcp-session-tools "ellm-mcp" (frontmatter))
 
@@ -674,7 +675,8 @@ reconstructed from the conversation buffer later."
               (run ()
                    (condition-case err
                        (if async
-                           (apply function #'tool-callback args)
+                           (ellm-tools--call-async
+                            request function #'tool-callback args name)
                          (finish (apply function args)))
                      (error
                       ;; Errors raised downstream by the result callback are not

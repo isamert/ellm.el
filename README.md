@@ -637,6 +637,8 @@ Some other useful commands are:
 - `ellm-narrow-to-turn`, `ellm-narrow-to-header`, and
   `ellm-narrow-dwim` narrow to the relevant turn or Markdown section.
 - `ellm-jump-to-tool-pair` jumps between a tool call and its result.
+- `ellm-list-processes` shows live processes owned by the current
+  conversation.
 - `ellm-toggle-tag`, `ellm-fold-all-tags`, and `ellm-unfold-all-tags`
   fold XML-style prompt tags. Again, `TAB` also works for folding
   them.

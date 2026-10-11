@@ -410,10 +410,7 @@ REPLACEMENTS is an alist of strings."
                (result-sym (gensym "result-"))
                (error-sym (gensym "error-"))
                (err-sym (gensym "err-"))
-               (timer-sym (gensym "timer-"))
-               (timeout-sym (gensym "timeout-"))
                (done-sym (gensym "done-"))
-               (cancel-sym (gensym "cancel-"))
                (param-name-replacements
                 (seq-mapn
                  #'cons
@@ -446,51 +443,31 @@ REPLACEMENTS is an alist of strings."
        ,(if async?
             `(defun ,const-sym (,callback-sym ,@lambda-args)
                ,doc
-               (let* ((,tool-sym ',const-sym)
-                      (,tool-args-sym (list ,@arg-names))
-                      (,timeout-sym nil)
-                      (,done-sym nil)
-                      (,timer-sym nil)
-                      (,cancel-sym nil)
-                      (callback
-                       (lambda (,raw-sym &optional ,error-sym)
-                         (unless ,done-sym
-                           (let ((,result-sym
-                                  (ellm-tools--transform-tool-result
-                                   ,tool-sym ,tool-args-sym ,error-sym ,raw-sym)))
-                             (setq ,done-sym t)
-                             (when ,timer-sym
-                               (cancel-timer ,timer-sym))
-                             (ellm-tools--tool-call-end-hook
-                              ,tool-sym ,tool-args-sym ,error-sym
-                              ,raw-sym ,result-sym)
-                             (funcall ,callback-sym ,result-sym))))))
-                 (condition-case ,err-sym
-                     (progn
-                       (ellm-tools--tool-call-start-hook
-                        ,tool-sym ,tool-args-sym)
-                       (setq ,timeout-sym ,timeout-expr)
-                       (when ,timeout-sym
-                         (setq ,timer-sym
-                               (run-at-time
-                                ,timeout-sym nil
-                                (lambda ()
-                                  (ellm-tools--cancel-async-handle
-                                   ,cancel-sym)
-                                  (funcall
-                                   callback
-                                   (format "Error while calling the tool: timed out after %s seconds"
-                                           ,timeout-sym)
-                                   t)))))
-                       (cl-flet ((callback (,raw-sym)
-                                           (funcall callback ,raw-sym)))
-                         (setq ,cancel-sym (progn ,@body))))
-                   (error
-                    (funcall callback
-                             (format "Error while calling the tool: %s"
-                                     ,err-sym)
-                             t)))
-                 ,cancel-sym))
+               (let ((,tool-sym ',const-sym)
+                     (,tool-args-sym (list ,@arg-names))
+                     (,done-sym nil))
+                 (cl-labels
+                     ((deliver (,raw-sym &optional ,error-sym)
+                               (unless ,done-sym
+                                 (setq ,done-sym t)
+                                 (let ((,result-sym
+                                        (ellm-tools--transform-tool-result
+                                         ,tool-sym ,tool-args-sym ,error-sym ,raw-sym)))
+                                   (ellm-tools--tool-call-end-hook
+                                    ,tool-sym ,tool-args-sym ,error-sym ,raw-sym ,result-sym)
+                                   (funcall ,callback-sym ,result-sym)))))
+                   (condition-case ,err-sym
+                       (progn
+                         (ellm-tools--tool-call-start-hook ,tool-sym ,tool-args-sym)
+                         (ellm-tools--invoke-async
+                          (lambda (callback)
+                            (cl-flet ((callback (,raw-sym) (funcall callback ,raw-sym)))
+                              ,@body))
+                          #'deliver
+                          :timeout ,timeout-expr))
+                     (error
+                      (deliver (format "Error while calling the tool: %s" ,err-sym) t)
+                      #'ignore)))))
           `(defun ,const-sym ,lambda-args
              ,doc
              (let ((,tool-sym ',const-sym)
@@ -553,6 +530,181 @@ REPLACEMENTS is an alist of strings."
        ((functionp handle)
         (funcall handle)))
     (error nil)))
+
+(defvar ellm-tools--startup-scopes nil
+  "Resource cleanup scopes active during asynchronous initialization.")
+
+(defun ellm-tools--track-startup-resource (resource cancel-function)
+  "Arrange to stop RESOURCE if any enclosing initialization fails.
+CANCEL-FUNCTION accepts RESOURCE.  Committing a scope discards its fallbacks;
+normal runtime cancellation remains the responsibility of the returned handle."
+  (when resource
+    (dolist (scope ellm-tools--startup-scopes)
+      (push (lambda () (funcall cancel-function resource)) (cdr scope))))
+  resource)
+
+(defun ellm-tools--cancel-startup-resources (scope)
+  "Dispose of partially initialized resources in SCOPE, once."
+  (let ((cleanups (cdr scope)))
+    (setcdr scope nil)
+    (mapc #'ellm-tools--cancel-async-handle cleanups)))
+
+(defmacro ellm-tools--with-startup (&rest body)
+  "Evaluate BODY, disposing of resources if initialization does not finish."
+  (declare (indent 0) (debug t))
+  (let ((scope (gensym "scope-")) (committed (gensym "committed-")))
+    `(let* ((,scope (list nil))
+            (ellm-tools--startup-scopes (cons ,scope ellm-tools--startup-scopes))
+            ,committed)
+       (unwind-protect
+           (prog1 (progn ,@body) (setq ,committed t))
+         (unless ,committed (ellm-tools--cancel-startup-resources ,scope))
+         (setcdr ,scope nil)))))
+
+(defun ellm-tools--cancel-startup-process (process)
+  "Stop partially initialized PROCESS without invoking its callbacks."
+  (set-process-filter process nil)
+  (set-process-sentinel process nil)
+  (when (process-live-p process) (delete-process process)))
+
+(defun ellm-tools--generate-buffer (name)
+  "Create a temporary buffer named NAME, protected during initialization."
+  (ellm-tools--track-startup-resource (generate-new-buffer name) #'kill-buffer))
+
+(cl-defun ellm-tools--invoke-async (function callback &key timeout register current-p)
+  "Start FUNCTION with a callback and return an idempotent cancellation function.
+Completion is delivered only after startup returns its handle.  Timeouts stop
+resources before delivering a result, including handles returned after timeout.
+REGISTER, when non-nil, receives the cancellation function before startup.
+CURRENT-P can reject stale results without completing the operation."
+  (let ((state 'running) (scope (list nil)) ready handle timer values)
+    (cl-labels
+        ((stop-resources ()
+                         (let ((pending handle))
+                           (setq handle nil)
+                           (ellm-tools--cancel-async-handle pending))
+                         (ellm-tools--cancel-startup-resources scope))
+         (deliver ()
+                  (when (and ready callback (memq state '(completed timed-out)))
+                    (let ((notify callback) (result values))
+                      (setq callback nil values nil handle nil)
+                      (setcdr scope nil)
+                      (apply notify result))))
+         (settle (next result)
+                 (when (eq state 'running)
+                   (setq state next values result)
+                   (when timer (cancel-timer timer) (setq timer nil))
+                   (unless (eq next 'completed) (stop-resources))
+                   (deliver)))
+         (cancel ()
+                 (when (and (not (eq state 'cancelled))
+                            (or (eq state 'running) (not ready)))
+                   (setq state 'cancelled callback nil values nil)
+                   (when timer (cancel-timer timer) (setq timer nil))
+                   (stop-resources))))
+      (when register (funcall register #'cancel))
+      (when (eq state 'running)
+        (when timeout
+          (setq timer
+                (run-at-time
+                 timeout nil
+                 (lambda ()
+                   (settle 'timed-out
+                           (list (format "Error while calling the tool: timed out after %s seconds"
+                                         timeout)
+                                 t))))))
+        (let ((ellm-tools--startup-scopes (cons scope ellm-tools--startup-scopes))
+              returned)
+          (unwind-protect
+              (progn
+                (setq handle
+                      (funcall function
+                               (lambda (&rest result)
+                                 (when (or (null current-p) (funcall current-p))
+                                   (settle 'completed result)))))
+                (setq returned t ready t))
+            (unless returned
+              (setq callback nil)
+              (when timer (cancel-timer timer) (setq timer nil))
+              (setq state 'cancelled)
+              (stop-resources)))))
+      (if (memq state '(cancelled timed-out))
+          (stop-resources)
+        ;; Startup succeeded: runtime cleanup now belongs to HANDLE.
+        (setcdr scope nil))
+      (deliver)
+      #'cancel)))
+
+(defvar ellm-tools--process-owner nil
+  "Conversation owning subprocesses started by the current tool.")
+
+(defvar ellm-tools--current-work nil
+  "Request operation to associate with subprocesses started by a tool.")
+
+(defun ellm-tools--process-callback (function)
+  "Wrap FUNCTION to preserve process ownership across async callbacks."
+  (when function
+    (let ((owner (or ellm-tools--process-owner (current-buffer)))
+          (work ellm-tools--current-work))
+      (lambda (&rest args)
+        (let ((ellm-tools--process-owner owner)
+              (ellm-tools--current-work work))
+          (apply function args))))))
+
+(cl-defun ellm-tools--register-process (process &key buffer name persistent busy-p)
+  "Record PROCESS and its tool context in BUFFER's ownership registry."
+  (ellm-tools--track-startup-resource process #'ellm-tools--cancel-startup-process)
+  (ellm-register-process
+   process :buffer (or buffer ellm-tools--process-owner (current-buffer))
+   :name (or name (and ellm-tools--current-work
+                       (ellm-work-name ellm-tools--current-work)))
+   :persistent persistent :busy-p busy-p))
+
+(defun ellm-tools--make-process (&rest args)
+  "Create a tool process with ARGS and explicit conversation ownership."
+  (dolist (key '(:sentinel :filter))
+    (when (plist-get args key)
+      (setq args (plist-put args key
+                            (ellm-tools--process-callback (plist-get args key))))))
+  (ellm-tools--register-process (apply #'make-process args)))
+
+(defun ellm-tools--async-start (start-function finish-function)
+  "Start an async worker with START-FUNCTION and FINISH-FUNCTION.
+Preserve conversation ownership and tool activity in child callbacks."
+  (let ((process (async-start start-function
+                              (ellm-tools--process-callback finish-function))))
+    (ellm-tools--track-startup-resource (process-buffer process) #'kill-buffer)
+    (ellm-tools--register-process process)))
+
+(defun ellm-tools--call-async (request function callback args &optional name)
+  "Call async tool FUNCTION with CALLBACK and ARGS, owned by REQUEST.
+NAME labels the work and its processes.  Share the tool lifecycle's startup
+protection and cancellation handling; register work before execution starts."
+  (let ((work (ellm--make-work :name name))
+        (owner (if request (ellm-request-buffer request) (current-buffer)))
+        unregister cancel)
+    (cl-labels ((finish ()
+                       (if unregister (funcall unregister) (ellm--finish-work work))))
+      (condition-case err
+          (ellm-tools--invoke-async
+           (lambda (notify)
+             (let ((ellm-tools--process-owner owner)
+                   (ellm-tools--current-work work))
+               (apply function (ellm-tools--process-callback notify) args)))
+           (lambda (&rest values)
+             (finish)
+             (apply callback values))
+           :current-p (lambda () (not (and request (ellm--request-stopping-p request))))
+           :register
+           (lambda (stop)
+             (setq cancel (lambda () (finish) (funcall stop)))
+             (setf (ellm-work-cancel-function work) cancel)
+             (when request
+               (setq unregister (ellm--request-register-work request work)))))
+        (error
+         (finish)
+         (signal (car err) (cdr err))))
+      cancel)))
 
 (defun ellm-tools--error (reason &rest args)
   (if args
@@ -676,10 +828,10 @@ Standard output and standard error are combined.  The command runs with no
 standard input in the conversation working directory."
   (let* ((default-directory (ellm-tools--default-directory))
          (limit ellm-tools-bash-output-character-limit)
-         (full-buffer (generate-new-buffer " *ellm bash output*"))
+         (full-buffer (ellm-tools--generate-buffer " *ellm bash output*"))
          (conversation (current-buffer))
          (proc
-          (make-process
+          (ellm-tools--make-process
            :name "ellm-tools-bash"
            :command (list ellm-tools-bash-program "-c" command)
            :connection-type 'pipe
@@ -1503,52 +1655,53 @@ whose documentation contains all QUERY words are included as well."
 (defun ellm-tools--start-temp-elisp-eval
     (code features directory callback)
   "Evaluate CODE with FEATURES in a temporary child rooted at DIRECTORY."
-  (let* ((owner (current-buffer))
-         (async-process-noquery-on-exit t)
-         (completed nil)
-         (cancelled nil)
-         (process
-          (async-start
-           (ellm-tools--elisp-child-form
-            `(funcall ',ellm-tools--elisp-evaluator ,code ',features)
-            load-path exec-path directory)
-           (lambda (result)
-             (unless (async-message-p result)
-               (setq completed t)
-               (funcall callback
-                        (with-current-buffer owner
-                          (ellm-tools--format-elisp-eval-result
-                           "temp"
-                           (if (and (listp result)
-                                    (plist-member result :ok))
-                               result
-                             (list :ok nil
-                                   :error-symbol 'child-exit
-                                   :error-message
-                                   "Temporary Emacs exited without a result"))))))))))
-    (let ((async-sentinel (process-sentinel process)))
-      (set-process-sentinel
-       process
-       (lambda (proc event)
-         (condition-case err
-             (when async-sentinel
-               (funcall async-sentinel proc event))
-           (error
-            (unless (or completed cancelled)
-              (setq completed t)
-              (funcall callback
-                       (format "Temporary Emacs failed: %s"
-                               (error-message-string err))))))
-         (when (and (not completed)
-                    (not cancelled)
-                    (memq (process-status proc) '(exit signal)))
-           (setq completed t)
-           (funcall callback
-                    (format "Temporary Emacs exited unexpectedly (%s)"
-                            (string-trim event)))))))
-    (lambda ()
-      (setq cancelled t)
-      (ellm-tools--cancel-elisp-process process))))
+  (ellm-tools--with-startup
+    (let* ((owner (current-buffer))
+           (async-process-noquery-on-exit t)
+           (completed nil)
+           (cancelled nil)
+           (process
+            (ellm-tools--async-start
+             (ellm-tools--elisp-child-form
+              `(funcall ',ellm-tools--elisp-evaluator ,code ',features)
+              load-path exec-path directory)
+             (lambda (result)
+               (unless (async-message-p result)
+                 (setq completed t)
+                 (funcall callback
+                          (with-current-buffer owner
+                            (ellm-tools--format-elisp-eval-result
+                             "temp"
+                             (if (and (listp result)
+                                      (plist-member result :ok))
+                                 result
+                               (list :ok nil
+                                     :error-symbol 'child-exit
+                                     :error-message
+                                     "Temporary Emacs exited without a result"))))))))))
+      (let ((async-sentinel (process-sentinel process)))
+        (set-process-sentinel
+         process
+         (lambda (proc event)
+           (condition-case err
+               (when async-sentinel
+                 (funcall async-sentinel proc event))
+             (error
+              (unless (or completed cancelled)
+                (setq completed t)
+                (funcall callback
+                         (format "Temporary Emacs failed: %s"
+                                 (error-message-string err))))))
+           (when (and (not completed)
+                      (not cancelled)
+                      (memq (process-status proc) '(exit signal)))
+             (setq completed t)
+             (funcall callback
+                      (format "Temporary Emacs exited unexpectedly (%s)"
+                              (string-trim event)))))))
+      (lambda ()
+        (setq cancelled t)
+        (ellm-tools--cancel-elisp-process process)))))
 
 (defun ellm-tools--start-current-elisp-eval
     (owner code features callback)
@@ -1653,39 +1806,51 @@ whose documentation contains all QUERY words are included as well."
        (when (memq (process-status proc) '(exit signal))
          (ellm-tools--elisp-session-exited owner name proc))))))
 
+(defun ellm-tools--register-elisp-session-process (owner session)
+  "Record persistent SESSION's process and activity for OWNER."
+  (let ((pending (ellm-tools--elisp-session-pending session)))
+    (ellm-tools--register-process
+     (ellm-tools--elisp-session-process session) :buffer owner
+     :name (format "elisp_eval: %s" (ellm-tools--elisp-session-name session))
+     :persistent t :busy-p (lambda () (> (hash-table-count pending) 0)))))
+
 (defun ellm-tools--create-elisp-session (owner name directory)
   "Create persistent child session NAME for OWNER rooted at DIRECTORY."
-  (let ((async-process-noquery-on-exit t)
-        process
-        session)
-    (setq
-     process
-     (async-start
-      (ellm-tools--elisp-child-form
-       `(let ((evaluator ',ellm-tools--elisp-evaluator))
-          (catch 'shutdown
-            (while t
-              (let ((request (async-receive)))
-                (if (plist-get request :shutdown)
-                    (throw 'shutdown nil)
-                  (async-send
-                   :id (plist-get request :id)
-                   :result
-                   (funcall evaluator
-                            (plist-get request :code)
-                            (plist-get request :features))))))))
-       load-path exec-path directory)
-      (lambda (result)
-        (ellm-tools--handle-elisp-session-result
-         owner name process result))))
-    (setq session
-          (ellm-tools--make-elisp-session
-           :name name
-           :process process
-           :pending (make-hash-table :test #'eql)
-           :next-id 0))
-    (ellm-tools--install-elisp-session-sentinel owner name process)
-    session))
+  (ellm-tools--with-startup
+    (let ((async-process-noquery-on-exit t)
+          process
+          session)
+      (setq
+       process
+       (async-start
+        (ellm-tools--elisp-child-form
+         `(let ((evaluator ',ellm-tools--elisp-evaluator))
+            (catch 'shutdown
+              (while t
+                (let ((request (async-receive)))
+                  (if (plist-get request :shutdown)
+                      (throw 'shutdown nil)
+                    (async-send
+                     :id (plist-get request :id)
+                     :result
+                     (funcall evaluator
+                              (plist-get request :code)
+                              (plist-get request :features))))))))
+         load-path exec-path directory)
+        (lambda (result)
+          (ellm-tools--handle-elisp-session-result
+           owner name process result))))
+      (ellm-tools--track-startup-resource (process-buffer process) #'kill-buffer)
+      (ellm-tools--track-startup-resource process #'ellm-tools--cancel-startup-process)
+      (setq session
+            (ellm-tools--make-elisp-session
+             :name name
+             :process process
+             :pending (make-hash-table :test #'eql)
+             :next-id 0))
+      (ellm-tools--register-elisp-session-process owner session)
+      (ellm-tools--install-elisp-session-sentinel owner name process)
+      session)))
 
 (defun ellm-tools--get-elisp-session (owner name directory)
   "Return live named session NAME for OWNER, creating it in DIRECTORY."
@@ -1705,28 +1870,25 @@ whose documentation contains all QUERY words are included as well."
 (defun ellm-tools--start-named-elisp-eval
     (owner name code features directory callback)
   "Evaluate CODE in persistent session NAME owned by OWNER."
-  (let* ((session
-          (ellm-tools--get-elisp-session owner name directory))
-         (id (1+ (ellm-tools--elisp-session-next-id session)))
-         (pending (ellm-tools--elisp-session-pending session))
-         (process (ellm-tools--elisp-session-process session)))
-    (setf (ellm-tools--elisp-session-next-id session) id)
-    (puthash id callback pending)
-    (async-send process
-                :id id
-                :code code
-                :features features)
-    (lambda ()
-      (when (buffer-live-p owner)
-        (with-current-buffer owner
-          (when-let* ((current
-                       (and (hash-table-p ellm-tools--elisp-sessions)
-                            (gethash name ellm-tools--elisp-sessions)))
-                      ((eq current session)))
-            (remhash id pending)
-            (ellm-tools--kill-elisp-session
-             session
-             (format "Persistent Elisp session %S was cancelled" name))))))))
+  (ellm-tools--with-startup
+    (let* ((session (ellm-tools--get-elisp-session owner name directory))
+           (id (1+ (ellm-tools--elisp-session-next-id session)))
+           (pending (ellm-tools--elisp-session-pending session))
+           (process (ellm-tools--elisp-session-process session)))
+      (cl-labels
+          ((cancel ()
+                   (when (buffer-live-p owner)
+                     (with-current-buffer owner
+                       (when (eq (gethash name ellm-tools--elisp-sessions) session)
+                         (remhash id pending)
+                         (ellm-tools--kill-elisp-session
+                          session (format "Persistent Elisp session %S was cancelled" name)))))))
+        (ellm-tools--register-elisp-session-process owner session)
+        (ellm-tools--track-startup-resource #'cancel #'funcall)
+        (setf (ellm-tools--elisp-session-next-id session) id)
+        (puthash id callback pending)
+        (async-send process :id id :code code :features features)
+        #'cancel))))
 
 (defun ellm-tools--start-elisp-eval (code session features callback)
   "Dispatch CODE evaluation according to SESSION and call CALLBACK."
@@ -1840,60 +2002,61 @@ default fd command; configured commands receive the original PATTERN."
   "Start PROGRAM with ARGS asynchronously.
 FORMATTER is called with EXIT-CODE, STDOUT and STDERR, and its return value
 is passed to CALLBACK.  Return a cancellation function."
-  (unless (and (stringp program) (not (ellm-tools--blank-p program)))
-    (ellm-tools--error "Invalid command program"))
-  (unless (executable-find program)
-    (ellm-tools--error "program not found: %s" program))
-  (dolist (arg args)
-    (unless (stringp arg)
-      (ellm-tools--error "command argument is not a string: %S" arg)))
-  (let* ((conversation (current-buffer))
-         (stdout-buffer (generate-new-buffer (format " *%s-stdout*" name)))
-         (stderr-buffer (generate-new-buffer (format " *%s-stderr*" name)))
-         (finished nil)
-         process)
-    (cl-labels
-        ((buffer-text (buffer)
-                      (if (buffer-live-p buffer)
-                          (with-current-buffer buffer
-                            (buffer-string))
-                        ""))
-         (cleanup ()
-                  (when (buffer-live-p stdout-buffer)
-                    (kill-buffer stdout-buffer))
-                  (when (buffer-live-p stderr-buffer)
-                    (kill-buffer stderr-buffer))))
-      (setq process
-            (make-process
-             :name name
-             :buffer stdout-buffer
-             :command (cons program args)
-             :connection-type 'pipe
-             :noquery t
-             :stderr stderr-buffer
-             :sentinel
-             (lambda (proc _event)
-               (when (and (not finished)
-                          (memq (process-status proc) '(exit signal)))
-                 (setq finished t)
-                 (let ((exit-code (process-exit-status proc))
-                       (stdout (buffer-text stdout-buffer))
-                       (stderr (buffer-text stderr-buffer)))
-                   (cleanup)
-                   (condition-case err
-                       (funcall callback
-                                (with-current-buffer conversation
-                                  (funcall formatter exit-code stdout stderr)))
-                     (error
-                      (funcall callback
-                               (format "Error while processing command output: %s"
-                                       err)))))))))
-      (lambda ()
-        (unless finished
-          (setq finished t)
-          (when (process-live-p process)
-            (kill-process process))
-          (cleanup))))))
+  (ellm-tools--with-startup
+    (unless (and (stringp program) (not (ellm-tools--blank-p program)))
+      (ellm-tools--error "Invalid command program"))
+    (unless (executable-find program)
+      (ellm-tools--error "program not found: %s" program))
+    (dolist (arg args)
+      (unless (stringp arg)
+        (ellm-tools--error "command argument is not a string: %S" arg)))
+    (let* ((conversation (current-buffer))
+           (stdout-buffer (ellm-tools--generate-buffer (format " *%s-stdout*" name)))
+           (stderr-buffer (ellm-tools--generate-buffer (format " *%s-stderr*" name)))
+           (finished nil)
+           process)
+      (cl-labels
+          ((buffer-text (buffer)
+                        (if (buffer-live-p buffer)
+                            (with-current-buffer buffer
+                              (buffer-string))
+                          ""))
+           (cleanup ()
+                    (when (buffer-live-p stdout-buffer)
+                      (kill-buffer stdout-buffer))
+                    (when (buffer-live-p stderr-buffer)
+                      (kill-buffer stderr-buffer))))
+        (setq process
+              (ellm-tools--make-process
+               :name name
+               :buffer stdout-buffer
+               :command (cons program args)
+               :connection-type 'pipe
+               :noquery t
+               :stderr stderr-buffer
+               :sentinel
+               (lambda (proc _event)
+                 (when (and (not finished)
+                            (memq (process-status proc) '(exit signal)))
+                   (setq finished t)
+                   (let ((exit-code (process-exit-status proc))
+                         (stdout (buffer-text stdout-buffer))
+                         (stderr (buffer-text stderr-buffer)))
+                     (cleanup)
+                     (condition-case err
+                         (funcall callback
+                                  (with-current-buffer conversation
+                                    (funcall formatter exit-code stdout stderr)))
+                       (error
+                        (funcall callback
+                                 (format "Error while processing command output: %s"
+                                         err)))))))))
+        (lambda ()
+          (unless finished
+            (setq finished t)
+            (when (process-live-p process)
+              (kill-process process))
+            (cleanup)))))))
 
 (defun ellm-tools--format-command-error (kind exit-code stdout stderr)
   "Return a command failure string for KIND with EXIT-CODE, STDOUT and STDERR."
@@ -3062,57 +3225,58 @@ The return value is a cons of body and whether it was truncated."
 
 (defun ellm-tools--start-webfetch (url limit callback)
   "Fetch URL in a child Emacs and pass at most LIMIT characters to CALLBACK."
-  (let* ((conversation (current-buffer))
-         (async-process-noquery-on-exit t)
-         ;; Arbitrary webpage text may match `tramp-password-prompt-regexp'.
-         (async-prompt-for-password nil)
-         (completed nil)
-         (cancelled nil)
-         (process
-          (async-start
-           (ellm-tools--elisp-child-form
-            `(progn
-               (require 'ellm-tools)
-               (ellm-tools--encode-webfetch-result
-                (ellm-tools--webfetch
-                 ,url ,limit ,ellm-tools-webfetch-user-agent
-                 ,ellm-tools-webfetch-response-byte-limit)))
-            load-path exec-path default-directory)
-           (lambda (result)
-             (unless (async-message-p result)
-               (setq completed t)
-               (funcall
-                callback
-                (condition-case err
-                    (with-current-buffer conversation
-                      (ellm-tools--format-webfetch-result
-                       (ellm-tools--decode-webfetch-result result)))
-                  (error
-                   (format "Web fetch child failed: %s"
-                           (error-message-string err))))))))))
-    (let ((async-sentinel (process-sentinel process)))
-      (set-process-sentinel
-       process
-       (lambda (proc event)
-         (condition-case err
-             (when async-sentinel
-               (funcall async-sentinel proc event))
-           (error
-            (unless (or completed cancelled)
-              (setq completed t)
-              (funcall callback
-                       (format "Web fetch child failed: %s"
-                               (error-message-string err))))))
-         (when (and (not completed)
-                    (not cancelled)
-                    (memq (process-status proc) '(exit signal)))
-           (setq completed t)
-           (funcall callback
-                    (format "Web fetch child exited unexpectedly (%s)"
-                            (string-trim event)))))))
-    (lambda ()
-      (setq cancelled t)
-      (ellm-tools--cancel-elisp-process process))))
+  (ellm-tools--with-startup
+    (let* ((conversation (current-buffer))
+           (async-process-noquery-on-exit t)
+           ;; Arbitrary webpage text may match `tramp-password-prompt-regexp'.
+           (async-prompt-for-password nil)
+           (completed nil)
+           (cancelled nil)
+           (process
+            (ellm-tools--async-start
+             (ellm-tools--elisp-child-form
+              `(progn
+                 (require 'ellm-tools)
+                 (ellm-tools--encode-webfetch-result
+                  (ellm-tools--webfetch
+                   ,url ,limit ,ellm-tools-webfetch-user-agent
+                   ,ellm-tools-webfetch-response-byte-limit)))
+              load-path exec-path default-directory)
+             (lambda (result)
+               (unless (async-message-p result)
+                 (setq completed t)
+                 (funcall
+                  callback
+                  (condition-case err
+                      (with-current-buffer conversation
+                        (ellm-tools--format-webfetch-result
+                         (ellm-tools--decode-webfetch-result result)))
+                    (error
+                     (format "Web fetch child failed: %s"
+                             (error-message-string err))))))))))
+      (let ((async-sentinel (process-sentinel process)))
+        (set-process-sentinel
+         process
+         (lambda (proc event)
+           (condition-case err
+               (when async-sentinel
+                 (funcall async-sentinel proc event))
+             (error
+              (unless (or completed cancelled)
+                (setq completed t)
+                (funcall callback
+                         (format "Web fetch child failed: %s"
+                                 (error-message-string err))))))
+           (when (and (not completed)
+                      (not cancelled)
+                      (memq (process-status proc) '(exit signal)))
+             (setq completed t)
+             (funcall callback
+                      (format "Web fetch child exited unexpectedly (%s)"
+                              (string-trim event)))))))
+      (lambda ()
+        (setq cancelled t)
+        (ellm-tools--cancel-elisp-process process)))))
 
 ;;;;;; Websearch
 
@@ -3143,53 +3307,54 @@ The return value is a cons of body and whether it was truncated."
 
 (defun ellm-tools--start-websearch (query limit callback)
   "Search DuckDuckGo in a child Emacs and pass LIMIT results to CALLBACK."
-  (let* ((async-process-noquery-on-exit t)
-         ;; Search result text may match `tramp-password-prompt-regexp'.
-         (async-prompt-for-password nil)
-         (completed nil)
-         (cancelled nil)
-         (process
-          (async-start
-           (ellm-tools--elisp-child-form
-            `(progn
-               (require 'ellm-tools)
-               (condition-case err
-                   (ellm-tools--websearch
-                    ,query ,limit ,ellm-tools-websearch-url)
-                 (error
-                  (format "DuckDuckGo search failed: %s"
-                          (error-message-string err)))))
-            load-path exec-path default-directory)
-           (lambda (result)
-             (unless (async-message-p result)
-               (setq completed t)
-               (funcall callback
-                        (if (stringp result)
-                            result
-                          "DuckDuckGo search child returned an invalid result")))))))
-    (let ((async-sentinel (process-sentinel process)))
-      (set-process-sentinel
-       process
-       (lambda (proc event)
-         (condition-case err
-             (when async-sentinel
-               (funcall async-sentinel proc event))
-           (error
-            (unless (or completed cancelled)
-              (setq completed t)
-              (funcall callback
-                       (format "DuckDuckGo search child failed: %s"
-                               (error-message-string err))))))
-         (when (and (not completed)
-                    (not cancelled)
-                    (memq (process-status proc) '(exit signal)))
-           (setq completed t)
-           (funcall callback
-                    (format "DuckDuckGo search child exited unexpectedly (%s)"
-                            (string-trim event)))))))
-    (lambda ()
-      (setq cancelled t)
-      (ellm-tools--cancel-elisp-process process))))
+  (ellm-tools--with-startup
+    (let* ((async-process-noquery-on-exit t)
+           ;; Search result text may match `tramp-password-prompt-regexp'.
+           (async-prompt-for-password nil)
+           (completed nil)
+           (cancelled nil)
+           (process
+            (ellm-tools--async-start
+             (ellm-tools--elisp-child-form
+              `(progn
+                 (require 'ellm-tools)
+                 (condition-case err
+                     (ellm-tools--websearch
+                      ,query ,limit ,ellm-tools-websearch-url)
+                   (error
+                    (format "DuckDuckGo search failed: %s"
+                            (error-message-string err)))))
+              load-path exec-path default-directory)
+             (lambda (result)
+               (unless (async-message-p result)
+                 (setq completed t)
+                 (funcall callback
+                          (if (stringp result)
+                              result
+                            "DuckDuckGo search child returned an invalid result")))))))
+      (let ((async-sentinel (process-sentinel process)))
+        (set-process-sentinel
+         process
+         (lambda (proc event)
+           (condition-case err
+               (when async-sentinel
+                 (funcall async-sentinel proc event))
+             (error
+              (unless (or completed cancelled)
+                (setq completed t)
+                (funcall callback
+                         (format "DuckDuckGo search child failed: %s"
+                                 (error-message-string err))))))
+           (when (and (not completed)
+                      (not cancelled)
+                      (memq (process-status proc) '(exit signal)))
+             (setq completed t)
+             (funcall callback
+                      (format "DuckDuckGo search child exited unexpectedly (%s)"
+                              (string-trim event)))))))
+      (lambda ()
+        (setq cancelled t)
+        (ellm-tools--cancel-elisp-process process)))))
 
 (defun ellm-tools--dom-node-p (node)
   "Return non-nil when NODE is an XML/HTML DOM node."
@@ -3450,43 +3615,46 @@ contents and CALLBACK receives nil or a concise diagnostic string."
 (defun ellm-tools--start-file-edit-command-checker
     (name program arguments callback)
   "Run PROGRAM with ARGUMENTS and report a failed check through CALLBACK."
-  (if (not (executable-find program))
-      (progn
-        (funcall callback (format "%s check could not find executable %S"
-                                  name program))
-        nil)
-    (let ((output-buffer (generate-new-buffer " *ellm-tools-check*"))
-          finished process)
-      (setq process
-            (make-process
-             :name (concat "ellm-tools-" (downcase name) "-check")
-             :buffer output-buffer
-             :stderr output-buffer
-             :command (cons program arguments)
-             :noquery t
-             :connection-type 'pipe
-             :sentinel
-             (lambda (proc _event)
-               (when (and (memq (process-status proc) '(exit signal))
-                          (not finished))
-                 (setq finished t)
-                 (let ((exit-code (process-exit-status proc))
-                       (output (with-current-buffer output-buffer
-                                 (string-trim (buffer-string)))))
-                   (when (buffer-live-p output-buffer)
-                     (kill-buffer output-buffer))
-                   (funcall callback
-                            (unless (zerop exit-code)
-                              (format "%s check failed (exit code %d)%s"
-                                      name exit-code
-                                      (if (string-empty-p output)
-                                          ""
-                                        (concat ": " output))))))))))
-      (lambda ()
-        (when (process-live-p process)
-          (kill-process process))
-        (when (buffer-live-p output-buffer)
-          (kill-buffer output-buffer))))))
+  (ellm-tools--with-startup
+    (if (not (executable-find program))
+        (progn
+          (funcall callback (format "%s check could not find executable %S"
+                                    name program))
+          nil)
+      (let ((output-buffer (ellm-tools--generate-buffer " *ellm-tools-check*"))
+            finished process)
+        (setq process
+              (ellm-tools--make-process
+               :name (concat "ellm-tools-" (downcase name) "-check")
+               :buffer output-buffer
+               :stderr output-buffer
+               :command (cons program arguments)
+               :noquery t
+               :connection-type 'pipe
+               :sentinel
+               (lambda (proc _event)
+                 (when (and (memq (process-status proc) '(exit signal))
+                            (not finished))
+                   (setq finished t)
+                   (let ((exit-code (process-exit-status proc))
+                         (output (with-current-buffer output-buffer
+                                   (string-trim (buffer-string)))))
+                     (when (buffer-live-p output-buffer)
+                       (kill-buffer output-buffer))
+                     (funcall callback
+                              (unless (zerop exit-code)
+                                (format "%s check failed (exit code %d)%s"
+                                        name exit-code
+                                        (if (string-empty-p output)
+                                            ""
+                                          (concat ": " output))))))))))
+        (lambda ()
+          (unless finished
+            (setq finished t)
+            (when (process-live-p process)
+              (kill-process process)))
+          (when (buffer-live-p output-buffer)
+            (kill-buffer output-buffer)))))))
 
 (defun ellm-tools-file-edit-check-shell-syntax (file-path buffer callback)
   "Run a configurable shell syntax check for FILE-PATH when applicable.
@@ -3519,41 +3687,46 @@ only inspect disk contents."
 
 (defun ellm-tools--run-file-edit-checkers (file-path buffer callback)
   "Run `ellm-tools-file-edit-checkers' for FILE-PATH and BUFFER.
-CALLBACK receives a list of diagnostic strings.  Return a function that
-cancels the checker currently in progress."
+CALLBACK receives a list of diagnostic strings.  Return an idempotent
+cancellation function which prevents the pipeline from advancing."
   (let ((checkers ellm-tools-file-edit-checkers)
-        diagnostics active)
+        diagnostics active cancelled)
     (cl-labels
         ((run-next ()
-                   (if-let* ((checker (pop checkers)))
-                       (let (called checker-callback)
-                         (setq checker-callback
-                               (lambda (diagnostic)
-                                 (unless called
-                                   (setq called t)
-                                   (when diagnostic
-                                     (unless (stringp diagnostic)
-                                       (setq diagnostic
-                                             (format "Post-edit checker %S returned a non-string diagnostic: %S"
-                                                     checker diagnostic)))
-                                     (push diagnostic diagnostics))
-                                   (run-next))))
-                         (let ((handle
-                                (condition-case err
-                                    (funcall checker file-path buffer checker-callback)
-                                  (error
-                                   (funcall checker-callback
-                                            (format "Post-edit checker %S failed: %s"
-                                                    checker (error-message-string err)))
-                                   nil))))
-                           ;; A synchronous checker has already advanced the pipeline;
-                           ;; preserve the cancellation handle of a later checker.
-                           (unless called
-                             (setq active handle))))
-                     (funcall callback (nreverse diagnostics)))))
+                   (unless cancelled
+                     (if-let* ((checker (pop checkers)))
+                         (let (called)
+                           (cl-labels
+                               ((finish (diagnostic)
+                                        (unless (or called cancelled)
+                                          (setq called t)
+                                          (when diagnostic
+                                            (push (if (stringp diagnostic) diagnostic
+                                                    (format "Post-edit checker %S returned a non-string diagnostic: %S"
+                                                            checker diagnostic))
+                                                  diagnostics))
+                                          (run-next))))
+                             (let ((handle
+                                    (condition-case err
+                                        (funcall checker file-path buffer #'finish)
+                                      (error
+                                       (finish (format "Post-edit checker %S failed: %s"
+                                                       checker (error-message-string err)))
+                                       nil))))
+                               (cond
+                                (cancelled (ellm-tools--cancel-async-handle handle))
+                                ;; Synchronous completion already advanced to
+                                ;; the next checker; do not replace its handle.
+                                ((not called) (setq active handle))))))
+                       (setq active nil)
+                       (funcall callback (nreverse diagnostics))))))
       (run-next)
       (lambda ()
-        (ellm-tools--cancel-async-handle active)))))
+        (unless cancelled
+          (setq cancelled t checkers nil)
+          (let ((handle active))
+            (setq active nil)
+            (ellm-tools--cancel-async-handle handle)))))))
 
 (defun ellm-tools--format-file-edit-result (result diagnostics)
   "Append post-edit DIAGNOSTICS to successful edit RESULT."
@@ -3603,7 +3776,7 @@ exactly one occurrence."
         (unless is-file?
           (ellm-tools--error "`old_string' cannot be empty for buffer edits"))
         (let ((result (ellm-tools--create-file file-path new-string name))
-              (buffer (generate-new-buffer " *ellm-tools-edit*")))
+              (buffer (ellm-tools--generate-buffer " *ellm-tools-edit*")))
           (with-current-buffer buffer
             (insert new-string)
             (ellm-tools--set-file-edit-buffer-mode file-path)
@@ -3615,7 +3788,7 @@ exactly one occurrence."
                   buffer-or-file)))
        (t
         (ellm-tools--prepare-visiting-buffer-for-file-write file-path)
-        (let ((buffer (generate-new-buffer " *ellm-tools-edit*")))
+        (let ((buffer (ellm-tools--generate-buffer " *ellm-tools-edit*")))
           (condition-case err
               (with-current-buffer buffer
                 (insert-file-contents file-path)

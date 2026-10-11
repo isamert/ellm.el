@@ -7472,7 +7472,7 @@ The parent provider remains buffer-local fallback only when the profile omits on
                        "prompt must be a non-empty string"
                        (ellm-tools/send-subagent-tool (plist-get entry :id) "")))
               (let ((result (ellm-tools/send-subagent-tool
-                             (plist-get entry :id) "Continue work.")))
+                             "worker" "Continue work.")))
                 (should (string-match-p "Sent" result)))
               (with-current-buffer buffer
                 (let ((turns (ellm--parse-turns)))
@@ -7514,11 +7514,14 @@ The parent provider remains buffer-local fallback only when the profile omits on
             (ellm-tools/launch-subagent-tool
              "Initial prompt." nil "worker" nil)
             (let* ((entry (car ellm-subagent-history))
-                   (id (plist-get entry :id))
                    result)
-              (ellm-tools/wait-subagent-tool
-               (lambda (value) (setq result value)) id)
-              (should (equal result "done"))))
+              (dolist (key (list (plist-get entry :id)
+                                (plist-get entry :buffer-name)
+                                "worker"))
+                (setq result nil)
+                (ellm-tools/wait-subagent-tool
+                 (lambda (value) (setq result value)) key)
+                (should (equal result "done")))))
         (dolist (entry ellm-subagent-history)
           (when-let* ((buffer (get-buffer (plist-get entry :buffer-name))))
             (kill-buffer buffer)))))))
@@ -13078,5 +13081,703 @@ The parent provider remains buffer-local fallback only when the profile omits on
       (should-error (ellm-attachment-resolve id) :type 'user-error)
       (should (= 0 (hash-table-count ellm-attachment--request-data)))
       (should-error (ellm-attachment-data attachment) :type 'user-error))))
+
+;;;; Request-owned asynchronous work
+
+(ert-deftest ellm-test-request-work-terminal-states ()
+  "All terminal states drain work once; cancellation errors do not stop draining."
+  (dolist (state '(completed failed cancelled))
+    (let ((request (ellm--make-request)) (calls 0))
+      (ellm-request-register-work request (lambda () (cl-incf calls)))
+      (ellm-request-register-work request (lambda () (error "cancellation failed")))
+      (let ((remove (ellm-request-register-work
+                     request (lambda () (cl-incf calls 100)))))
+        (funcall remove)
+        (funcall remove))
+      (ellm--request-terminal-transition request state)
+      (ellm--request-terminal-transition request state)
+      (should (= calls 1))
+      (should-not (ellm-request-running-work request))
+      (ellm-request-register-work request (lambda () (cl-incf calls)))
+      (should (= calls 2))
+      (should-not (ellm-request-running-work request)))))
+
+(ert-deftest ellm-test-request-work-cancellation-order ()
+  "Registered work stops before backend cancellation, even when the backend errors."
+  (with-temp-buffer
+    (ellm-mode)
+    (let ((request (ellm--make-request :buffer (current-buffer))) events)
+      (setq ellm--active-request request)
+      (ellm-request-register-work request (lambda () (push 'cancel-work events)))
+      (cl-letf (((symbol-function 'ellm-backend-cancel)
+                 (lambda (_backend)
+                   (push 'backend events)
+                   (error "backend failed"))))
+        (should-error (ellm-cancel t)))
+      (should (equal (reverse events) '(cancel-work backend)))
+      (should (eq (ellm-request-state request) 'cancelled))
+      (should-not ellm--active-request))))
+
+(ert-deftest ellm-test-request-work-before-retry ()
+  "Work from a failed attempt is stopped before the next attempt starts."
+  (let ((request (ellm--make-request)) cancelled
+        (ellm-request-retry-delay 10))
+    (ellm-request-register-work request (lambda () (setq cancelled t)))
+    (unwind-protect
+        (progn
+          (ellm--request-schedule-retry request nil)
+          (should cancelled)
+          (should (eq (ellm-request-state request) 'retry-wait))
+          (should-not (ellm-request-running-work request)))
+      (ellm--request-cancel-retry-timer request))))
+
+(ert-deftest ellm-test-request-work-on-buffer-kill ()
+  "Buffer teardown drains work even if backend session cleanup fails."
+  (let ((buffer (generate-new-buffer " *ellm work test*")) cancelled request)
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer
+            (ellm-mode)
+            (setq request (ellm--make-request :buffer buffer))
+            (setq ellm--active-request request)
+            (ellm-request-register-work request (lambda () (setq cancelled t))))
+          (cl-letf (((symbol-function 'ellm-close-session)
+                     (lambda (&rest _) (error "backend failed"))))
+            (kill-buffer buffer))
+          (should cancelled)
+          (should-not (ellm-request-running-work request)))
+      (when (buffer-live-p buffer) (kill-buffer buffer)))))
+
+(ert-deftest ellm-test-tools-async-request-cancellation ()
+  "Request cancellation stops async work once and suppresses late results."
+  (let ((request (ellm--make-request)) callback (calls 0) (results 0))
+    (let ((cancel
+           (ellm-tools--call-async
+            request
+            (lambda (cb)
+              (setq callback cb)
+              (lambda ()
+                (cl-incf calls)
+                (funcall cb "sentinel result")))
+            (lambda (_) (cl-incf results)) nil)))
+      (ellm--request-terminal-transition request 'cancelled)
+      (funcall cancel)
+      (funcall callback "late result")
+      (should (= calls 1))
+      (should (= results 0))
+      (should-not (ellm-request-running-work request)))))
+
+(ert-deftest ellm-test-tools-async-cancel-before-handle ()
+  "A handle returned after request cancellation is stopped immediately."
+  (let ((request (ellm--make-request)) (calls 0) (results 0))
+    (ellm-tools--call-async
+     request
+     (lambda (callback)
+       (ellm--request-terminal-transition request 'cancelled)
+       (funcall callback "late result")
+       (lambda () (cl-incf calls)))
+     (lambda (_) (cl-incf results)) nil)
+    (should (= calls 1))
+    (should (= results 0))
+    (should-not (ellm-request-running-work request))))
+
+(ert-deftest ellm-test-tools-async-completion-unregisters ()
+  "Both synchronous and asynchronous completion unregister work."
+  (dolist (synchronous '(nil t))
+    (let ((request (ellm--make-request)) callback result (calls 0))
+      (ellm-tools--call-async
+       request
+       (lambda (cb)
+         (setq callback cb)
+         (when synchronous (funcall cb "done"))
+         (lambda () (cl-incf calls)))
+       (lambda (value) (setq result value)) nil)
+      (unless synchronous (funcall callback "done"))
+      (should (equal result "done"))
+      (should-not (ellm-request-running-work request))
+      (ellm--request-terminal-transition request 'completed)
+      (should (= calls 0)))))
+
+(ert-deftest ellm-test-tools-async-does-not-start-on-stopped-request ()
+  (dolist (state '(cancelling retry-wait completed failed cancelled))
+    (let ((request (ellm--make-request :state state)) started)
+      (ellm-tools--call-async request (lambda (_) (setq started t)) #'ignore nil)
+      (should-not started)
+      (should-not (ellm-request-running-work request)))))
+
+(ert-deftest ellm-test-tools-async-wrapper-cancel-cleans-timer ()
+  "The tool wrapper cancels its timeout and suppresses sentinel callbacks."
+  (let (saved-callback result timer (calls 0))
+    (let ((ellm-tools-list ellm-tools-list)
+          (ellm-tools-refs ellm-tools-refs))
+      (ellm-deftool test/cancellation-wrapper (:async t :timeout 10)
+        () "Test cancellation wrapper."
+        (setq saved-callback #'callback)
+        (lambda () (cl-incf calls) (funcall saved-callback "sentinel result"))))
+    (let ((run-at-time-function (symbol-function 'run-at-time)))
+      (cl-letf (((symbol-function 'run-at-time)
+                 (lambda (&rest args)
+                   (setq timer (apply run-at-time-function args)))))
+        (let ((cancel (ellm-tools/cancellation-wrapper-tool
+                       (lambda (value) (setq result value)))))
+          (unwind-protect
+              (progn
+                (funcall cancel)
+                (funcall cancel)
+                (funcall saved-callback "late result")
+                (should (= calls 1))
+                (should-not result)
+                (should-not (memq timer timer-list)))
+            (cancel-timer timer)))))))
+
+(ert-deftest ellm-test-tools-async-timeout-suppresses-sentinel ()
+  "A synchronous sentinel cannot replace the timeout result."
+  (let (result (calls 0))
+    (let ((ellm-tools-list ellm-tools-list)
+          (ellm-tools-refs ellm-tools-refs))
+      (ellm-deftool test/timeout-sentinel (:async t :timeout 0.05)
+        () "Test timeout sentinel."
+        (let ((finish #'callback))
+          (lambda ()
+            (cl-incf calls)
+            (funcall finish "sentinel result")))))
+    (ellm-tools/timeout-sentinel-tool (lambda (value) (setq result value)))
+    (should (ellm-test--wait-for (lambda () result)))
+    (should (string-match-p "timed out" result))
+    (should (= calls 1))))
+
+(ert-deftest ellm-test-llm-cancel-kills-running-bash ()
+  "Cancelling a logical llm.el request kills its running Bash tool."
+  (with-temp-buffer
+    (ellm-mode)
+    (let* ((request (ellm--make-request
+                     :buffer (current-buffer)
+                     :backend (ellm-llm--make-driver)
+                     :frontmatter '((tool-permissions . ((default . allow))))))
+           (tool (ellm-llm--make-llm-tool
+                  (seq-find (lambda (tool) (equal (ellm-tool-name tool) "bash"))
+                            ellm-tools-list)
+                  request))
+           (make-process-function (symbol-function 'make-process))
+           process result)
+      (setq ellm--active-request request)
+      (unwind-protect
+          (progn
+            (cl-letf (((symbol-function 'make-process)
+                       (lambda (&rest args)
+                         (setq process (apply make-process-function args)))))
+              (funcall (llm-tool-function tool)
+                       (lambda (value) (setq result value)) "sleep 30" 30))
+            (should (process-live-p process))
+            (should (ellm-request-running-work request))
+            (ellm-cancel t)
+            (should (ellm-test--wait-for
+                     (lambda () (not (process-live-p process)))))
+            (should-not result)
+            (should-not (ellm-request-running-work request))
+            (should-not ellm--active-request))
+        (when (and process (process-live-p process))
+          (kill-process process))))))
+
+;;;; Conversation-owned processes
+
+(ert-deftest ellm-test-tools-parallel-cancel-suppresses-other-callbacks ()
+  "Stopping shared work cannot complete another tool before it is cancelled."
+  (let ((request (ellm--make-request)) first-callback (calls 0) (results 0))
+    (ellm-tools--call-async
+     request
+     (lambda (callback)
+       (setq first-callback callback)
+       (lambda () (cl-incf calls)))
+     (lambda (_) (cl-incf results)) nil)
+    (ellm-tools--call-async
+     request
+     (lambda (_callback)
+       (lambda ()
+         (cl-incf calls)
+         (funcall first-callback "shared worker stopped")))
+     (lambda (_) (cl-incf results)) nil)
+    (ellm--request-terminal-transition request 'cancelled)
+    (should (= calls 2))
+    (should (= results 0))
+    (should-not (ellm-request-running-work request))))
+
+(ert-deftest ellm-test-owned-temporary-elisp-worker ()
+  "Async child Emacs processes are registered with tool labels and pruned."
+  (with-temp-buffer
+    (ellm-mode)
+    (let ((request (ellm--make-request :buffer (current-buffer)))
+          process result cancel)
+      (unwind-protect
+          (progn
+            (setq cancel
+                  (ellm-tools--call-async
+                   request #'ellm-tools/elisp-eval-tool
+                   (lambda (value) (setq result value))
+                   '("(progn (sleep-for 0.1) 42)" "temp" nil) "elisp_eval"))
+            (let ((entry (car ellm--owned-processes)))
+              (setq process (ellm-owned-process-process entry))
+              (should (equal "elisp_eval" (ellm-owned-process-name entry)))
+              (should-not (ellm-owned-process-persistent entry))
+              (should (ellm-work-active (car (ellm-request-running-work request)))))
+            (should (ellm-test--wait-for (lambda () result) 10))
+            (should (ellm-test--wait-for (lambda () (not (process-live-p process)))))
+            (should-not (ellm--live-owned-processes (current-buffer))))
+        (when cancel (funcall cancel))
+        (when (and process (process-live-p process))
+          (ellm-tools--cancel-elisp-process process))))))
+
+(ert-deftest ellm-test-owned-acp-transport ()
+  "The local ACP transport belongs to its conversation, not other sessions."
+  (with-temp-buffer
+    (ellm-mode)
+    (let* ((owner (current-buffer))
+           (provider (ellm-make-acp-provider :command "sleep" :args '("30")))
+           (connection (ellm-acp--ensure-connection provider owner))
+           (process (ellm-acp--connection-process connection)))
+      (unwind-protect
+          (progn
+            (should (eq process
+                        (ellm-owned-process-process (car ellm--owned-processes))))
+            (should (ellm-owned-process-persistent (car ellm--owned-processes)))
+            (should (equal "ACP transport"
+                           (ellm-owned-process-name (car ellm--owned-processes))))
+            (ellm-acp--ensure-connection provider owner)
+            (should (= 1 (length ellm--owned-processes))))
+        (jsonrpc-shutdown connection)))))
+
+(ert-deftest ellm-test-owned-process-registration-and-lifetime ()
+  "Registration is scoped, deduplicated, and independent of normal completion."
+  (with-temp-buffer
+    (ellm-mode)
+    (let* ((owner (current-buffer))
+           (process (make-process :name "ellm-owned-test" :command '("sleep" "30")
+                                  :connection-type 'pipe :noquery t))
+           (request (ellm--make-request :buffer owner)) cancelled)
+      (unwind-protect
+          (let ((unregister
+                 (ellm-request-register-work
+                  request (lambda () (setq cancelled t))
+                  :process process :name "Test operation")))
+            (should (= 1 (length (ellm--live-owned-processes owner))))
+            (should (equal "Test operation"
+                           (ellm-owned-process-name (car ellm--owned-processes))))
+            (funcall unregister)
+            (ellm--request-terminal-transition request 'completed)
+            (should-not cancelled)
+            (should (process-live-p process))
+            (should-not (ellm-request-running-work request))
+            (ellm-register-process process :persistent t :name "Idle worker")
+            (should (= 1 (length ellm--owned-processes)))
+            (delete-process process)
+            (should-not (ellm--live-owned-processes owner)))
+        (when (process-live-p process) (delete-process process))))))
+
+(ert-deftest ellm-test-list-processes-scoped-and-refreshable ()
+  "The list excludes other conversations and unregistered processes."
+  (let ((owner (generate-new-buffer " *ellm process owner*"))
+        (other (generate-new-buffer " *ellm process other*"))
+        processes list-buffer)
+    (unwind-protect
+        (progn
+          (dotimes (index 3)
+            (push (make-process :name (format "ellm-list-test-%d" index)
+                                :command '("sleep" "30")
+                                :connection-type 'pipe :noquery t)
+                  processes))
+          (with-current-buffer owner
+            (ellm-mode)
+            (ellm-register-process (nth 0 processes) :name "Owned tool")
+            (ellm-register-process (nth 1 processes) :buffer other :name "Other tool")
+            (cl-letf (((symbol-function 'pop-to-buffer)
+                       (lambda (buffer &rest _) (setq list-buffer buffer))))
+              (ellm-list-processes)))
+          (with-current-buffer list-buffer
+            (should (derived-mode-p 'ellm-process-list-mode))
+            (should (derived-mode-p 'special-mode))
+            (should (eq ellm-process-list--table (vtable-current-table)))
+            (should (= 1 (length (vtable-objects ellm-process-list--table))))
+            (let ((entries (ellm-process-list--objects)))
+              (should (= 1 (length entries)))
+              (should (eq (ellm-owned-process-process (car entries)) (nth 0 processes)))
+              (should (equal "Owned tool" (ellm-process-list--get (car entries) 0 nil)))
+              (should (equal "Request" (ellm-process-list--get (car entries) 3 nil)))
+              (should (equal "sleep 30" (ellm-process-list--get (car entries) 4 nil))))
+            (delete-process (nth 0 processes))
+            (revert-buffer nil t)
+            (should-not (ellm-process-list--objects))
+            (should-not (vtable-objects ellm-process-list--table))
+            (should-not (string-match-p "Owned tool" (buffer-string)))
+            ;; Refresh must also work with no row under point.
+            (call-interactively (key-binding (kbd "g")))
+            (should-not (vtable-objects ellm-process-list--table))))
+      (dolist (process processes)
+        (when (process-live-p process) (delete-process process)))
+      (dolist (buffer (list owner other list-buffer))
+        (when (buffer-live-p buffer) (kill-buffer buffer))))))
+
+(ert-deftest ellm-test-list-processes-requires-conversation ()
+  (with-temp-buffer
+    (should-error (ellm-list-processes) :type 'user-error)))
+
+(ert-deftest ellm-test-tools-process-ownership-survives-callbacks ()
+  "Follow-up processes started from an output buffer retain the tool owner."
+  (with-temp-buffer
+    (ellm-mode)
+    (let* ((owner (current-buffer))
+           (output (generate-new-buffer " *ellm process callback*"))
+           (request (ellm--make-request :buffer owner))
+           first second result cancel)
+      (unwind-protect
+          (progn
+            (setq cancel
+                  (ellm-tools--call-async
+                   request
+                   (lambda (callback)
+                     (setq first
+                           (ellm-tools--make-process
+                            :name "ellm-first" :command '("true")
+                            :connection-type 'pipe :noquery t
+                            :sentinel
+                            (lambda (process _event)
+                              (when (eq (process-status process) 'exit)
+                                (with-current-buffer output
+                                  (setq second
+                                        (ellm-tools--make-process
+                                         :name "ellm-second" :command '("sleep" "30")
+                                         :connection-type 'pipe :noquery t)))
+                                (funcall callback "done")))))
+                     (lambda ()
+                       (when (and second (process-live-p second))
+                         (delete-process second))))
+                   (lambda (value) (setq result value)) nil "Follow-up tool"))
+            (should (ellm-test--wait-for (lambda () result)))
+            (should (= 1 (length (ellm--live-owned-processes owner))))
+            (should (eq second (ellm-owned-process-process (car ellm--owned-processes))))
+            (should (equal "Follow-up tool"
+                           (ellm-owned-process-name (car ellm--owned-processes))))
+            (should-not (buffer-local-value 'ellm--owned-processes output)))
+        (when cancel (funcall cancel))
+        (dolist (process (list first second))
+          (when (and process (process-live-p process)) (delete-process process)))
+        (kill-buffer output)))))
+
+(ert-deftest ellm-test-persistent-process-visible-idle-and-cancelled-active ()
+  "Idle named workers survive cancellation; active named evaluations do not."
+  (with-temp-buffer
+    (ellm-mode)
+    (let* ((owner (current-buffer))
+           (request (ellm--make-request :buffer owner))
+           first-result process)
+      (unwind-protect
+          (progn
+            (ellm-tools--call-async
+             request #'ellm-tools/elisp-eval-tool
+             (lambda (value) (setq first-result value))
+             '("(setq ellm-test-owned-value 42)" "owned-worker" nil) "elisp_eval")
+            (setq process (ellm-owned-process-process (car ellm--owned-processes)))
+            (should (ellm-test--wait-for (lambda () first-result) 10))
+            (ellm--request-terminal-transition request 'completed)
+            (with-temp-buffer
+              (ellm-process-list-mode)
+              (setq ellm-process-list--owner owner)
+              (should (equal "Persistent (idle)"
+                             (ellm-process-list--get (car (ellm-process-list--objects)) 3 nil))))
+            ;; An unrelated request has no right to stop an idle worker.
+            (setq request (ellm--make-request :buffer owner
+                                              :backend (ellm-llm--make-driver)))
+            (setq ellm--active-request request)
+            (ellm-cancel t)
+            (should (process-live-p process))
+            ;; Reuse the same worker, now evaluating for a new request.
+            (setq request (ellm--make-request :buffer owner
+                                              :backend (ellm-llm--make-driver)))
+            (setq ellm--active-request request)
+            (ellm-tools--call-async
+             request #'ellm-tools/elisp-eval-tool #'ignore
+             '("(sleep-for 30)" "owned-worker" nil) "elisp_eval")
+            (should (eq process (ellm-owned-process-process (car ellm--owned-processes))))
+            (with-temp-buffer
+              (ellm-process-list-mode)
+              (setq ellm-process-list--owner owner)
+              (should (equal "Persistent (active)"
+                             (ellm-process-list--get (car (ellm-process-list--objects)) 3 nil))))
+            (ellm-cancel t)
+            (should-not (process-live-p process))
+            (should-not (ellm--live-owned-processes owner)))
+        (ellm-tools--kill-elisp-sessions)))))
+
+
+(ert-deftest ellm-test-list-open-persisted-directory ()
+  (with-temp-buffer
+    (let ((conversation (current-buffer))
+          opened)
+      (setq-local ellm--session-directory "/tmp/ellm-session/")
+      (with-temp-buffer
+        (ellm-list-mode)
+        (let ((inhibit-read-only t))
+          (insert (propertize "Conversation" 'ellm-list-buffer conversation)))
+        (goto-char (point-min))
+        (should (eq (key-binding (kbd "M-RET")) #'ellm-list-open-directory))
+        (should (eq (key-binding (kbd "RET")) #'ellm-list-visit))
+        (cl-letf (((symbol-function 'dired)
+                   (lambda (directory &rest _) (setq opened directory))))
+          (ellm-list-open-directory)
+          (should (equal opened "/tmp/ellm-session/"))
+          (with-current-buffer conversation
+            (setq ellm--session-directory nil))
+          (should-error (ellm-list-open-directory) :type 'user-error)
+          (goto-char (point-max))
+          (should-error (ellm-list-open-directory) :type 'user-error))))))
+
+(ert-deftest ellm-test-sessions-open-persisted-directory ()
+  (with-temp-buffer
+    (ellm-sessions-mode)
+    (let ((inhibit-read-only t)
+          opened)
+      (insert (propertize "Conversation" 'ellm-sessions-file
+                          "/tmp/ellm-session/main.ellm"))
+      (goto-char (point-min))
+      (should (eq (key-binding (kbd "M-RET")) #'ellm-sessions-open-directory))
+      (should (eq (key-binding (kbd "RET")) #'ellm-sessions-visit))
+      (cl-letf (((symbol-function 'dired)
+                 (lambda (directory &rest _) (setq opened directory))))
+        (ellm-sessions-open-directory)
+        (should (equal opened "/tmp/ellm-session/"))
+        (goto-char (point-max))
+        (should-error (ellm-sessions-open-directory) :type 'user-error)))))
+
+;;;; Async lifecycle regressions
+
+(ert-deftest ellm-test-local-command-startup-error-cleans-buffers ()
+  "Command helpers also protect startup when called outside a tool wrapper."
+  (dolist (checker '(nil t))
+    (let ((create-buffer (symbol-function 'generate-new-buffer)) outputs)
+      (cl-letf (((symbol-function 'generate-new-buffer)
+                 (lambda (&rest args)
+                   (let ((buffer (apply create-buffer args)))
+                     (push buffer outputs)
+                     buffer)))
+                ((symbol-function 'make-process)
+                 (lambda (&rest _) (error "creation failed"))))
+        (should-error
+         (if checker
+             (ellm-tools--start-file-edit-command-checker "Test" "sleep" '("30") #'ignore)
+           (ellm-tools--start-command "Test" "sleep" '("30") #'ignore #'ignore))))
+      (should outputs)
+      (should-not (seq-some #'buffer-live-p outputs)))))
+
+(ert-deftest ellm-test-named-worker-send-error-cleans-session ()
+  "Failing to submit an evaluation must not leave a worker or pending callback."
+  (with-temp-buffer
+    (ellm-mode)
+    (let (process output result)
+      (cl-letf (((symbol-function 'async-send)
+                 (lambda (worker &rest _args)
+                   (setq process worker output (process-buffer worker))
+                   (error "send failed"))))
+        (ellm-tools/elisp-eval-tool
+         (lambda (value) (setq result value)) "42" "failed-send" nil))
+      (should (string-match-p "send failed" result))
+      (should-not (process-live-p process))
+      (should-not (buffer-live-p output))
+      (should-not (gethash "failed-send" ellm-tools--elisp-sessions)))))
+
+(ert-deftest ellm-test-async-timeout-cleans-before-continuation ()
+  "A timeout continuation can safely reuse a named Elisp session."
+  (with-temp-buffer
+    (ellm-mode)
+    (let ((ellm-tools-default-timeout 0.1) first second)
+      (unwind-protect
+          (progn
+            (ellm-tools/elisp-eval-tool
+             (lambda (value)
+               (setq first value)
+               (let ((ellm-tools-default-timeout 5))
+                 (ellm-tools/elisp-eval-tool
+                  (lambda (value) (setq second value))
+                  "(+ 20 22)" "timeout-continuation" nil)))
+             "(sleep-for 10)" "timeout-continuation" nil)
+            (should (ellm-test--wait-for (lambda () (and first second)) 10))
+            (should (string-match-p "timed out" first))
+            (should (string-match-p (regexp-quote "<value>\n42\n</value>") second)))
+        (ellm-tools--kill-elisp-sessions)))))
+
+(ert-deftest ellm-test-async-timeout-before-handle-return ()
+  "Timeouts clean up resources and handles returned late, before delivery."
+  (with-temp-buffer
+    (ellm-mode)
+    (let (process result (calls 0) callback-process-live)
+      (let ((ellm-tools-list ellm-tools-list) (ellm-tools-refs ellm-tools-refs))
+        (ellm-deftool test/early-timeout (:async t :timeout 0.02)
+          () "Timeout before startup completes."
+          (setq process (ellm-tools--make-process
+                         :name "ellm-early-timeout" :command '("sleep" "30")
+                         :connection-type 'pipe :noquery t))
+          (sit-for 0.1)
+          (lambda ()
+            (cl-incf calls)
+            (when (process-live-p process) (delete-process process)))))
+      (unwind-protect
+          (let ((cancel (ellm-tools/early-timeout-tool
+                         (lambda (value)
+                           (setq callback-process-live (process-live-p process)
+                                 result value)))))
+            (should (string-match-p "timed out" result))
+            (should-not callback-process-live)
+            (should-not (process-live-p process))
+            (funcall cancel)
+            (should (= calls 1)))
+        (when (and process (process-live-p process)) (delete-process process))))))
+
+(ert-deftest ellm-test-async-startup-error-cleans-resources ()
+  "Both raw tools and macro-defined tools clean partially initialized resources."
+  (with-temp-buffer
+    (ellm-mode)
+    (dolist (macro-tool '(nil t))
+      (let ((request (ellm--make-request :buffer (current-buffer)))
+            process output result)
+        (let ((ellm-tools-list ellm-tools-list) (ellm-tools-refs ellm-tools-refs))
+          (ellm-deftool test/startup-error (:async t :timeout nil)
+            () "Fail after creating resources."
+            (setq output (ellm-tools--generate-buffer " *ellm failed startup*"))
+            (setq process (ellm-tools--make-process
+                           :name "ellm-startup-error" :buffer output
+                           :command '("sleep" "30") :connection-type 'pipe :noquery t))
+            (error "startup failed")))
+        (unwind-protect
+            (progn
+              (if macro-tool
+                  (ellm-tools--call-async
+                   request #'ellm-tools/startup-error-tool
+                   (lambda (value) (setq result value)) nil)
+                (should-error
+                 (ellm-tools--call-async
+                  request
+                  (lambda (_callback)
+                    (setq output (ellm-tools--generate-buffer " *ellm failed raw startup*"))
+                    (setq process (ellm-tools--make-process
+                                   :name "ellm-raw-startup-error" :buffer output
+                                   :command '("sleep" "30") :connection-type 'pipe :noquery t))
+                    (error "startup failed")) #'ignore nil)))
+              (when macro-tool (should (string-match-p "startup failed" result)))
+              (should-not (process-live-p process))
+              (should-not (buffer-live-p output))
+              (should-not (ellm-request-running-work request)))
+          (when (and process (process-live-p process)) (delete-process process))
+          (when (buffer-live-p output) (kill-buffer output)))))))
+
+(ert-deftest ellm-test-async-process-creation-error-cleans-output ()
+  "Failure to create a Bash process must not leave an output buffer."
+  (let (output result)
+    (let ((create-buffer (symbol-function 'generate-new-buffer)))
+      (cl-letf (((symbol-function 'generate-new-buffer)
+                 (lambda (&rest args) (setq output (apply create-buffer args))))
+                ((symbol-function 'make-process) (lambda (&rest _) (error "creation failed"))))
+        (ellm-tools/bash-tool (lambda (value) (setq result value)) "true")))
+    (should (string-match-p "creation failed" result))
+    (should-not (buffer-live-p output))))
+
+(ert-deftest ellm-test-async-cancel-after-synchronous-result-before-return ()
+  "An uncommitted synchronous result cannot outrun request cancellation."
+  (let ((request (ellm--make-request)) (calls 0) result)
+    (ellm-tools--call-async
+     request
+     (lambda (callback)
+       (funcall callback "uncommitted result")
+       (ellm--request-terminal-transition request 'cancelled)
+       (lambda () (cl-incf calls)))
+     (lambda (value) (setq result value)) nil)
+    (should-not result)
+    (should (= calls 1))
+    (should-not (ellm-request-running-work request))))
+
+(ert-deftest ellm-test-checker-cancel-suppresses-late-sentinel ()
+  "Killing a command checker makes its later sentinel a no-op."
+  (with-temp-buffer
+    (let (process sentinel output result)
+      (unwind-protect
+          (let* ((make-process-function (symbol-function 'make-process))
+                 (cancel
+                  (cl-letf (((symbol-function 'make-process)
+                             (lambda (&rest args)
+                               (setq process (apply make-process-function args)
+                                     output (process-buffer process))
+                               process)))
+                    (ellm-tools--start-file-edit-command-checker
+                     "Review" "sleep" '("30") (lambda (value) (setq result value))))))
+            (setq sentinel (process-sentinel process))
+            (funcall cancel)
+            (funcall cancel)
+            (set-process-sentinel process nil)
+            (when (process-live-p process) (delete-process process))
+            (funcall sentinel process "killed")
+            (should-not result)
+            (should-not (buffer-live-p output)))
+        (when (and process (process-live-p process))
+          (set-process-sentinel process nil)
+          (delete-process process))
+        (when (buffer-live-p output) (kill-buffer output))))))
+
+(ert-deftest ellm-test-checker-pipeline-cancellation-latches ()
+  "Synchronous and late cancellation callbacks must not start another checker."
+  (let ((started 0) (stopped 0) callback result
+        (ellm-tools-file-edit-checkers nil))
+    (setq ellm-tools-file-edit-checkers
+          (list (lambda (_file _buffer cb)
+                  (cl-incf started)
+                  (setq callback cb)
+                  (lambda () (cl-incf stopped) (funcall cb "stopped")))
+                (lambda (_file _buffer cb)
+                  (cl-incf started)
+                  (funcall cb nil))))
+    (let ((cancel (ellm-tools--run-file-edit-checkers
+                   nil (current-buffer) (lambda (value) (setq result value)))))
+      (funcall cancel)
+      (funcall callback "late result")
+      (funcall cancel)
+      (should (= started 1))
+      (should (= stopped 1))
+      (should-not result))))
+
+(defun ellm-test--complete-owned-worker (weak &optional named)
+  "Create an idle worker and completed request tracked weakly in WEAK.
+If NAMED is non-nil, use a real persistent Elisp worker."
+  (let ((request (ellm--make-request :buffer (current-buffer))) result)
+    (puthash request t weak)
+    (if named
+        (progn
+          (ellm-tools--call-async
+           request #'ellm-tools/elisp-eval-tool
+           (lambda (value) (setq result value)) '("42" "retention-worker" nil))
+          (should (ellm-test--wait-for (lambda () result) 10)))
+      (ellm-tools--call-async
+       request
+       (lambda (callback)
+         (let ((process (ellm-tools--register-process
+                         (make-process :name "ellm-retention" :command '("sleep" "30")
+                                       :connection-type 'pipe :noquery t)
+                         :persistent t)))
+           (funcall callback "done")
+           (lambda () (delete-process process))))
+       #'ignore nil))
+    ;; Do not retain the returned cancellation closure in the test runner.
+    nil))
+
+(ert-deftest ellm-test-idle-worker-does-not-retain-completed-request ()
+  "Ownership metadata must not keep a completed request's closures alive."
+  (dolist (named '(nil t))
+    (with-temp-buffer
+      (ellm-mode)
+      (let ((weak (make-hash-table :test #'eq :weakness 'key)) process)
+        (unwind-protect
+            (progn
+              (ellm-test--complete-owned-worker weak named)
+              (setq process (ellm-owned-process-process (car ellm--owned-processes)))
+              (garbage-collect)
+              (should (process-live-p process))
+              (should (= 0 (hash-table-count weak))))
+          (ellm-tools--kill-elisp-sessions)
+          (when (and process (process-live-p process)) (delete-process process)))))))
 
 ;;; ellm-test.el ends here
