@@ -4412,6 +4412,17 @@ Search results may change and this may fail."
           (setq buffer nil
                 reopened (find-file-noselect file))
           (with-current-buffer reopened
+            (should (equal ellm--base-default-directory
+                           (file-name-as-directory workspace)))
+            (should (equal (plist-get (ellm-list--group reopened) :key)
+                           (concat "directory:" (file-name-as-directory workspace))))
+            (make-directory (expand-file-name ".git" workspace))
+            (should (equal (ellm--project-root-in-buffer reopened)
+                           (file-name-as-directory workspace)))
+            (should (equal (ellm--buffer-root-or-directory reopened)
+                           (file-name-as-directory workspace)))
+            (should (equal (plist-get (ellm-list--group reopened) :key)
+                           (concat "project:" (file-name-as-directory workspace))))
             (goto-char (point-max))
             (insert "Use the saved workspace.\n")
             (ellm-send)

@@ -4071,7 +4071,15 @@ persisted ellm session."
      (ellm--persistence-session-directory-from-file
       (ellm--persistence-session-role)))
     (ignore-errors
-      (ellm--apply-working-directory (ellm--parse-frontmatter)))))
+      (let ((frontmatter (ellm--parse-frontmatter)))
+        (ellm--apply-working-directory frontmatter)
+        ;; The visited file lives in storage, not in the original workspace.
+        ;; Restore an absolute saved cwd as the base for project lookups;
+        ;; relative cwd values must keep their original resolution base.
+        (when (and ellm--frontmatter-cwd-directory
+                   (file-name-absolute-p (alist-get 'cwd frontmatter)))
+          (setq-local ellm--base-default-directory
+                      ellm--frontmatter-cwd-directory))))))
 
 (defun ellm--persistence-prepare (&optional force root session-id)
   "Prepare the current buffer for persistence.
