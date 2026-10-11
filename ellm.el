@@ -4196,7 +4196,10 @@ ROOT and SESSION-ID have the same meanings as in `ellm--persistence-prepare'."
           (ellm--localize-reasoning-state-files)
           (ellm--persist-tool-output-buffers)
           (when buffer-file-name
+            ;; Persistence writes transcripts, not user-edited source files.
+            ;; Editing hooks can fail on request-locked buffers or alter streams.
             (let ((ellm--persistence-saving-p t)
+                  (before-save-hook nil)
                   (save-silently t)
                   (inhibit-message t))
               (save-buffer)

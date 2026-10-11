@@ -4517,6 +4517,51 @@ Search results may change and this may fail."
       (delete-directory root t)
       (delete-directory workspace t))))
 
+(ert-deftest ellm-test-persistence-skips-before-save-hooks ()
+  "Persistence skips editing hooks, but ordinary saves still run them."
+  (let* ((root (make-temp-file "ellm-persistence-hooks-" t))
+         (ellm-persistence-enabled t)
+         (ellm-persistence-location 'global)
+         (ellm-persistence-directory root)
+         (hook-calls 0)
+         buffer)
+    (unwind-protect
+        (progn
+          (setq buffer (ellm-new-buffer))
+          (with-current-buffer buffer
+            (goto-char (point-max))
+            (insert "Persist this draft.  \n")
+            (ellm--persistence-flush)
+            (add-hook 'before-save-hook
+                      (lambda ()
+                        (cl-incf hook-calls)
+                        (delete-trailing-whitespace)) nil t)
+            (goto-char (point-max))
+            (insert "Streaming text.  \n")
+            (ellm--set-active-request (ellm--make-request))
+            (should (ellm--persistence-flush))
+            (should buffer-read-only)
+            (should (= hook-calls 0))
+            (should-not (buffer-modified-p))
+            (should (equal (buffer-string)
+                           (with-temp-buffer
+                             (insert-file-contents
+                              (buffer-local-value 'buffer-file-name buffer))
+                             (buffer-string))))
+            (should (string-suffix-p "Streaming text.  \n" (buffer-string)))
+            (ellm--set-active-request nil)
+            (goto-char (point-max))
+            (insert "Manual save.  \n")
+            (save-buffer)
+            (should (= hook-calls 1))
+            (should (string-suffix-p "Manual save.\n" (buffer-string)))))
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer
+          (ellm--set-active-request nil)
+          (set-buffer-modified-p nil))
+        (kill-buffer buffer))
+      (delete-directory root t))))
+
 (ert-deftest ellm-test-persistence-project-location ()
   "Project persistence should create sessions below the project root."
   (let* ((root (make-temp-file "ellm-project-persistence-" t))
