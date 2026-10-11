@@ -10473,6 +10473,15 @@ Return non-nil when BUFFER has a row in the current list."
   (interactive nil ellm-list-mode)
   (pop-to-buffer (ellm-list--buffer-at-point)))
 
+(defun ellm-list-open-directory ()
+  "Open the persisted directory of the conversation at point in Dired."
+  (interactive nil ellm-list-mode)
+  (let ((directory (buffer-local-value
+                    'ellm--session-directory (ellm-list--buffer-at-point))))
+    (unless directory
+      (user-error "ellm: Conversation is not persisted"))
+    (dired directory)))
+
 (defun ellm-list-cancel ()
   "Cancel the active request for the conversation at point, retaining point."
   (interactive nil ellm-list-mode)
@@ -10572,6 +10581,7 @@ surviving neighbour can be located before REFRESH rebuilds the list."
     ("TAB" . ellm-list-toggle-at-point)
     ("<backtab>" . ellm-list-cycle-groups)
     ("RET" . ellm-list-visit)
+    ("M-RET" . ellm-list-open-directory)
     ("c" . ellm-list-cancel)
     ("a" . ellm-list-answer-prompt)
     ("C" . ellm-list-new)
@@ -10742,6 +10752,14 @@ conversation state only when such updates were skipped."
       (user-error "ellm: No saved session at point"))
     (ellm--find-file-or-switch-to-buffer file)))
 
+(defun ellm-sessions-open-directory ()
+  "Open the persisted directory of the saved conversation at point in Dired."
+  (interactive nil ellm-sessions-mode)
+  (let ((file (get-text-property (point) 'ellm-sessions-file)))
+    (unless file
+      (user-error "ellm: No saved session at point"))
+    (dired (file-name-directory file))))
+
 (defun ellm-sessions-kill ()
   "Delete the saved conversation at point from disk.
 This removes the conversation directory, including its transcript, subagents,
@@ -10775,6 +10793,7 @@ its subagents, are killed."
     ("TAB" . ellm-sessions-toggle-group)
     ("<backtab>" . ellm-sessions-cycle-groups)
     ("RET" . ellm-sessions-visit)
+    ("M-RET" . ellm-sessions-open-directory)
     ("x" . ellm-sessions-kill)
     ("q" . quit-window))
   "Bindings for the persisted session browser.")
