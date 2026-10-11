@@ -77,6 +77,7 @@
     (activate-mark)
     (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "A comment")))
       (ellm-comment))
+    (should-not mark-active)
     (should (equal (buffer-string)
                    "one\ntwo\nthree\n\n> one\n> two\nA comment\n"))))
 
@@ -4123,6 +4124,31 @@ Search results may change and this may fail."
           (set-buffer-modified-p nil)
           (kill-buffer buffer)))
       (delete-directory root t))))
+
+(ert-deftest ellm-test-context-commands-deactivate-source-region ()
+  "Context commands consume the region before switching buffers."
+  (dolist (command '(ellm-dwim ellm-toggle-side-window ellm-comment))
+    (let ((source (generate-new-buffer " *ellm context source*"))
+          (target (generate-new-buffer " *ellm context target*")))
+      (unwind-protect
+          (save-window-excursion
+            (switch-to-buffer source)
+            (emacs-lisp-mode)
+            (insert "selected\nunselected")
+            (goto-char (point-min))
+            (set-mark (line-end-position))
+            (activate-mark)
+            (cl-letf (((symbol-function 'ellm--select-or-create-project-buffer)
+                       (lambda (&rest _) target))
+                      ((symbol-function 'read-string) (lambda (&rest _) "")))
+              (funcall command))
+            (with-current-buffer source
+              (should-not mark-active))
+            (with-current-buffer target
+              (should (string-match-p "selected\n```" (buffer-string)))
+              (should-not (string-match-p "unselected" (buffer-string)))))
+        (kill-buffer source)
+        (kill-buffer target)))))
 
 (ert-deftest ellm-test-dwim-prefix-creates-new-project-buffer ()
   "A prefix argument to `ellm-dwim' should force a fresh conversation."

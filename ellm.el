@@ -8011,6 +8011,7 @@ new target conversation outside an ellm buffer."
                   (t (ellm--select-or-create-project-buffer root new)))))
     (unless (buffer-live-p target)
       (user-error "ellm: No conversation for this draft"))
+    (deactivate-mark)
     (pcase (ellm--append-to-next-prompt target entry)
       ('draft (message "ellm: added to draft for next user prompt"))
       ('prompt (message "ellm: added to next user prompt")))))
@@ -8045,16 +8046,17 @@ one.  When the region is active, append it to the target conversation as a
 Markdown fenced code block with language and file location context."
   (interactive "P")
   (let* ((root (ellm--current-project-root-or-directory))
-         (snippet (ellm--region-snippet root))
-         (buffer (ellm--select-or-create-project-buffer root new)))
-    (when snippet
-      (ellm--append-snippet buffer snippet))
-    (if-let* ((window (get-buffer-window buffer t)))
-        (select-window window)
-      (switch-to-buffer buffer))
-    (goto-char (point-max))
-    (recenter)
-    buffer))
+         (snippet (ellm--region-snippet root)))
+    (deactivate-mark)
+    (let ((buffer (ellm--select-or-create-project-buffer root new)))
+      (when snippet
+        (ellm--append-snippet buffer snippet))
+      (if-let* ((window (get-buffer-window buffer t)))
+          (select-window window)
+        (switch-to-buffer buffer))
+      (goto-char (point-max))
+      (recenter)
+      buffer)))
 
 (defun ellm--delete-buffer-windows (buffer)
   "Delete windows displaying BUFFER on the selected frame."
