@@ -4211,12 +4211,14 @@ ROOT and SESSION-ID have the same meanings as in `ellm--persistence-prepare'."
               (error-message-string err))
        nil))))
 
-(defun ellm--related-session-buffers (session-id &optional buffers)
+(cl-defun ellm--related-session-buffers
+    (session-id &optional (buffers (list (current-buffer))))
   "Return live ellm buffers related to SESSION-ID.
-BUFFERS seeds the traversal and defaults to the current buffer.  SESSION-ID
-identifies already persisted members.  Live subagent parent links also include
-members created before their parent was explicitly saved."
-  (let ((pending (or buffers (list (current-buffer))))
+BUFFERS seeds the traversal and defaults to the current buffer when omitted.
+An explicitly empty BUFFERS list returns no buffers.  SESSION-ID identifies
+already persisted members.  Live subagent parent links also include members
+created before their parent was explicitly saved."
+  (let ((pending buffers)
         seen)
     (while pending
       (let ((buffer (pop pending)))
@@ -4270,9 +4272,13 @@ released."
       (setq-local ellm--persistence-ephemeral-p t)
       (remove-hook 'kill-buffer-hook #'ellm--persistence-before-kill t)
       (set-buffer-modified-p nil)))
-  (dolist (buffer buffers)
-    (when (buffer-live-p buffer)
-      (kill-buffer buffer))))
+  ;; Killing a displayed buffer can change the current buffer through window
+  ;; or backend cleanup hooks.  Callers such as the session browser still need
+  ;; to operate on their original buffer afterwards.
+  (save-current-buffer
+    (dolist (buffer buffers)
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
 
 ;;;###autoload
 (defun ellm-save (&optional choose-directory)
@@ -10706,10 +10712,16 @@ Keep the session list selected while reading the answer."
 START and END delimit the removed rows and PROPERTY identifies row items,
 compared with TEST.  Call this while the removed rows are still present so the
 surviving neighbour can be located before REFRESH rebuilds the list."
-  (let ((item (or (get-text-property end property)
+  (let ((item (or (save-excursion
+                    (goto-char end)
+                    (while (and (not (eobp))
+                                (not (get-text-property (point) property)))
+                      (forward-line 1))
+                    (get-text-property (point) property))
                   (save-excursion
                     (goto-char start)
-                    (forward-line -1)
+                    (while (and (= (forward-line -1) 0)
+                                (not (get-text-property (point) property))))
                     (get-text-property (point) property)))))
     (funcall refresh)
     (when item

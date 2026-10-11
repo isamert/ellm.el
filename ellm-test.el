@@ -4011,6 +4011,8 @@ Search results may change and this may fail."
   "Deleting a saved session removes its directory and every live member."
   (let ((root (make-temp-file "ellm-sessions-kill-" t))
         (list-buffer (generate-new-buffer " *ellm saved sessions test*"))
+        (other-buffer (generate-new-buffer " *ellm unrelated test*"))
+        (kill-function (symbol-function 'kill-buffer))
         (ellm-persistence-enabled t)
         (ellm-persistence-location 'global)
         buffer related directory file session-id)
@@ -4035,13 +4037,23 @@ Search results may change and this may fail."
             (setq ellm-sessions--roots (ellm--persistence-search-roots))
             (ellm-sessions-refresh)
             (should (ellm-list--goto-item 'ellm-sessions-file file))
-            (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t)))
+            (with-current-buffer other-buffer
+              (insert "Unrelated buffer contents"))
+            (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t))
+                      ;; Simulate cleanup changing buffers after a kill.
+                      ((symbol-function 'kill-buffer)
+                       (lambda (victim)
+                         (prog1 (funcall kill-function victim)
+                           (set-buffer other-buffer)))))
               (ellm-sessions-kill))
+            (should (eq (current-buffer) list-buffer))
+            (should (equal (with-current-buffer other-buffer (buffer-string))
+                           "Unrelated buffer contents"))
             (should-not (buffer-live-p buffer))
             (should-not (buffer-live-p related))
             (should-not (file-exists-p directory))
             (should-not (ellm-list--goto-item 'ellm-sessions-file file))))
-      (dolist (candidate (list related buffer))
+      (dolist (candidate (list related buffer other-buffer))
         (when (buffer-live-p candidate)
           (with-current-buffer candidate
             (set-buffer-modified-p nil))
@@ -4050,6 +4062,49 @@ Search results may change and this may fail."
         (kill-buffer list-buffer))
       (when (file-exists-p root)
         (delete-directory root t)))))
+
+(ert-deftest ellm-test-sessions-kill-unopened-session-keeps-browser ()
+  "Deleting an unopened saved session must not kill or replace the browser."
+  (let* ((root (make-temp-file "ellm-sessions-unopened-" t))
+         (file (expand-file-name "session/main.ellm" root))
+         (list-buffer (generate-new-buffer " *ellm unopened sessions test*"))
+         (other-buffer (generate-new-buffer " *ellm fallback test*"))
+         (ellm-persistence-directory root)
+         (ellm-persistence-location 'global)
+         (ellm-current-project-function (lambda () nil)))
+    (unwind-protect
+        (save-window-excursion
+          (make-directory (file-name-directory file) t)
+          (with-temp-file file
+            (insert "---\nellm:\n  session-id: unopened-session-test\n---\n>-| user\nHello\n"))
+          (should (equal (car (ellm--persisted-session-metadata file))
+                         "unopened-session-test"))
+          (should-not (ellm--session-buffers
+                       "unopened-session-test" (file-name-directory file)))
+          (with-current-buffer other-buffer
+            (insert "Unrelated buffer contents")
+            (set-buffer-modified-p nil))
+          (switch-to-buffer other-buffer)
+          (switch-to-buffer list-buffer)
+          (ellm-sessions-mode)
+          (setq ellm-sessions--roots (ellm--persistence-search-roots))
+          (ellm-sessions-refresh)
+          (should (ellm-list--goto-item 'ellm-sessions-file file))
+          (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t)))
+            (ellm-sessions-kill))
+          (should (buffer-live-p list-buffer))
+          (should (eq (current-buffer) list-buffer))
+          (should (eq (window-buffer) list-buffer))
+          (should-not (file-exists-p (file-name-directory file)))
+          (should-not (ellm-list--goto-item 'ellm-sessions-file file))
+          (should (equal (with-current-buffer other-buffer (buffer-string))
+                         "Unrelated buffer contents")))
+      (dolist (buffer (list list-buffer other-buffer))
+        (when (buffer-live-p buffer)
+          (with-current-buffer buffer
+            (set-buffer-modified-p nil))
+          (kill-buffer buffer)))
+      (delete-directory root t))))
 
 (ert-deftest ellm-test-sessions-kill-keeps-point-on-nearest-row ()
   "Deleting a session leaves point on the row that takes its place."
@@ -4095,6 +4150,31 @@ Search results may change and this may fail."
         (kill-buffer list-buffer))
       (when (file-exists-p root)
         (delete-directory root t)))))
+
+(ert-deftest ellm-test-sessions-kill-last-row-in-group-keeps-nearest-session ()
+  "Removing a whole group selects the next session, or the previous at EOF."
+  (with-temp-buffer
+    (ellm-sessions-mode)
+    (let ((groups
+           (mapcar (lambda (name)
+                     (list :key name :label name
+                           :records (list (list :file name :title name
+                                                :modified (current-time)))))
+                   '("first" "middle" "last"))))
+      (cl-letf (((symbol-function 'ellm-sessions--groups) (lambda () groups)))
+        (ellm-sessions-refresh)
+        (dolist (case '(("middle" . "last") ("last" . "first")))
+          (should (ellm-list--goto-item 'ellm-sessions-file (car case)))
+          (let ((start (line-beginning-position))
+                (end (line-beginning-position 2)))
+            (setq groups (cl-remove (car case) groups
+                                    :key (lambda (group) (plist-get group :key))
+                                    :test #'equal))
+            (ellm-list--refresh-after-kill
+             start end 'ellm-sessions-file #'ellm-sessions-refresh))
+          (should (equal (get-text-property (point) 'ellm-sessions-file)
+                         (cdr case)))
+          (should-not (ellm-list--goto-group (car case))))))))
 
 (ert-deftest ellm-test-dwim-appends-region-to-project-buffer ()
   "`ellm-dwim' should reuse the project conversation and append context."
