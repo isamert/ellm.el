@@ -4482,7 +4482,9 @@ PROJECT-CACHE, when supplied, shares workspace project names across roots."
       (switch-to-buffer buffer)
     (find-file file)))
 
-;;;; Org links
+;;;; Org integration
+
+;;;;; Org links
 
 (declare-function org-link-set-parameters "ol")
 (declare-function org-link-store-props "ol")
@@ -4667,10 +4669,10 @@ If that turn is missing, open the conversation and display a warning."
     (when turn-id
       (widen)
       (if-let* ((turn (cl-find turn-id (ellm--parse-turns)
-                              :key (lambda (turn)
-                                     (alist-get "id" (ellm-turn-attrs turn)
-                                                nil nil #'equal))
-                              :test #'equal)))
+                               :key (lambda (turn)
+                                      (alist-get "id" (ellm-turn-attrs turn)
+                                                 nil nil #'equal))
+                               :test #'equal)))
           (progn
             (goto-char (ellm--turn-delimiter-beg turn))
             (outline-show-entry))
@@ -4682,6 +4684,105 @@ If that turn is missing, open the conversation and display a warning."
   (org-link-set-parameters "ellm"
                            :store #'ellm-org-store-link
                            :follow #'ellm-org-open-link))
+
+;;;;; ellm-org-find-references
+
+(declare-function org-agenda-files "org")
+(declare-function org-mode "org")
+(declare-function org-back-to-heading "org")
+(declare-function org-before-first-heading-p "org")
+(declare-function org-get-outline-path "org")
+(declare-function org-element-context "org-element")
+(declare-function org-element-type "org-element")
+(declare-function org-element-property "org-element")
+(declare-function org-fold-show-context "org-fold")
+(declare-function org-fold-show-entry "org-fold")
+
+(defun ellm--org-reference-label (file position path)
+  "Format FILE, POSITION and heading PATH as a completion candidate."
+  (let ((separator (propertize " › " 'face 'shadow)))
+    (concat
+     (propertize (abbreviate-file-name file) 'face 'font-lock-function-name-face)
+     (propertize (format ":%d" (line-number-at-pos position)) 'face 'shadow)
+     separator
+     (when (cdr path)
+       (concat (string-join (butlast path) separator) separator))
+     (propertize (or (car (last path)) "(file)") 'face 'bold))))
+
+(defun ellm--org-references-in-buffer (session-id file)
+  "Return references to SESSION-ID in the current Org buffer visiting FILE.
+Each reference is (LABEL FILE POSITION), deduplicated by containing heading."
+  (save-excursion
+    (save-restriction
+      (widen)
+      (goto-char (point-min))
+      (let ((needle (concat "ellm:" session-id))
+            (case-fold-search nil)
+            (seen (make-hash-table :test #'eql))
+            references)
+        (while (search-forward needle nil t)
+          (let ((link (save-excursion
+                        (goto-char (match-beginning 0))
+                        (org-element-context))))
+            (when (and (eq (org-element-type link) 'link)
+                       (equal (org-element-property :type link) "ellm")
+                       (equal (car (ignore-errors
+                                     (ellm--org-link-parse-target
+                                      (org-element-property :path link))))
+                              session-id))
+              (save-excursion
+                (goto-char (org-element-property :begin link))
+                (let* ((before-heading (org-before-first-heading-p))
+                       (position (if before-heading (point-min)
+                                   (org-back-to-heading t) (point)))
+                       (path (unless before-heading
+                               (org-get-outline-path t))))
+                  (unless (gethash position seen)
+                    (puthash position t seen)
+                    (push (list (ellm--org-reference-label file position path)
+                                file position)
+                          references)))))))
+        (nreverse references)))))
+
+(defun ellm--org-references (session-id)
+  "Find SESSION-ID links in agenda files, preferring their live contents."
+  (require 'org)
+  (let (references)
+    (dolist (file (delete-dups (org-agenda-files t)))
+      (setq file (expand-file-name file))
+      (let ((buffer (find-buffer-visiting file)))
+        (setq references
+              (nconc references
+                     (if buffer
+                         (with-current-buffer buffer
+                           (when (derived-mode-p 'org-mode)
+                             (ellm--org-references-in-buffer session-id file)))
+                       (with-temp-buffer
+                         (insert-file-contents file)
+                         (delay-mode-hooks (org-mode))
+                         (ellm--org-references-in-buffer session-id file)))))))
+    references))
+
+;;;###autoload
+(defun ellm-org-find-references ()
+  "Find Org agenda headings linking to the current ellm session."
+  (interactive)
+  (unless (derived-mode-p 'ellm-mode)
+    (user-error "ellm: Find references must be called from a conversation"))
+  (let* ((session-id (save-restriction
+                       (widen)
+                       (ellm--frontmatter-value '(ellm session-id))))
+         (references (and session-id (ellm--org-references session-id))))
+    (unless references
+      (user-error "ellm: No Org agenda references to this session"))
+    (pcase-let ((`(,_ ,file ,position)
+                 (assoc (completing-read "Org reference: " references nil t)
+                        references)))
+      (find-file file)
+      (widen)
+      (goto-char position)
+      (org-fold-show-context 'link-search)
+      (org-fold-show-entry))))
 
 ;;;; ellm-open-session
 

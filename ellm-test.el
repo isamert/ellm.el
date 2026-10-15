@@ -12462,6 +12462,111 @@ The parent provider remains buffer-local fallback only when the profile omits on
         (kill-buffer buffer))
       (delete-directory root t))))
 
+(ert-deftest ellm-test-org-reference-label-styles-breadcrumbs ()
+  (with-temp-buffer
+    (insert "* Project\n** Task\n")
+    (let ((label (ellm--org-reference-label "/tmp/tasks.org" 11 '("Project" "Task"))))
+      (should (equal (substring-no-properties label)
+                     "/tmp/tasks.org:2 › Project › Task"))
+      (should (eq (get-text-property 0 'face label) 'font-lock-function-name-face))
+      (should-not (get-text-property (string-match "Project" label) 'face label))
+      (should (eq (get-text-property (string-match "›" label) 'face label)
+                  'shadow))
+      (should (eq (get-text-property (+ 2 (string-match "› Task" label)) 'face label)
+                  'bold)))
+    (should (string-match-p "(file)" (ellm--org-reference-label "/tmp/tasks.org" 1 nil)))))
+
+(ert-deftest ellm-test-org-references-verify-links-and-group-headings ()
+  (require 'org)
+  (with-temp-buffer
+    (org-mode)
+    (insert "[[ellm:session][File reference]]\n"
+            "* Project\n** Investigation\n"
+            "[[ellm:session#turn=abc][Decision]]\n"
+            "[[ellm:session/subagent/subagent_1][Research]]\n"
+            "** Not references\n"
+            "session ellm:session-other\n"
+            "=ellm:session= ~ellm:session~\n"
+            "#+begin_src text\nellm:session\n#+end_src\n"
+            "#+begin_example\n[[ellm:session][Example]]\n#+end_example\n"
+            "# [[ellm:session][Comment]]\n"
+            "** Another\nellm:session\n")
+    (goto-char (point-max))
+    (let ((position (point)))
+      (narrow-to-region (point) (point))
+      (let ((references (ellm--org-references-in-buffer "session" "/tmp/tasks.org")))
+        (should (= (length references) 3))
+        (should (= (nth 2 (car references)) 1))
+        (should (string-match-p "Project › Investigation" (car (nth 1 references))))
+        (should (string-match-p "Project › Another" (car (nth 2 references))))
+        (should (= (point) position))
+        (should (= (point-min) position))))))
+
+(ert-deftest ellm-test-org-references-use-unsaved-buffers-and-clean-up ()
+  (require 'org)
+  (let* ((root (make-temp-file "ellm-org-references-" t))
+         (live-file (expand-file-name "live.org" root))
+         (disk-file (expand-file-name "disk.org" root))
+         (org-agenda-files (list live-file disk-file))
+         buffer)
+    (unwind-protect
+        (progn
+          (with-temp-file live-file (insert "* Saved\nNo reference\n"))
+          (with-temp-file disk-file (insert "* Disk\n[[ellm:session][Link]]\n"))
+          (setq buffer (find-file-noselect live-file))
+          (with-current-buffer buffer
+            (goto-char (point-max))
+            (insert "** Unsaved\n[[ellm:session][Link]]\n")
+            (narrow-to-region (point-max) (point-max)))
+          (let ((references (ellm--org-references "session")))
+            (should (= (length references) 2))
+            (should (string-match-p "Saved › Unsaved" (caar references)))
+            (should (equal (nth 1 (cadr references)) disk-file)))
+          (should-not (find-buffer-visiting disk-file))
+          (with-current-buffer buffer
+            (should (buffer-modified-p))
+            (should (buffer-narrowed-p))))
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer (set-buffer-modified-p nil))
+        (kill-buffer buffer))
+      (delete-directory root t))))
+
+(ert-deftest ellm-test-org-find-references-visits-and-reveals-heading ()
+  (require 'org)
+  (let* ((root (make-temp-file "ellm-org-references-" t))
+         (file (expand-file-name "tasks.org" root))
+         (org-agenda-files (list file))
+         buffer)
+    (unwind-protect
+        (save-window-excursion
+          (with-temp-file file
+            (insert "* Project\n** Task\n[[ellm:session/subagent/subagent_1#turn=abc][Link]]\n"))
+          (setq buffer (find-file-noselect file))
+          (with-current-buffer buffer (org-fold-hide-sublevels 1))
+          (with-temp-buffer
+            (insert "---\nellm:\n  session-id: session\n---\n\n>-| user\n")
+            (ellm-mode)
+            (cl-letf (((symbol-function 'completing-read)
+                       (lambda (_prompt choices &rest _)
+                         (should (= (length choices) 1))
+                         (caar choices))))
+              (ellm-org-find-references)
+              (should (eq (current-buffer) buffer))
+              (should (looking-at "\\*\\* Task"))
+              (should-not (invisible-p (point)))
+              (forward-line 1)
+              (should-not (invisible-p (point))))))
+      (when (buffer-live-p buffer) (kill-buffer buffer))
+      (delete-directory root t))))
+
+(ert-deftest ellm-test-org-find-references-no-id-does-not-create-one ()
+  (with-temp-buffer
+    (ellm-mode)
+    (insert ">-| user\nNo links yet\n")
+    (let ((text (buffer-string)))
+      (should-error (ellm-org-find-references) :type 'user-error)
+      (should (equal text (buffer-string))))))
+
 (ert-deftest ellm-test-org-link-prefers-live-buffer ()
   (let ((buffer (generate-new-buffer " *ellm org link live*"))
         (id "20260911T142530-a1b2c3"))
