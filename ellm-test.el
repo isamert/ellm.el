@@ -12288,6 +12288,7 @@ The parent provider remains buffer-local fallback only when the profile omits on
         (with-current-buffer buffer
           (insert "---\ntitle: Link title\n---\n\n>-| user\nInvestigate the failure\n")
           (ellm-mode)
+          (goto-char (point-min))
           (should (ellm-org-store-link))
           (let ((id (ellm--frontmatter-value '(ellm session-id))))
             (should (stringp id))
@@ -12368,6 +12369,99 @@ The parent provider remains buffer-local fallback only when the profile omits on
         (should-not (ellm-org-store-link))
         (should (equal org-store-link-plist '(:link "unchanged")))))))
 
+(ert-deftest ellm-test-org-store-link-assigns-and-reuses-turn-id ()
+  "Headers and bodies share a stable, lazily assigned UUID."
+  (with-temp-buffer
+    (insert ">-| user\nFirst\n>-| assistant\nDecision\n")
+    (ellm-mode)
+    (goto-char (point-min))
+    (search-forward "Decision")
+    (let (org-store-link-plist)
+      (should (ellm-org-store-link))
+      (let* ((link (plist-get org-store-link-plist :link))
+             (turn (cadr (ellm--parse-turns)))
+             (id (alist-get "id" (ellm-turn-attrs turn) nil nil #'equal)))
+        (should (string-match-p
+                 "\\`[[:xdigit:]]\\{8\\}-[[:xdigit:]]\\{4\\}-4[[:xdigit:]]\\{3\\}-[[:xdigit:]]\\{4\\}-[[:xdigit:]]\\{12\\}\\'" id))
+        (should (string-suffix-p (concat "#turn=" id) link))
+        (should-not (alist-get "id" (ellm-turn-attrs (car (ellm--parse-turns)))
+                               nil nil #'equal))
+        (goto-char (ellm--turn-delimiter-beg turn))
+        (narrow-to-region (point) (point-max))
+        (should (ellm-org-store-link))
+        (should (buffer-narrowed-p))
+        (should (equal link (plist-get org-store-link-plist :link)))))))
+
+(ert-deftest ellm-test-org-store-link-reuses-tool-call-id ()
+  "Existing backend IDs are preserved and URL-encoded in fragments."
+  (with-temp-buffer
+    (insert ">-| assistant\nWorking\n>>-| tool-call | bash :id call/a#b\nArgs\n")
+    (ellm-mode)
+    (let (org-store-link-plist)
+      (should (ellm-org-store-link))
+      (let* ((link (plist-get org-store-link-plist :link))
+             (target (substring link (length "ellm:"))))
+        (should (string-suffix-p "#turn=call%2Fa%23b" link))
+        (should (equal (nth 2 (ellm--org-link-parse-target target)) "call/a#b"))
+        (should (equal (alist-get "id" (ellm-turn-attrs (cadr (ellm--parse-turns)))
+                                 nil nil #'equal)
+                       "call/a#b"))))))
+
+(ert-deftest ellm-test-org-deep-link-reveals-narrowed-folded-turn ()
+  "Following a deep link widens and reveals the target, including child turns."
+  (let ((buffer (generate-new-buffer " *ellm deep link*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer
+            (insert "---\nellm:\n  session-id: deep-session\n---\n\n"
+                    ">-| user :id first\nQuestion\n"
+                    ">-| assistant\nWorking\n"
+                    ">>-| tool-call | bash :id call_target\nArguments\n")
+            (ellm-mode)
+            (outline-hide-body)
+            (goto-char (point-min))
+            (search-forward "Question")
+            (narrow-to-region (line-beginning-position) (line-end-position)))
+          (ellm-org-open-link "deep-session#turn=call_target" nil)
+          (should (eq (current-buffer) buffer))
+          (should-not (buffer-narrowed-p))
+          (should (looking-at-p ">>-| tool-call"))
+          (should-not (invisible-p (point)))
+          (save-excursion
+            (forward-line 1)
+            (should-not (invisible-p (point))))
+          (let (warning)
+            (cl-letf (((symbol-function 'display-warning)
+                       (lambda (type text &rest _)
+                         (setq warning (list type text)))))
+              (ellm-org-open-link "deep-session#turn=missing" nil))
+            (should (equal warning
+                           '(ellm "Turn missing not found in session deep-session"))))
+          (should (eq (current-buffer) buffer)))
+      (when (buffer-live-p buffer) (kill-buffer buffer)))))
+
+(ert-deftest ellm-test-org-deep-link-opens-persisted-turn ()
+  "Turn fragments work when the session is loaded from disk."
+  (let* ((root (make-temp-file "ellm-deep-link-" t))
+         (file (expand-file-name "deep-session/main.ellm" root))
+         buffer)
+    (unwind-protect
+        (progn
+          (make-directory (file-name-directory file) t)
+          (with-temp-file file
+            (insert "---\nellm:\n  session-id: deep-session\n---\n\n"
+                    ">-| user\nQuestion\n>-| assistant :id decision\nAnswer\n"))
+          (let ((ellm-persistence-directory root)
+                (ellm-current-project-function (lambda () nil)))
+            (ellm-org-open-link "deep-session#turn=decision" nil)
+            (setq buffer (current-buffer))
+            (should (equal buffer-file-name file))
+            (should (looking-at-p ">-| assistant :id decision"))))
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer (set-buffer-modified-p nil))
+        (kill-buffer buffer))
+      (delete-directory root t))))
+
 (ert-deftest ellm-test-org-link-prefers-live-buffer ()
   (let ((buffer (generate-new-buffer " *ellm org link live*"))
         (id "20260911T142530-a1b2c3"))
@@ -12446,7 +12540,10 @@ The parent provider remains buffer-local fallback only when the profile omits on
                            (concat "ellm:"
                                    (with-current-buffer parent
                                      (ellm--frontmatter-value '(ellm session-id)))
-                                   "/subagent/subagent_1"))))
+                                   "/subagent/subagent_1#turn="
+                                   (alist-get "id"
+                                              (ellm-turn-attrs (car (ellm--parse-turns)))
+                                              nil nil #'equal)))))
           (ellm-org-open-link (substring (plist-get org-store-link-plist :link)
                                          (length "ellm:")) nil)
           (should (eq (current-buffer) child)))

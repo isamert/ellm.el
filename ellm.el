@@ -4528,9 +4528,31 @@ An unsaved subagent inherits its live parent's newly assigned id so a later
                           "ellm session")))
     (concat "ellm: " (truncate-string-to-width description 80 nil nil t))))
 
+(defun ellm--org-link-turn-id ()
+  "Return the current turn's id, assigning a UUID if necessary.
+Point may be on the delimiter or in the body.  Outside a turn, return nil."
+  (save-excursion
+    (save-restriction
+      (widen)
+      (let* ((pos (point))
+             (turn (cl-find-if
+                    (lambda (turn)
+                      (and (<= (ellm--turn-delimiter-beg turn) pos)
+                           (or (< pos (ellm-turn-end turn))
+                               (= pos (ellm-turn-end turn) (point-max)))))
+                    (ellm--parse-turns))))
+        (when turn
+          (or (alist-get "id" (ellm-turn-attrs turn) nil nil #'equal)
+              (let ((id (ellm--uuid)))
+                (ellm--set-turn-header-attrs
+                 (ellm--turn-delimiter-beg turn) `(("id" . ,id)))
+                id)))))))
+
 (defun ellm-org-store-link (&optional _interactive)
   "Store an Org link to the current or selected ellm conversation.
 In `ellm-list-mode' and `ellm-sessions-mode', use the conversation at point.
+From a conversation buffer, link to the turn at point, assigning it a UUID
+if it has no :id.  Browser links identify the whole session.
 Saved conversations are opened without displaying them, reusing live buffers.
 The link identifies the session rather than its persistence path.  Storing a
 link to an unsaved conversation assigns it a session id but does not save it."
@@ -4543,11 +4565,16 @@ link to an unsaved conversation assigns it a session id but does not save it."
                  (when-let* ((file (get-text-property (point) 'ellm-sessions-file)))
                    (find-file-noselect file)))))
               ((buffer-live-p buffer)))
-    (with-current-buffer buffer
-      (org-link-store-props
-       :type "ellm"
-       :link (concat "ellm:" (ellm--org-link-target))
-       :description (ellm--org-link-description)))
+    (let ((turn-id (and (derived-mode-p 'ellm-mode)
+                        (ellm--org-link-turn-id))))
+      (with-current-buffer buffer
+        (save-restriction
+          (widen)
+          (org-link-store-props
+           :type "ellm"
+           :link (concat "ellm:" (ellm--org-link-target)
+                         (and turn-id (concat "#turn=" (url-hexify-string turn-id))))
+           :description (ellm--org-link-description)))))
     t))
 
 (defun ellm--org-link-safe-component-p (component)
@@ -4557,29 +4584,33 @@ link to an unsaved conversation assigns it a session id but does not save it."
        (equal component (file-name-nondirectory component))))
 
 (defun ellm--org-link-parse-target (target)
-  "Return (SESSION-ID SUBAGENT-ID) parsed from Org link TARGET."
+  "Return (SESSION-ID SUBAGENT-ID TURN-ID) parsed from Org link TARGET."
   (unless (string-match
-           "\\`\\([^/]+\\)\\(?:/subagent/\\([^/]+\\)\\)?\\'" target)
+           "\\`\\([^/#]+\\)\\(?:/subagent/\\([^/#]+\\)\\)?\\(?:#turn=\\([^#]+\\)\\)?\\'" target)
     (user-error "ellm: Invalid Org link target: %s" target))
   (let ((session-id (match-string 1 target))
         (subagent-id (when-let* ((subagent (match-string 2 target)))
-                       (url-unhex-string subagent))))
+                       (url-unhex-string subagent)))
+        (turn-id (when-let* ((turn (match-string 3 target)))
+                   (url-unhex-string turn))))
     (unless (and (ellm--org-link-safe-component-p session-id)
                  (or (null subagent-id)
                      (ellm--org-link-safe-component-p subagent-id)))
       (user-error "ellm: Invalid Org link target: %s" target))
-    (list session-id subagent-id)))
+    (list session-id subagent-id turn-id)))
 
 (defun ellm--org-link-live-buffer (session-id subagent-id)
   "Return a live ellm buffer for SESSION-ID and optional SUBAGENT-ID."
   (cl-find-if
    (lambda (buffer)
      (with-current-buffer buffer
-       (and (derived-mode-p 'ellm-mode)
-            (equal (ellm--frontmatter-value '(ellm session-id)) session-id)
-            (if subagent-id
-                (equal (ellm--frontmatter-value '(subagent id)) subagent-id)
-              (not (ellm--frontmatter-value '(subagent id)))))))
+       (save-restriction
+         (widen)
+         (and (derived-mode-p 'ellm-mode)
+              (equal (ellm--frontmatter-value '(ellm session-id)) session-id)
+              (if subagent-id
+                  (equal (ellm--frontmatter-value '(subagent id)) subagent-id)
+                (not (ellm--frontmatter-value '(subagent id))))))))
    (buffer-list)))
 
 (defun ellm--persisted-session-by-id (session-id)
@@ -4621,8 +4652,10 @@ fallback for a session directory that was renamed after saving."
     (ellm--persisted-session-main-file session)))
 
 (defun ellm-org-open-link (target _arg)
-  "Open the ellm Org link TARGET."
-  (pcase-let ((`(,session-id ,subagent-id)
+  "Open the ellm Org link TARGET.
+An optional #turn=ID fragment reveals the first turn with a matching :id.
+If that turn is missing, open the conversation and display a warning."
+  (pcase-let ((`(,session-id ,subagent-id ,turn-id)
                (ellm--org-link-parse-target target)))
     (if-let* ((buffer (ellm--org-link-live-buffer session-id subagent-id)))
         (switch-to-buffer buffer)
@@ -4630,7 +4663,20 @@ fallback for a session directory that was renamed after saving."
                 (file (ellm--org-link-file session subagent-id)))
           (ellm--find-file-or-switch-to-buffer file)
         (user-error "ellm: No %s found for session %s"
-                    (if subagent-id "subagent" "conversation") session-id)))))
+                    (if subagent-id "subagent" "conversation") session-id)))
+    (when turn-id
+      (widen)
+      (if-let* ((turn (cl-find turn-id (ellm--parse-turns)
+                              :key (lambda (turn)
+                                     (alist-get "id" (ellm-turn-attrs turn)
+                                                nil nil #'equal))
+                              :test #'equal)))
+          (progn
+            (goto-char (ellm--turn-delimiter-beg turn))
+            (outline-show-entry))
+        (display-warning 'ellm
+                         (format "Turn %s not found in session %s"
+                                 turn-id session-id))))))
 
 (with-eval-after-load 'ol
   (org-link-set-parameters "ellm"
