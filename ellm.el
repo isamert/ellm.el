@@ -8108,7 +8108,8 @@ When FENCED-SNIPPET is non-nil, use it instead of quoting TEXT."
 In an ellm buffer, quote the text in the current conversation.  Else append it
 as a fenced code block to an ellm conversation for the current project or
 directory without selecting that buffer.  With prefix argument NEW, create a
-new target conversation outside an ellm buffer."
+new target conversation outside an ellm buffer.  Preserve point so comments
+can be added in succession."
   (interactive "P")
   (let* ((in-ellm (derived-mode-p 'ellm-mode))
          (in-compose (derived-mode-p 'ellm-compose-mode))
@@ -8128,7 +8129,7 @@ new target conversation outside an ellm buffer."
     (unless (buffer-live-p target)
       (user-error "ellm: No conversation for this draft"))
     (deactivate-mark)
-    (pcase (ellm--append-to-next-prompt target entry)
+    (pcase (save-excursion (ellm--append-to-next-prompt target entry))
       ('draft (message "ellm: added to draft for next user prompt"))
       ('prompt (message "ellm: added to next user prompt")))))
 

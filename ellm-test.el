@@ -49,6 +49,25 @@
       (ellm-comment))
     (should (equal (buffer-string) "First line\nSecond line\n\n> First line\n"))))
 
+(ert-deftest ellm-test-comment-preserves-point-for-successive-comments ()
+  (with-temp-buffer
+    (ellm-mode)
+    (ellm--insert-turn "assistant")
+    (insert "First line\nSecond line\n")
+    (goto-char (point-min))
+    (search-forward "First")
+    (let ((position (point)))
+      (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "A comment")))
+        (ellm-comment)
+        (should (= (point) position))
+        (forward-line 1)
+        (setq position (point))
+        (ellm-comment)
+        (should (= (point) position)))
+      (should (string-suffix-p
+               "> First line\nA comment\n\n> Second line\nA comment\n"
+               (buffer-string))))))
+
 (ert-deftest ellm-test-jump-to-tool-pair-toggles-between-call-and-result ()
   (with-temp-buffer
     (ellm-mode)
