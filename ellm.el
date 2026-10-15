@@ -4620,6 +4620,22 @@ Point may be on the delimiter or in the body.  Outside a turn, return nil."
                  (ellm--turn-delimiter-beg turn) `(("id" . ,id)))
                 id)))))))
 
+(defun ellm--conversation-buffer-at-point (&optional noerror)
+  "Return the current conversation or the one selected in a session browser.
+Saved conversations are opened without displaying them, reusing live buffers.
+When NOERROR is non-nil, return nil if there is no conversation at point."
+  (let ((buffer
+         (cond
+          ((derived-mode-p 'ellm-mode) (current-buffer))
+          ((derived-mode-p 'ellm-list-mode) (ellm-list--buffer-at-point t))
+          ((derived-mode-p 'ellm-sessions-mode)
+           (when-let* ((file (get-text-property (point) 'ellm-sessions-file)))
+             (find-file-noselect file))))))
+    (if (buffer-live-p buffer)
+        buffer
+      (unless noerror
+        (user-error "ellm: No conversation at point")))))
+
 (defun ellm-org-store-link (&optional _interactive)
   "Store an Org link to the current or selected ellm conversation.
 In `ellm-list-mode' and `ellm-sessions-mode', use the conversation at point.
@@ -4628,15 +4644,7 @@ if it has no :id.  Browser links identify the whole session.
 Saved conversations are opened without displaying them, reusing live buffers.
 The link identifies the session rather than its persistence path.  Storing a
 link to an unsaved conversation assigns it a session id but does not save it."
-  (when-let* ((buffer
-               (cond
-                ((derived-mode-p 'ellm-mode) (current-buffer))
-                ((derived-mode-p 'ellm-list-mode)
-                 (ellm-list--buffer-at-point t))
-                ((derived-mode-p 'ellm-sessions-mode)
-                 (when-let* ((file (get-text-property (point) 'ellm-sessions-file)))
-                   (find-file-noselect file)))))
-              ((buffer-live-p buffer)))
+  (when-let* ((buffer (ellm--conversation-buffer-at-point t)))
     (let ((turn-id (and (derived-mode-p 'ellm-mode)
                         (ellm--org-link-turn-id))))
       (with-current-buffer buffer
@@ -4836,13 +4844,14 @@ Each reference is (LABEL FILE POSITION), deduplicated by containing heading."
 
 ;;;###autoload
 (defun ellm-org-find-references ()
-  "Find Org agenda headings linking to the current ellm session."
+  "Find Org agenda headings linking to the current or selected ellm session.
+In `ellm-list-mode' and `ellm-sessions-mode', use the conversation at point."
   (interactive)
-  (unless (derived-mode-p 'ellm-mode)
-    (user-error "ellm: Find references must be called from a conversation"))
-  (let* ((session-id (save-restriction
-                       (widen)
-                       (ellm--frontmatter-value '(ellm session-id))))
+  (let* ((buffer (ellm--conversation-buffer-at-point))
+         (session-id (with-current-buffer buffer
+                       (save-restriction
+                         (widen)
+                         (ellm--frontmatter-value '(ellm session-id)))))
          (references (and session-id (ellm--org-references session-id))))
     (unless references
       (user-error "ellm: No Org agenda references to this session"))

@@ -12681,6 +12681,49 @@ The parent provider remains buffer-local fallback only when the profile omits on
       (when (buffer-live-p buffer) (kill-buffer buffer))
       (delete-directory root t))))
 
+(ert-deftest ellm-test-org-find-references-from-session-browsers ()
+  "Both browsers resolve the selected session and visit its Org references."
+  (let* ((root (make-temp-file "ellm-org-browser-references-" t))
+         (session-file (expand-file-name "main.ellm" root))
+         (org-file (expand-file-name "tasks.org" root))
+         (org-agenda-files (list org-file))
+         conversation org-buffer)
+    (unwind-protect
+        (save-window-excursion
+          (with-temp-file session-file
+            (insert "---\nellm:\n  session-id: browser-session\n---\n\n>-| user\nHello\n"))
+          (with-temp-file org-file
+            (insert "* Task\n[[ellm:browser-session][Conversation]]\n"))
+          ;; Start with the saved browser so resolution must open the transcript.
+          (dolist (mode '(ellm-sessions-mode ellm-list-mode))
+            (with-temp-buffer
+              (funcall mode)
+              (let ((inhibit-read-only t))
+                (insert (if (eq mode 'ellm-sessions-mode)
+                            (propertize "Conversation\n" 'ellm-sessions-file session-file)
+                          (propertize "Conversation\n" 'ellm-list-buffer conversation))))
+              (goto-char (point-min))
+              (cl-letf (((symbol-function 'completing-read)
+                         (lambda (_prompt choices &rest _)
+                           (should (= (length choices) 1))
+                           (caar choices))))
+                (ellm-org-find-references))
+              (setq org-buffer (current-buffer)
+                    conversation (find-buffer-visiting session-file))
+              (should (equal buffer-file-name org-file))
+              (should (looking-at-p "\\* Task"))
+              (with-current-buffer conversation
+                (should-not (buffer-modified-p))))))
+      (dolist (buffer (list conversation org-buffer))
+        (when (buffer-live-p buffer) (kill-buffer buffer)))
+      (delete-directory root t))))
+
+(ert-deftest ellm-test-org-find-references-rejects-browser-headings ()
+  (dolist (mode '(ellm-list-mode ellm-sessions-mode))
+    (with-temp-buffer
+      (funcall mode)
+      (should-error (ellm-org-find-references) :type 'user-error))))
+
 (ert-deftest ellm-test-org-find-references-no-id-does-not-create-one ()
   (with-temp-buffer
     (ellm-mode)
