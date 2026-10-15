@@ -12299,6 +12299,75 @@ The parent provider remains buffer-local fallback only when the profile omits on
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
+(ert-deftest ellm-test-org-store-link-from-live-session-list ()
+  "The live browser shares link generation, including subagent targets."
+  (let ((buffer (generate-new-buffer " *ellm org list target*"))
+        org-store-link-plist)
+    (unwind-protect
+        (dolist (subagent '(nil "worker 1"))
+          (with-current-buffer buffer
+            (erase-buffer)
+            (insert "---\ntitle: List target\n---\n\n>-| user\nHello\n")
+            (ellm-mode)
+            (when subagent
+              (ellm--set-frontmatter-value '(subagent id) subagent)))
+          (with-temp-buffer
+            (ellm-list-mode)
+            (let ((inhibit-read-only t))
+              (insert (propertize "Conversation\n" 'ellm-list-buffer buffer)))
+            (goto-char (point-min))
+            (should (ellm-org-store-link))
+            (should (derived-mode-p 'ellm-list-mode))
+            (should (equal (plist-get org-store-link-plist :link)
+                           (with-current-buffer buffer
+                             (concat "ellm:" (ellm--org-link-target)))))
+            (should (equal (plist-get org-store-link-plist :description)
+                           "ellm: List target"))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest ellm-test-org-store-link-from-saved-session-browser ()
+  "Saved rows use the same link logic and prefer an existing live buffer."
+  (let* ((root (make-temp-file "ellm-org-browser-" t))
+         (file (expand-file-name "main.ellm" root))
+         buffer
+         org-store-link-plist)
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "---\ntitle: Saved title\nellm:\n  session-id: saved-id\n---\n\n>-| user\nHello\n"))
+          (with-temp-buffer
+            (ellm-sessions-mode)
+            (let ((inhibit-read-only t))
+              (insert (propertize "Conversation\n" 'ellm-sessions-file file)))
+            (goto-char (point-min))
+            (should (ellm-org-store-link))
+            (should (derived-mode-p 'ellm-sessions-mode))
+            (should (equal (plist-get org-store-link-plist :link)
+                           "ellm:saved-id"))
+            (should (equal (plist-get org-store-link-plist :description)
+                           "ellm: Saved title"))
+            (setq buffer (find-buffer-visiting file))
+            (should (buffer-live-p buffer))
+            (with-current-buffer buffer
+              (ellm--set-frontmatter-value '(title) "Live title"))
+            (should (ellm-org-store-link))
+            (should (equal (plist-get org-store-link-plist :description)
+                           "ellm: Live title"))))
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer (set-buffer-modified-p nil))
+        (kill-buffer buffer))
+      (delete-directory root t))))
+
+(ert-deftest ellm-test-org-store-link-ignores-browser-headings ()
+  "Only conversation rows participate in Org link storage."
+  (dolist (mode '(ellm-list-mode ellm-sessions-mode fundamental-mode))
+    (with-temp-buffer
+      (funcall mode)
+      (let ((org-store-link-plist '(:link "unchanged")))
+        (should-not (ellm-org-store-link))
+        (should (equal org-store-link-plist '(:link "unchanged")))))))
+
 (ert-deftest ellm-test-org-link-prefers-live-buffer ()
   (let ((buffer (generate-new-buffer " *ellm org link live*"))
         (id "20260911T142530-a1b2c3"))

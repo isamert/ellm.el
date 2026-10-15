@@ -4520,14 +4520,25 @@ An unsaved subagent inherits its live parent's newly assigned id so a later
     (concat "ellm: " (truncate-string-to-width description 80 nil nil t))))
 
 (defun ellm-org-store-link (&optional _interactive)
-  "Store an Org link to the current ellm conversation.
+  "Store an Org link to the current or selected ellm conversation.
+In `ellm-list-mode' and `ellm-sessions-mode', use the conversation at point.
+Saved conversations are opened without displaying them, reusing live buffers.
 The link identifies the session rather than its persistence path.  Storing a
 link to an unsaved conversation assigns it a session id but does not save it."
-  (when (derived-mode-p 'ellm-mode)
-    (org-link-store-props
-     :type "ellm"
-     :link (concat "ellm:" (ellm--org-link-target))
-     :description (ellm--org-link-description))
+  (when-let* ((buffer
+               (cond
+                ((derived-mode-p 'ellm-mode) (current-buffer))
+                ((derived-mode-p 'ellm-list-mode)
+                 (ellm-list--buffer-at-point t))
+                ((derived-mode-p 'ellm-sessions-mode)
+                 (when-let* ((file (get-text-property (point) 'ellm-sessions-file)))
+                   (find-file-noselect file)))))
+              ((buffer-live-p buffer)))
+    (with-current-buffer buffer
+      (org-link-store-props
+       :type "ellm"
+       :link (concat "ellm:" (ellm--org-link-target))
+       :description (ellm--org-link-description)))
     t))
 
 (defun ellm--org-link-safe-component-p (component)
