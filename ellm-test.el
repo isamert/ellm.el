@@ -8760,6 +8760,26 @@ The parent provider remains buffer-local fallback only when the profile omits on
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
+(ert-deftest ellm-test-new-buffer-with-configuration-prompt ()
+  "The initial prompt belongs in the first user turn, not frontmatter."
+  (dolist (prompt '(nil "" "First prompt" "First line\nSecond line\n"))
+    (let ((buffer (ellm-new-buffer-with-configuration
+                   :system "System instructions" :prompt prompt)))
+      (unwind-protect
+          (with-current-buffer buffer
+            (should-not (assq 'prompt (ellm--parse-frontmatter)))
+            (let ((turns (ellm--parse-turns)))
+              (should (equal (mapcar #'ellm-turn-role turns)
+                             '("system" "user")))
+              (should (equal (ellm-turn-content (cadr turns))
+                             (string-trim (or prompt "")))))
+            (should (equal (buffer-substring-no-properties
+                            (- (point-max) (length (or prompt "")))
+                            (point-max))
+                           (or prompt ""))))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
 (ert-deftest ellm-test-new-buffer-with-configuration-ephemeral ()
   "Explicit configuration can create an ephemeral buffer."
   (let ((buffer (ellm-new-buffer-with-configuration :ephemeral t)))

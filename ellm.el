@@ -4965,12 +4965,12 @@ accepted."
 
 `provider', `model', and `created' lead the frontmatter.  Other configuration
 keywords follow them, except the reserved `:provider', `:model', `:created',
-`:system', and `:ephemeral' keys."
+`:system', `:prompt', and `:ephemeral' keys."
   (let ((frontmatter `((provider . ,(or provider "null"))
                        (model . ,(or model "null"))
                        (created . ,(ellm--timestamp)))))
     (cl-loop for (key value) on configuration by #'cddr
-             unless (memq key '(:provider :model :created :system :ephemeral))
+             unless (memq key '(:provider :model :created :system :prompt :ephemeral))
              do (setq frontmatter
                       (append frontmatter
                               (list (cons (intern (substring (symbol-name key) 1))
@@ -5005,9 +5005,12 @@ for the provider and model."
                   (if (plist-member configuration :model)
                       (plist-get configuration :model)
                     (ellm-provider-default-model provider-name))))
-         (system (plist-get configuration :system)))
+         (system (plist-get configuration :system))
+         (prompt (plist-get configuration :prompt)))
     (when (and system (not (stringp system)))
       (user-error "ellm: `:system' must be a string"))
+    (when (and prompt (not (stringp prompt)))
+      (user-error "ellm: `:prompt' must be a string"))
     (with-current-buffer buf
       (setq-local ellm--persistence-ephemeral-p
                   (or ephemeral (plist-get configuration :ephemeral)))
@@ -5020,6 +5023,8 @@ for the provider and model."
         (ellm--insert-turn "system")
         (insert (ellm--ensure-newline system)))
       (ellm--insert-turn "user")
+      (when prompt
+        (insert prompt))
       (ellm-mode))
     (switch-to-buffer buf)
     (when select-provider-model
@@ -5079,6 +5084,8 @@ buffer only:
               the first provider.
   :model      Model name; defaults to `ellm-provider-default-model'.
   :system     String inserted as a leading system turn, not frontmatter.
+  :prompt     String inserted into the first user turn, not frontmatter.
+              The prompt is not sent automatically.
   :profile    Name of a profile from `ellm-profiles'.
   :cwd        Working directory for the conversation.
   :tools      Tool selectors to enable (e.g. a list containing `@buffers').
