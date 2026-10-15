@@ -291,7 +291,7 @@
    ((listp face)
     (cl-some (lambda (item)
                (ellm-test--face-includes-p item target))
-              face))))
+             face))))
 
 (defun ellm-test--face-attr-equal-p (face attr value)
   "Return non-nil if FACE contains ATTR equal to VALUE."
@@ -378,11 +378,11 @@
   (let* ((starts nil)
          (ends nil)
          (ellm-tools-tool-call-start-hook
-         (list (lambda (tool args)
-                 (push (list tool args) starts))))
+          (list (lambda (tool args)
+                  (push (list tool args) starts))))
          (ellm-tools-tool-call-end-hook
-         (list (lambda (tool args error raw result)
-                 (push (list tool args error raw result) ends)))))
+          (list (lambda (tool args error raw result)
+                  (push (list tool args error raw result) ends)))))
     (let ((ellm-tools-list ellm-tools-list)
           (ellm-tools-refs ellm-tools-refs))
       (ellm-deftool test/lifecycle-sync ()
@@ -403,8 +403,8 @@
          result
          (ellm-tools-default-timeout nil)
          (ellm-tools-tool-call-end-hook
-         (list (lambda (tool args error raw transformed)
-                 (push (list tool args error raw transformed) ends)))))
+          (list (lambda (tool args error raw transformed)
+                  (push (list tool args error raw transformed) ends)))))
     (let ((ellm-tools-list ellm-tools-list)
           (ellm-tools-refs ellm-tools-refs))
       (ellm-deftool test/lifecycle-async (:async t :timeout nil)
@@ -1101,13 +1101,13 @@
             (with-temp-file (expand-file-name file dir)
               (insert "contents\n")))
           (cl-labels ((search (pattern path)
-                        (let (result)
-                          (ellm-tools/glob-tool
-                           (lambda (value) (setq result value))
-                           pattern path 20)
-                          (should (ellm-test--wait-for (lambda () result)))
-                          (should (string-match-p "<glob " result))
-                          result)))
+                              (let (result)
+                                (ellm-tools/glob-tool
+                                 (lambda (value) (setq result value))
+                                 pattern path 20)
+                                (should (ellm-test--wait-for (lambda () result)))
+                                (should (string-match-p "<glob " result))
+                                result)))
             (let ((result (search "src/**/*.ts" dir)))
               (should (string-match-p (regexp-quote "src/direct.ts") result))
               (should (string-match-p (regexp-quote "src/nested/deep.ts") result))
@@ -1616,8 +1616,8 @@ Search results may change and this may fail."
                    (ellm-test--face-at-text "**raw bold**")
                    'ellm-bold))
       (should-not (ellm-test--face-includes-p
-                    (ellm-test--face-at-text "`raw code`")
-                    'ellm-inline-code))
+                   (ellm-test--face-at-text "`raw code`")
+                   'ellm-inline-code))
       (dolist (text '("```elisp tool" "```elisp reasoning"))
         (should-not (ellm-test--face-includes-p
                      (ellm-test--face-at-text text)
@@ -2524,7 +2524,7 @@ Search results may change and this may fail."
   "The llm.el backend should stream a response and append a user turn."
   (let ((contents
          (ellm-test--buffer-string-after-send
-         (make-llm-fake :chat-action-func (lambda () "ok"))
+          (make-llm-fake :chat-action-func (lambda () "ok"))
           "hi")))
     (should (string-match-p "ok" contents))
     (should (string-match-p "\n>-| user\n\\'" contents))))
@@ -2718,9 +2718,9 @@ Search results may change and this may fail."
            :enable-search t
            :personalization t))
          (frontmatter
-           '((kagi . ((enable-search . nil)
-                      (personalization . nil)
-                      (thinking-preset . extended)))))
+          '((kagi . ((enable-search . nil)
+                     (personalization . nil)
+                     (thinking-preset . extended)))))
          (headers (ellm-kagi--headers provider "application/json"
                                       "application/json"))
          (payload (ellm-kagi--message-payload provider frontmatter "Hello")))
@@ -2795,8 +2795,8 @@ Search results may change and this may fail."
       (should (equal paths
                      '((system) (temperature) (max-tokens)
                        (reasoning) (tools) (cwd))))
-       (should-not (member '(mcp) paths))
-       (should-not (member '(kagi enable-search) paths)))))
+      (should-not (member '(mcp) paths))
+      (should-not (member '(kagi enable-search) paths)))))
 
 (ert-deftest ellm-test-set-config-supports-direct-llm-provider ()
   "Direct llm.el providers should retain generic config support."
@@ -2909,8 +2909,8 @@ Search results may change and this may fail."
          (process (start-process "ellm-config-acp" nil "sleep" "10"))
          (connection (ellm-acp-connection
                       :name "test" :process process :buffer nil))
-          applied
-          applied-ready)
+         applied
+         applied-ready)
     (unwind-protect
         (with-temp-buffer
           (insert "---\nprovider: acp\nmodel: model-1\n---\n\n")
@@ -2933,11 +2933,11 @@ Search results may change and this may fail."
                                                     (car entry)))
                                  collection))
                          "high")))
-                     ((symbol-function 'ellm-acp--set-config-option)
-                      (lambda (_connection config-id value on-ready _on-error
-                                &rest _)
-                        (setq applied (cons config-id value))
-                        (setq applied-ready on-ready))))
+                    ((symbol-function 'ellm-acp--set-config-option)
+                     (lambda (_connection config-id value on-ready _on-error
+                                          &rest _)
+                       (setq applied (cons config-id value))
+                       (setq applied-ready on-ready))))
             (ellm-set-config))
           (should (equal applied '("effort" . "high")))
           (should (equal ellm--config-in-flight '(acp config effort)))
@@ -3244,9 +3244,9 @@ Search results may change and this may fail."
                    ((equal url "https://assistant.kagi.com/api/init")
                     (json-serialize
                      '(:conversations (:items [(:uuid "conversation-1"
-                                                  :title "Loaded Kagi"
-                                                  :model_name "loaded-model"
-                                                  :updated_at "2026-09-05T14:00:00")]))))
+                                                :title "Loaded Kagi"
+                                                :model_name "loaded-model"
+                                                :updated_at "2026-09-05T14:00:00")]))))
                    ((equal url
                            "https://assistant.kagi.com/api/conversations/conversation-1/init")
                     (json-serialize
@@ -3433,23 +3433,23 @@ Search results may change and this may fail."
   "Send a synthetic v2 event to REQUEST with TYPE, NODE, PARENT, PAYLOAD and ID."
   (ellm-kagi--handle-event
    request `(:event (:type ,type :node_id ,node :parent_node_id ,parent
-                    :payload ,payload :id ,id))))
+                     :payload ,payload :id ,id))))
 
 (defun ellm-test--kagi-answer (request)
   "Stream a small v2 answer through REQUEST."
   (ellm-kagi--handle-event request '(:title "Greeting"))
   (ellm-test--kagi-event request "turn.started" nil nil '(:root_node_id "root"))
   (ellm-test--kagi-event request "node.created" "think" "root"
-                        '(:kind "activity" :type "thinking"))
+                         '(:kind "activity" :type "thinking"))
   (ellm-test--kagi-event request "node.delta" "think" "root" '(:delta "Plan."))
   (ellm-test--kagi-event request "node.created" "text" "root" '(:kind "text"))
   (ellm-test--kagi-event request "node.delta" "text" "root" '(:delta "Answer."))
   (ellm-test--kagi-event request "node.completed" "text" "root"
-                        '(:content "Answer. [^ref#1-2]" :status "completed"))
+                         '(:content "Answer. [^ref#1-2]" :status "completed"))
   (ellm-test--kagi-event request "reference.added" nil nil
-                        '(:ref_id "ref" :title "Example" :url "https://example.com"))
+                         '(:ref_id "ref" :title "Example" :url "https://example.com"))
   (ellm-test--kagi-event request "turn.completed" nil nil
-                        '(:usage (:input_tokens 25 :output_tokens 10 :cost_usd 0.01)))
+                         '(:usage (:input_tokens 25 :output_tokens 10 :cost_usd 0.01)))
   (ellm-kagi--handle-event request '(:is_final t :billing (:usage (:included_cost_usd 5)))))
 
 (ert-deftest ellm-test-kagi-backend-submit-stream-smoke ()
@@ -3500,8 +3500,8 @@ Search results may change and this may fail."
     (ellm-test--kagi-event request "node.delta" "a" "root" '(:delta "First") "d1")
     (ellm-test--kagi-event request "node.delta" "a" "root" '(:delta "First") "d1")
     (ellm-test--kagi-event request "node.created" "tool" "root"
-                          '(:kind "activity" :type "tool_call" :tool_name "search"
-                            :status "running"))
+                           '(:kind "activity" :type "tool_call" :tool_name "search"
+                             :status "running"))
     (ellm-test--kagi-event request "node.created" "nested" "tool" '(:kind "text"))
     (ellm-test--kagi-event request "node.delta" "nested" "tool" '(:delta "HIDDEN"))
     (ellm-test--kagi-event request "node.created" "b" "root" '(:kind "text"))
@@ -3514,23 +3514,23 @@ Search results may change and this may fail."
                                 (assistant . "Last ")))))
     (ellm-test--kagi-event request "node.delta" "b" "root" '(:delta "f#3]"))
     (ellm-test--kagi-event request "reference.added" nil nil
-                          '(:ref_id "ref" :url "https://example.com"))
+                           '(:ref_id "ref" :url "https://example.com"))
     (ellm-test--kagi-event request "turn.completed")
     (ellm-kagi--handle-event request '(:is_final t))
     (should (= (cl-count 'complete events :key (lambda (e) (plist-get e :type))) 1))
     (should (equal (cdr (car (last (plist-get
-                                  (cl-find 'stream events :key (lambda (e) (plist-get e :type)))
-                                  :channels))))
+                                    (cl-find 'stream events :key (lambda (e) (plist-get e :type)))
+                                    :channels))))
                    "Last [1](https://example.com)"))))
 
 (ert-deftest ellm-test-kagi-stream-eof-and-stale-callbacks ()
   "EOF succeeds only after turn completion, and obsolete callbacks are ignored."
   (dolist (completed '(nil t))
     (let* (events callbacks
-           (request (ellm-kagi--make-request
-                     :provider (ellm-make-kagi-provider :session-token "secret")
-                     :stream-url "/api/v2/turns/t/stream"
-                     :emit (lambda (e) (push e events)))))
+                  (request (ellm-kagi--make-request
+                            :provider (ellm-make-kagi-provider :session-token "secret")
+                            :stream-url "/api/v2/turns/t/stream"
+                            :emit (lambda (e) (push e events)))))
       (cl-letf (((symbol-function 'plz)
                  (lambda (_method url &rest args)
                    (should (equal url "https://assistant.kagi.com/api/v2/turns/t/stream"))
@@ -3573,7 +3573,7 @@ Search results may change and this may fail."
   "An ambiguous POST failure must not duplicate a billed message."
   (let* (events
          (request (ellm-kagi--make-request :phase 'posting
-                                          :emit (lambda (e) (push e events)))))
+                                           :emit (lambda (e) (push e events)))))
     (ellm-kagi--finish-plz-error
      request "submitting" (make-plz-error :curl-error '(28 . "timeout")))
     (should (eq (plist-get (car events) :type) 'failure))
@@ -3644,15 +3644,15 @@ Search results may change and this may fail."
   (with-temp-buffer
     (insert "intro\n")
     (ellm-mode)
-      (let ((start (copy-marker (point-max) nil))
-            (end (copy-marker (point-max) t)))
-        (goto-char (point-min))
-        (setq buffer-read-only t)
-        (ellm-test--render-core-snapshot
-         (current-buffer) nil start end '(:text "hello"))
-        (should (= (point) (point-min)))
-         (should buffer-read-only)
-         (should (string-match-p "hello" (buffer-string))))))
+    (let ((start (copy-marker (point-max) nil))
+          (end (copy-marker (point-max) t)))
+      (goto-char (point-min))
+      (setq buffer-read-only t)
+      (ellm-test--render-core-snapshot
+       (current-buffer) nil start end '(:text "hello"))
+      (should (= (point) (point-min)))
+      (should buffer-read-only)
+      (should (string-match-p "hello" (buffer-string))))))
 
 (ert-deftest ellm-test-llm-streaming-follows-output-end ()
   "llm.el streaming should follow the live end until point moves away."
@@ -3750,7 +3750,7 @@ Search results may change and this may fail."
               "        out = {'jsonrpc':'2.0','id':mid,'result':{'protocolVersion':1,'agentCapabilities':{}}}\n"
               "    elif method == 'session/new':\n"
               "        out = {'jsonrpc':'2.0','id':mid,'result':{'sessionId':session_id}}\n"
-               "    elif method == 'session/prompt':\n"
+              "    elif method == 'session/prompt':\n"
               "        text = msg['params']['prompt'][0]['text']\n"
               "        print(json.dumps({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':session_id,'update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'hello from acp: ' + text}}}}), flush=True)\n"
               "        out = {'jsonrpc':'2.0','id':mid,'result':{'stopReason':'end_turn'}}\n"
@@ -4359,13 +4359,13 @@ Search results may change and this may fail."
                      (pop answers)))
                   ((symbol-function 'ellm-provider-model-completion-session-start-p)
                    (lambda (_provider _buffer) (not started)))
-                   ((symbol-function 'ellm-provider-prepare-new-buffer)
-                    (lambda (_provider _frontmatter target on-ready _on-error)
-                      (setq started t)
-                      (with-current-buffer target
-                        (ellm--set-frontmatter-value
-                         '(acp session-id) "session-1"))
-                      (setq ready-callback on-ready)))
+                  ((symbol-function 'ellm-provider-prepare-new-buffer)
+                   (lambda (_provider _frontmatter target on-ready _on-error)
+                     (setq started t)
+                     (with-current-buffer target
+                       (ellm--set-frontmatter-value
+                        '(acp session-id) "session-1"))
+                     (setq ready-callback on-ready)))
                   ((symbol-function 'ellm-provider-buffer-model-candidates)
                    (lambda (_provider _buffer)
                      (and started '("live-model")))))
@@ -4378,8 +4378,8 @@ Search results may change and this may fail."
             (let ((frontmatter (ellm--parse-frontmatter)))
               (should (equal (alist-get 'model frontmatter) "live-model"))
               (should (equal (ellm--alist-get-nested
-                               frontmatter '(acp session-id))
-                              "session-1"))))
+                              frontmatter '(acp session-id))
+                             "session-1"))))
           (accept-process-output nil 0.05))
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
@@ -4398,21 +4398,21 @@ Search results may change and this may fail."
         (cl-letf (((symbol-function 'completing-read)
                    (lambda (_prompt _collection &rest _)
                      (pop answers)))
-                   ((symbol-function 'ellm-provider-prepare-new-buffer)
-                    (lambda (_provider _frontmatter target on-ready _on-error)
-                      (with-current-buffer target
-                        (setq ellm-acp--connection connection)
-                        (setf (ellm-acp--connection-buffer connection) target)
+                  ((symbol-function 'ellm-provider-prepare-new-buffer)
+                   (lambda (_provider _frontmatter target on-ready _on-error)
+                     (with-current-buffer target
+                       (setq ellm-acp--connection connection)
+                       (setf (ellm-acp--connection-buffer connection) target)
                        (ellm-acp--update-config-options
                         connection
-                         '((:id "model" :category "model" :type "select"
-                            :currentValue "large"
-                            :options ((:value "small") (:value "large")))))
-                        (funcall on-ready))))
-                   ((symbol-function 'ellm-acp--set-config-option)
-                    (lambda (conn config-id value on-ready _on-error
-                                  &optional _option after-success)
-                      (push (cons config-id value) set-values)
+                        '((:id "model" :category "model" :type "select"
+                           :currentValue "large"
+                           :options ((:value "small") (:value "large")))))
+                       (funcall on-ready))))
+                  ((symbol-function 'ellm-acp--set-config-option)
+                   (lambda (conn config-id value on-ready _on-error
+                                 &optional _option after-success)
+                     (push (cons config-id value) set-values)
                      (when (equal config-id "model")
                        (ellm-acp--update-config-options
                         conn
@@ -4421,9 +4421,9 @@ Search results may change and this may fail."
                           (:id "effort" :category "thought_level"
                            :type "select" :currentValue "medium"
                            :options ((:value "medium") (:value "high"))))))
-                      (when after-success
-                        (funcall after-success nil))
-                      (funcall on-ready))))
+                     (when after-success
+                       (funcall after-success nil))
+                     (funcall on-ready))))
           (setq buffer (ellm-new-buffer t))
           (should (ellm-test--wait-for
                    (lambda () (= (length set-values) 2))))
@@ -4434,7 +4434,7 @@ Search results may change and this may fail."
                               frontmatter '(acp config effort))
                              "high"))))
           (should (equal (nreverse set-values)
-                          '(("model" . "large") ("effort" . "high"))))
+                         '(("model" . "large") ("effort" . "high"))))
           (accept-process-output nil 0.05))
       (when (jsonrpc-running-p connection)
         (jsonrpc-shutdown connection))
@@ -4453,12 +4453,12 @@ Search results may change and this may fail."
       (cl-letf (((symbol-function 'completing-read)
                  (lambda (p _collection _predicate _require-match
                             _initial _history d &rest _)
-                    (setq prompt p default d)
-                    "medium"))
-                 ((symbol-function 'ellm-acp--set-config-option)
-                   (lambda (_connection _config-id _value on-ready
-                            _on-error &rest _)
-                     (setq success on-ready))))
+                   (setq prompt p default d)
+                   "medium"))
+                ((symbol-function 'ellm-acp--set-config-option)
+                 (lambda (_connection _config-id _value on-ready
+                                      _on-error &rest _)
+                   (setq success on-ready))))
         (ellm-acp--prompt-config-option 'connection option))
       (should (equal prompt
                      "Effort (default: high, current: medium): "))
@@ -5416,9 +5416,9 @@ Search results may change and this may fail."
             (cl-letf (((symbol-function 'llm-chat-streaming)
                        (lambda (_provider _prompt partial final &rest _)
                          (funcall partial '(:text "answer" :input-tokens 10
-                                           :cached-tokens 5))
+                                            :cached-tokens 5))
                          (funcall final '(:text "answer" :input-tokens 10
-                                         :cached-tokens 5)))))
+                                          :cached-tokens 5)))))
               (ellm-backend-start driver #'ignore))
             (setq log-buffer (ellm-llm--driver-log-buffer driver))
             (with-current-buffer log-buffer
@@ -5432,7 +5432,7 @@ Search results may change and this may fail."
   "Summaries should distinguish growing history from prefix changes."
   (with-temp-buffer
     (let* ((first '(:instructions "stable" :tools [(:name "read")]
-                   :input [(:role "user" :content "first")]))
+                    :input [(:role "user" :content "first")]))
            (second (plist-put (copy-tree first) :input
                               [(:role "user" :content "first")
                                (:role "assistant" :content "answer")]))
@@ -5624,8 +5624,8 @@ Search results may change and this may fail."
                       'tool-results))
           (should (equal (llm-provider-utils-tool-use-args tool-use)
                          '((command . ">-| user\n\\literal"))))
-           (should (equal (llm-chat-prompt-tool-result-result tool-result)
-                          ">>-| assistant\n\\result")))))))
+          (should (equal (llm-chat-prompt-tool-result-result tool-result)
+                         ">>-| assistant\n\\result")))))))
 
 (ert-deftest ellm-test-reasoning-state-round-trip ()
   "Opaque reasoning state should use validated private cache files."
@@ -5788,8 +5788,8 @@ Search results may change and this may fail."
       (should-not
        (ellm--frontmatter-value '(codex prompt-cache-key)))
       (let* ((request
-              (llm-provider-chat-request
-               configured (make-llm-chat-prompt) t))
+               (llm-provider-chat-request
+                configured (make-llm-chat-prompt) t))
              (options (plist-get request :prompt_cache_options)))
         (should-not (plist-member request :prompt_cache_key))
         (should (equal (alist-get 'mode options) "explicit"))
@@ -6244,7 +6244,7 @@ Search results may change and this may fail."
       (should-not buffer-read-only)
       (should (string-match-p "done" (buffer-string)))
       (should (equal (ellm-turn-role (car (last (ellm--parse-turns))))
-                      "user")))))
+                     "user")))))
 
 (ert-deftest ellm-test-send-stamps-user-and-completed-assistant-turns ()
   "A request should timestamp submission and completion exactly once."
@@ -6332,7 +6332,7 @@ Search results may change and this may fail."
               (ellm-send)
               (funcall partial '(:reasoning "first" :multi-turn (:thinking "first")))
               (funcall partial '(:reasoning "first more"
-                                :multi-turn (:thinking "first more")))
+                                 :multi-turn (:thinking "first more")))
               (should (= writes 0))
               (should-not (string-match-p ":reasoning-state" (buffer-string)))
               (pcase outcome
@@ -6394,9 +6394,9 @@ Search results may change and this may fail."
             ;; A later snapshot must retain the checkpointed header while revising
             ;; only the body that actually changed.
             (funcall partial '(:reasoning "why more" :text "answer"
-                              :multi-turn (:thinking "why more")))
+                               :multi-turn (:thinking "why more")))
             (funcall final '(:reasoning "why more" :text "answer"
-                            :multi-turn (:thinking "why more")))
+                             :multi-turn (:thinking "why more")))
             (let* ((reasoning (seq-find
                                (lambda (turn) (equal (ellm-turn-role turn) "reasoning"))
                                (ellm--parse-turns)))
@@ -6430,7 +6430,7 @@ Search results may change and this may fail."
                        (if (= (cl-incf calls) 1)
                            (progn
                              (funcall partial '(:reasoning "aborted"
-                                               :multi-turn (:thinking "aborted")))
+                                                :multi-turn (:thinking "aborted")))
                              (should (= writes 0))
                              (funcall failure 'llm-request-timeout "temporary")
                              (should (= writes 1)))
@@ -6535,8 +6535,8 @@ Search results may change and this may fail."
         (ellm-tools-refs ellm-tools-refs)
         outcome (calls 0))
     (ellm-deftool test/e2e-idle (:async t :timeout nil) ()
-      "Complete after the request idle timeout."
-      (run-at-time 0.08 nil (lambda () (funcall callback "tool result"))))
+                  "Complete after the request idle timeout."
+                  (run-at-time 0.08 nil (lambda () (funcall callback "tool result"))))
     (with-temp-buffer
       (ellm-mode)
       (setq-local ellm-request-finished-hook
@@ -6896,13 +6896,13 @@ Search results may change and this may fail."
       (ellm--request-set-open-stream-turn
        request "assistant" nil (point-min) (point-max) t)
       (dolist (event '((:type stream :mode append :channel assistant
-                          :id first :text "one")
+                        :id first :text "one")
                        (:type stream :mode append :channel assistant
-                          :text " two")
+                        :text " two")
                        (:type stream :mode append :channel assistant
-                          :id second :text "three")
+                        :id second :text "three")
                        (:type stream :mode append :channel assistant
-                          :id second :text " four")))
+                        :id second :text " four")))
         (ellm--request-render-chunk request event))
       (should (equal (mapcar #'ellm-turn-role (ellm--parse-turns))
                      '("assistant" "assistant")))
@@ -7216,9 +7216,9 @@ Search results may change and this may fail."
   "`profile:' completion should include names from `ellm-profiles'."
   (let ((ellm-profiles
          '((reviewer . ((description . "Reviews changes.")
-                         (model . "review-model")
-                         (system . "Review the current change.")
-                         (tools . ("read" "grep"))))
+                        (model . "review-model")
+                        (system . "Review the current change.")
+                        (tools . ("read" "grep"))))
            (writer . ((model . "write-model"))))))
     (with-temp-buffer
       (insert "---\nprofile: |\n---\n")
@@ -7243,9 +7243,9 @@ Search results may change and this may fail."
   "Local profile entries should recursively overlay `ellm-profiles'."
   (let ((ellm-profiles
          '((reviewer . ((model . "global-model")
-                         (tools . ("@files"))
-                         (acp . ((config . ((effort . "low")))))
-                         (system . "Global child"))))))
+                        (tools . ("@files"))
+                        (acp . ((config . ((effort . "low")))))
+                        (system . "Global child"))))))
     (with-temp-buffer
       (insert "---\nprofile: reviewer\nprofiles:\n  reviewer:\n    system: Local child\n    acp:\n      config:\n        effort: high\n---\n")
       (ellm-mode)
@@ -7305,9 +7305,9 @@ Search results may change and this may fail."
                         :models ("explore-model")))))
          (ellm-profiles
           '((explore . ((provider . "explore")
-                         (model . "explore-model")
-                         (tools . ("read_buffer"))
-                         (system . "Explore child")))))
+                        (model . "explore-model")
+                        (tools . ("read_buffer"))
+                        (system . "Explore child")))))
          child-buffer)
     (with-temp-buffer
       (insert "---\nprovider: parent\nmodel: parent-model\ntools: [\"@agents\", read_buffer]\nprofiles:\n  explore:\n    system: Local explore child\n---\n\n")
@@ -7392,7 +7392,7 @@ Search results may change and this may fail."
                 (should (eq (alist-get 'yolo raw) :false))
                 (should-not (ellm--yolo-p frontmatter))
                 (should (equal (sort (mapcar #'ellm-tool-name
-                                      (ellm--resolve-tools frontmatter))
+                                             (ellm--resolve-tools frontmatter))
                                      #'string<)
                                '("launch_subagent" "read")))
                 (should (eq (ellm--tool-permission-policy
@@ -7454,7 +7454,7 @@ The parent provider remains buffer-local fallback only when the profile omits on
             (child . (:provider ,child-provider :models ("child-model")))))
          (ellm-profiles
           '((worker . ((provider . "child")
-                        (model . "child-model")))))
+                       (model . "child-model")))))
          child-buffer)
     (with-temp-buffer
       (insert "---\nprovider: parent\nmodel: parent-model\n---\n\n")
@@ -7532,9 +7532,9 @@ The parent provider remains buffer-local fallback only when the profile omits on
   "Profile discovery should report local overlays and the active profile."
   (let ((ellm-profiles
          '((explore . ((description . "Global exploration")
-                        (model . "small")))
+                       (model . "small")))
            (reviewer . ((description . "Review changes")
-                         (tools . ("@files")))))))
+                        (tools . ("@files")))))))
     (with-temp-buffer
       (insert "---\nprofile: explore\nprofiles:\n  explore:\n    description: Local exploration\n---\n")
       (ellm-mode)
@@ -7647,8 +7647,8 @@ The parent provider remains buffer-local fallback only when the profile omits on
             (let* ((entry (car ellm-subagent-history))
                    result)
               (dolist (key (list (plist-get entry :id)
-                                (plist-get entry :buffer-name)
-                                "worker"))
+                                 (plist-get entry :buffer-name)
+                                 "worker"))
                 (setq result nil)
                 (ellm-tools/wait-subagent-tool
                  (lambda (value) (setq result value)) key)
@@ -7763,9 +7763,9 @@ The parent provider remains buffer-local fallback only when the profile omits on
       (add-hook 'ellm-session-close-hook
                 (lambda () (setq close-hook-called t)) nil t)
       (cl-letf (((symbol-function 'y-or-n-p)
-                  (lambda (prompt)
-                    (should (string-match-p "Clear buffer" prompt))
-                    t)))
+                 (lambda (prompt)
+                   (should (string-match-p "Clear buffer" prompt))
+                   t)))
         (call-interactively #'ellm-close-session))
       (should ellm-test--close-session-called)
       (should close-hook-called)
@@ -7997,7 +7997,7 @@ The parent provider remains buffer-local fallback only when the profile omits on
         (outline-cycle))
       (should-not (cl-some (lambda (ov)
                              (eq (overlay-get ov 'invisible) 'outline))
-                            (overlays-in (point-min) (point-max))))
+                           (overlays-in (point-min) (point-max))))
       (let ((inhibit-message t))
         (outline-cycle))
       (let ((fold-overlays
@@ -8173,9 +8173,9 @@ The parent provider remains buffer-local fallback only when the profile omits on
            (glyph (ellm--role-glyph "reasoning")))
       (should ov)
       (should (stringp display))
-       (should (equal display
-                       (propertize glyph 'face
-                                   (ellm--role-face "reasoning")))))))
+      (should (equal display
+                     (propertize glyph 'face
+                                 (ellm--role-face "reasoning")))))))
 
 (ert-deftest ellm-test-pretty-separators-display-tool-titles ()
   "Pretty tool separators should include their pipe-delimited titles."
@@ -8437,15 +8437,15 @@ The parent provider remains buffer-local fallback only when the profile omits on
             (ellm-mode)
             (ellm--insert-turn "user")
             (insert "hi\n")
-             (ellm-send)
-             (ellm-test--wait-for-request)
-             (when ellm-acp--connection
-               (delete-process (ellm-acp--connection-process ellm-acp--connection)))
-             (let ((contents (buffer-string)))
-               (should (string-match-p "hello from acp: hi" contents))
-                (should (string-match-p "acp:" contents))
-                (should (string-match-p "session-id: sess_test" contents))
-                (should (string-match-p "\n>-| user\n\\'" contents)))))
+            (ellm-send)
+            (ellm-test--wait-for-request)
+            (when ellm-acp--connection
+              (delete-process (ellm-acp--connection-process ellm-acp--connection)))
+            (let ((contents (buffer-string)))
+              (should (string-match-p "hello from acp: hi" contents))
+              (should (string-match-p "acp:" contents))
+              (should (string-match-p "session-id: sess_test" contents))
+              (should (string-match-p "\n>-| user\n\\'" contents)))))
       (delete-file agent-file))))
 
 (ert-deftest ellm-test-acp-stderr-is-separated-from-json-stream ()
@@ -8508,12 +8508,12 @@ The parent provider remains buffer-local fallback only when the profile omits on
                                 :args (list agent-file))))
             (with-temp-buffer
               (ellm-mode)
-               (ellm--insert-turn "user")
-               (insert "hi\n")
-               (ellm-send)
-               (ellm-test--wait-for-request)
-               (when ellm-acp--connection
-                 (delete-process (ellm-acp--connection-process ellm-acp--connection)))
+              (ellm--insert-turn "user")
+              (insert "hi\n")
+              (ellm-send)
+              (ellm-test--wait-for-request)
+              (when ellm-acp--connection
+                (delete-process (ellm-acp--connection-process ellm-acp--connection)))
               (should (string-match-p "combined" (buffer-string))))))
       (delete-file agent-file))))
 
@@ -8533,17 +8533,17 @@ The parent provider remains buffer-local fallback only when the profile omits on
           (ellm-acp--handle-session-update
            connection '(:update (:sessionUpdate "agent_message_chunk"
                                  :content (:type "text" :text "hello"))))
-           (should (= (point) (point-min)))
-           (should buffer-read-only)
-           (should (string-match-p "hello" (buffer-string)))
-           (goto-char (point-max))
-           (ellm-acp--handle-session-update
-            connection '(:update (:sessionUpdate "agent_message_chunk"
-                                  :content (:type "text" :text " world"))))
-           (should (= (point) (point-max)))
-           (should (string-match-p "hello world" (buffer-string))))
-       (when (jsonrpc-running-p connection)
-         (jsonrpc-shutdown connection)))))
+          (should (= (point) (point-min)))
+          (should buffer-read-only)
+          (should (string-match-p "hello" (buffer-string)))
+          (goto-char (point-max))
+          (ellm-acp--handle-session-update
+           connection '(:update (:sessionUpdate "agent_message_chunk"
+                                 :content (:type "text" :text " world"))))
+          (should (= (point) (point-max)))
+          (should (string-match-p "hello world" (buffer-string))))
+      (when (jsonrpc-running-p connection)
+        (jsonrpc-shutdown connection)))))
 
 (ert-deftest ellm-test-acp-streaming-content-does-not-parse-buffer ()
   "ACP content chunks should not parse all turns to inspect the final turn."
@@ -8856,40 +8856,40 @@ The parent provider remains buffer-local fallback only when the profile omits on
         (kill-buffer buffer)))))
 
 (ert-deftest ellm-test-new-buffer-prefix-keeps-default-system-and-tools ()
-"Prefix provider/model selection should retain default system and tools."
-(let* ((provider (make-ellm-test-sync-provider))
-       (ellm-provider-alist
-        `((first . (:provider ,provider :models ("first")))
-          (second . (:provider ,provider :models ("second")))))
-       (ellm-new-buffer-default-configuration-function
-        (lambda ()
-          '(:provider first :model "first"
-            :system "Default system" :tools ("@buffers"))))
-       (answers '("second" "second"))
-       buffer)
-  (unwind-protect
-      (cl-letf (((symbol-function 'completing-read)
-                 (lambda (&rest _) (pop answers))))
-        (setq buffer (ellm-new-buffer t))
-        (with-current-buffer buffer
-          (let ((frontmatter (ellm--parse-frontmatter)))
-            (should (equal (alist-get 'provider frontmatter) "second"))
-            (should (equal (alist-get 'model frontmatter) "second"))
-            (should-not (alist-get 'system frontmatter))
-            (should (equal (alist-get 'tools frontmatter) '("@buffers")))
-            (should (string-match-p "created: [^\n]+\ntools:"
-                                    (buffer-string)))
-            (let ((turns (ellm--parse-turns))
-                  (system-turn (car (ellm--parse-turns))))
-              (should (= (cl-count-if (lambda (turn)
-                                        (equal (ellm-turn-role turn) "system"))
-                                      turns)
-                         1))
-              (should (equal (ellm-turn-role system-turn) "system"))
-              (should (equal (ellm-turn-content system-turn)
-                             "Default system"))))))
-    (when (buffer-live-p buffer)
-      (kill-buffer buffer)))))
+  "Prefix provider/model selection should retain default system and tools."
+  (let* ((provider (make-ellm-test-sync-provider))
+         (ellm-provider-alist
+          `((first . (:provider ,provider :models ("first")))
+            (second . (:provider ,provider :models ("second")))))
+         (ellm-new-buffer-default-configuration-function
+          (lambda ()
+            '(:provider first :model "first"
+              :system "Default system" :tools ("@buffers"))))
+         (answers '("second" "second"))
+         buffer)
+    (unwind-protect
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (&rest _) (pop answers))))
+          (setq buffer (ellm-new-buffer t))
+          (with-current-buffer buffer
+            (let ((frontmatter (ellm--parse-frontmatter)))
+              (should (equal (alist-get 'provider frontmatter) "second"))
+              (should (equal (alist-get 'model frontmatter) "second"))
+              (should-not (alist-get 'system frontmatter))
+              (should (equal (alist-get 'tools frontmatter) '("@buffers")))
+              (should (string-match-p "created: [^\n]+\ntools:"
+                                      (buffer-string)))
+              (let ((turns (ellm--parse-turns))
+                    (system-turn (car (ellm--parse-turns))))
+                (should (= (cl-count-if (lambda (turn)
+                                          (equal (ellm-turn-role turn) "system"))
+                                        turns)
+                           1))
+                (should (equal (ellm-turn-role system-turn) "system"))
+                (should (equal (ellm-turn-content system-turn)
+                               "Default system"))))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
 
 (ert-deftest ellm-test-new-buffer-does-not-discover-models ()
   "New buffers should leave an unknown model null without backend discovery."
@@ -9283,9 +9283,9 @@ The parent provider remains buffer-local fallback only when the profile omits on
           (let ((capf (ellm--frontmatter-capf)))
             (should capf)
             (should (member "high" (nth 2 capf)))
-             (should (equal (funcall (plist-get (nthcdr 3 capf) :annotation-function)
-                                     "high")
-                            " High"))))
+            (should (equal (funcall (plist-get (nthcdr 3 capf) :annotation-function)
+                                    "high")
+                           " High"))))
       (when (jsonrpc-running-p connection)
         (jsonrpc-shutdown connection)))))
 
@@ -9393,9 +9393,9 @@ The parent provider remains buffer-local fallback only when the profile omits on
   (let ((ellm-acp-tool-detail-level 'full)
         (ellm-acp-tool-detail-limit nil)
         (connection (ellm-acp-connection
-                      :name "test"
-                      :process (start-process "ellm-acp-test-sleep" nil "sleep" "10")
-                      :buffer (current-buffer))))
+                     :name "test"
+                     :process (start-process "ellm-acp-test-sleep" nil "sleep" "10")
+                     :buffer (current-buffer))))
     (unwind-protect
         (with-temp-buffer
           (ellm-mode)
@@ -9410,33 +9410,33 @@ The parent provider remains buffer-local fallback only when the profile omits on
                                  :rawInput (:todos ((:content "Find session close command and buffer reset/frontmatter helpers"
                                                      :status "in_progress"
                                                      :priority "high"))))))
-           (let ((contents (buffer-string)))
-             (should (string-match-p
-                      "^>>-| tool-call | todowrite :todos .* :id call_todos :kind other$"
-                      contents))
-             (should (string-match-p ">>>-| tool-param | todos" contents))
-             (should (string-match-p
-                      (regexp-quote
-                       "[{\"content\":\"Find session close command and buffer reset/frontmatter helpers\",\"status\":\"in_progress\",\"priority\":\"high\"}]")
-                      contents))
-             (should (equal (ellm--format-todo-progress
-                             (ellm-buffer-state-todos ellm-buffer-state))
-                            "[0/1] Find session close command and buffer reset/frontmatter helpers")))
-           (ellm-acp--handle-session-update
-            connection '(:update (:sessionUpdate "tool_call_update"
-                                  :toolCallId "call_todos"
-                                  :status "completed"
-                                  :title "2 todos"
-                                  :rawOutput
-                                  (:metadata
-                                   (:todos
-                                    ((:content "Find session close command and buffer reset/frontmatter helpers"
-                                      :status "completed" :priority "high")
-                                     (:content "Implement shared todo state"
-                                      :status "in_progress" :priority "high")))))))
-           (should (equal (ellm--format-todo-progress
-                           (ellm-buffer-state-todos ellm-buffer-state))
-                          "[1/2] Implement shared todo state")))
+          (let ((contents (buffer-string)))
+            (should (string-match-p
+                     "^>>-| tool-call | todowrite :todos .* :id call_todos :kind other$"
+                     contents))
+            (should (string-match-p ">>>-| tool-param | todos" contents))
+            (should (string-match-p
+                     (regexp-quote
+                      "[{\"content\":\"Find session close command and buffer reset/frontmatter helpers\",\"status\":\"in_progress\",\"priority\":\"high\"}]")
+                     contents))
+            (should (equal (ellm--format-todo-progress
+                            (ellm-buffer-state-todos ellm-buffer-state))
+                           "[0/1] Find session close command and buffer reset/frontmatter helpers")))
+          (ellm-acp--handle-session-update
+           connection '(:update (:sessionUpdate "tool_call_update"
+                                 :toolCallId "call_todos"
+                                 :status "completed"
+                                 :title "2 todos"
+                                 :rawOutput
+                                 (:metadata
+                                  (:todos
+                                   ((:content "Find session close command and buffer reset/frontmatter helpers"
+                                     :status "completed" :priority "high")
+                                    (:content "Implement shared todo state"
+                                     :status "in_progress" :priority "high")))))))
+          (should (equal (ellm--format-todo-progress
+                          (ellm-buffer-state-todos ellm-buffer-state))
+                         "[1/2] Implement shared todo state")))
       (when (jsonrpc-running-p connection)
         (jsonrpc-shutdown connection)))))
 
@@ -9471,17 +9471,17 @@ The parent provider remains buffer-local fallback only when the profile omits on
 (ert-deftest ellm-test-acp-extension-notification-dispatch ()
   "ACP extension notifications should stop after the first handler accepts."
   (let* ((calls nil)
-        (ellm-acp-extension-notification-functions
-         (list (lambda (_connection method params)
-                 (push (list 'first method params) calls)
-                 t)
-               (lambda (&rest _)
-                 (push '(second) calls)
-                 t)))
-        (connection (ellm-acp-connection
-                     :name "test"
-                     :process (start-process "ellm-acp-test-sleep" nil "sleep" "10")
-                     :buffer (current-buffer))))
+         (ellm-acp-extension-notification-functions
+          (list (lambda (_connection method params)
+                  (push (list 'first method params) calls)
+                  t)
+                (lambda (&rest _)
+                  (push '(second) calls)
+                  t)))
+         (connection (ellm-acp-connection
+                      :name "test"
+                      :process (start-process "ellm-acp-test-sleep" nil "sleep" "10")
+                      :buffer (current-buffer))))
     (unwind-protect
         (progn
           (should (ellm-acp--dispatch-notification
@@ -9494,19 +9494,19 @@ The parent provider remains buffer-local fallback only when the profile omits on
 (ert-deftest ellm-test-acp-extension-session-update-phases ()
   "ACP session extensions should observe phases and suppress core rendering."
   (let* ((phases nil)
-        (notification-called nil)
-        (ellm-acp-extension-notification-functions
-         (list (lambda (&rest _)
-                 (setq notification-called t)
-                 t)))
-        (ellm-acp-extension-session-update-functions
-         (list (lambda (_connection _update phase)
-                 (push phase phases)
-                 (and (eq phase 'pre-render) :handled))))
-        (connection (ellm-acp-connection
-                     :name "test"
-                     :process (start-process "ellm-acp-test-sleep" nil "sleep" "10")
-                     :buffer (current-buffer))))
+         (notification-called nil)
+         (ellm-acp-extension-notification-functions
+          (list (lambda (&rest _)
+                  (setq notification-called t)
+                  t)))
+         (ellm-acp-extension-session-update-functions
+          (list (lambda (_connection _update phase)
+                  (push phase phases)
+                  (and (eq phase 'pre-render) :handled))))
+         (connection (ellm-acp-connection
+                      :name "test"
+                      :process (start-process "ellm-acp-test-sleep" nil "sleep" "10")
+                      :buffer (current-buffer))))
     (unwind-protect
         (with-temp-buffer
           (ellm-mode)
@@ -9514,7 +9514,7 @@ The parent provider remains buffer-local fallback only when the profile omits on
           (ellm-acp--dispatch-notification
            connection 'session/update
            '(:update (:sessionUpdate "agent_message_chunk"
-                     :content (:type "text" :text "suppressed"))))
+                      :content (:type "text" :text "suppressed"))))
           (should (equal (nreverse phases) '(pre-render post-render)))
           (should-not notification-called)
           (should-not (string-match-p "suppressed" (buffer-string))))
@@ -9670,9 +9670,9 @@ The parent provider remains buffer-local fallback only when the profile omits on
   (let ((ellm-acp-tool-detail-level 'full)
         (ellm-acp-tool-detail-limit nil)
         (connection (ellm-acp-connection
-                      :name "test"
-                      :process (start-process "ellm-acp-test-sleep" nil "sleep" "10")
-                      :buffer (current-buffer))))
+                     :name "test"
+                     :process (start-process "ellm-acp-test-sleep" nil "sleep" "10")
+                     :buffer (current-buffer))))
     (unwind-protect
         (with-temp-buffer
           (ellm-mode)
@@ -9696,11 +9696,11 @@ The parent provider remains buffer-local fallback only when the profile omits on
           (ellm-acp--handle-session-update
            connection '(:update (:sessionUpdate "tool_call_update"
                                  :toolCallId "call_1"
-                                  :status "completed"
-                                  :content ((:type "content"
-                                             :content (:type "text"
-                                                       :text "human readable output")))
-                                  :rawOutput (:output "<path>/tmp/ellm</path>\n<type>directory</type>"))))
+                                 :status "completed"
+                                 :content ((:type "content"
+                                            :content (:type "text"
+                                                      :text "human readable output")))
+                                 :rawOutput (:output "<path>/tmp/ellm</path>\n<type>directory</type>"))))
           (let ((contents (buffer-string))
                 (turns (ellm--parse-turns)))
             (should (string-match-p
@@ -9711,8 +9711,8 @@ The parent provider remains buffer-local fallback only when the profile omits on
                      ">>>-| tool-param | filePath\n/tmp/ellm"
                      contents))
             (should (string-match-p
-                      ">>-| tool-result | read :filePath /tmp/ellm :id call_1 :status completed"
-                      contents))
+                     ">>-| tool-result | read :filePath /tmp/ellm :id call_1 :status completed"
+                     contents))
             (should (string-match-p "human readable output" contents))
             (should (string-match-p "<path>/tmp/ellm</path>" contents))
             (should (string-match-p "<type>directory</type>" contents))
@@ -9725,53 +9725,53 @@ The parent provider remains buffer-local fallback only when the profile omits on
                                                    nil nil #'equal)
                                         "call_1")))
                           turns)))))
-       (when (jsonrpc-running-p connection)
-         (jsonrpc-shutdown connection)))))
+      (when (jsonrpc-running-p connection)
+        (jsonrpc-shutdown connection)))))
 
 (ert-deftest ellm-test-acp-late-tool-updates-preserve-folding ()
   "Late ACP tool updates should remain hidden in already folded turns."
   (let ((ellm-acp-tool-detail-level 'full)
         (ellm-acp-tool-detail-limit nil)
         (connection (ellm-acp-connection
-                      :name "test"
-                      :process (start-process "ellm-acp-test-sleep" nil "sleep" "10")
-                      :buffer (current-buffer))))
+                     :name "test"
+                     :process (start-process "ellm-acp-test-sleep" nil "sleep" "10")
+                     :buffer (current-buffer))))
     (unwind-protect
         (with-temp-buffer
           (ellm-mode)
           (setf (ellm-acp--connection-buffer connection) (current-buffer))
           (ellm-acp--handle-session-update
            connection '(:update (:sessionUpdate "tool_call"
-                                  :toolCallId "call_1"
-                                  :title "grep"
-                                  :rawInput (:pattern "old-pattern"))))
+                                 :toolCallId "call_1"
+                                 :title "grep"
+                                 :rawInput (:pattern "old-pattern"))))
           (ellm-acp--handle-session-update
            connection '(:update (:sessionUpdate "tool_call_update"
-                                  :toolCallId "call_1"
-                                  :title "grep"
-                                  :status "in_progress"
-                                  :content ((:type "content"
-                                             :content (:type "text"
-                                                       :text "old output"))))))
+                                 :toolCallId "call_1"
+                                 :title "grep"
+                                 :status "in_progress"
+                                 :content ((:type "content"
+                                            :content (:type "text"
+                                                      :text "old output"))))))
           ;; Starting another call closes both turns belonging to call_1.
           (ellm-acp--handle-session-update
            connection '(:update (:sessionUpdate "tool_call"
-                                  :toolCallId "call_2"
-                                  :title "bash"
-                                  :rawInput (:command "pwd"))))
+                                 :toolCallId "call_2"
+                                 :title "bash"
+                                 :rawInput (:command "pwd"))))
           (should-not (ellm-test--invisible-at-text "old-pattern"))
           (should (ellm-test--invisible-at-nth-text "old-pattern" 2))
           (should (ellm-test--invisible-at-text "old output"))
           (ellm-acp--handle-session-update
            connection '(:update (:sessionUpdate "tool_call_update"
-                                  :toolCallId "call_1"
-                                  :title "grep"
-                                  :status "completed"
-                                  :rawInput (:pattern "new-pattern"
-                                             :path "/tmp/new-root")
-                                  :content ((:type "content"
-                                             :content (:type "text"
-                                                       :text "updated output"))))))
+                                 :toolCallId "call_1"
+                                 :title "grep"
+                                 :status "completed"
+                                 :rawInput (:pattern "new-pattern"
+                                            :path "/tmp/new-root")
+                                 :content ((:type "content"
+                                            :content (:type "text"
+                                                      :text "updated output"))))))
           (should (ellm-test--invisible-at-text "new-pattern"))
           (should (ellm-test--invisible-at-text "/tmp/new-root"))
           (should (ellm-test--invisible-at-text "updated output")))
@@ -9792,28 +9792,28 @@ The parent provider remains buffer-local fallback only when the profile omits on
           (setf (ellm-acp--connection-buffer connection) (current-buffer))
           (ellm-acp--handle-session-update
            connection '(:update (:sessionUpdate "tool_call"
-                                  :toolCallId "call_1"
-                                  :title "bash"
-                                  :kind "execute")))
+                                 :toolCallId "call_1"
+                                 :title "bash"
+                                 :kind "execute")))
           (ellm-acp--handle-session-update
            connection '(:update (:sessionUpdate "tool_call_update"
-                                  :toolCallId "call_1"
-                                  :title "bash"
-                                  :kind "execute"
-                                  :status "in_progress")))
+                                 :toolCallId "call_1"
+                                 :title "bash"
+                                 :kind "execute"
+                                 :status "in_progress")))
           (ellm-acp--handle-session-update
            connection '(:update (:sessionUpdate "tool_call"
-                                  :toolCallId "call_2"
-                                  :title "bash"
-                                  :kind "execute")))
+                                 :toolCallId "call_2"
+                                 :title "bash"
+                                 :kind "execute")))
           (cl-letf (((symbol-function 'ellm-acp--tool-result-detail-text)
                      (lambda (&rest _args) "(no output)")))
             (ellm-acp--handle-session-update
              connection '(:update (:sessionUpdate "tool_call_update"
-                                    :toolCallId "call_1"
-                                    :title "bash"
-                                    :kind "execute"
-                                    :status "completed"))))
+                                   :toolCallId "call_1"
+                                   :title "bash"
+                                   :kind "execute"
+                                   :status "completed"))))
           (should (string-match-p
                    (regexp-quote "(no output)\n>>-| tool-call | bash :id call_2 :kind execute")
                    (buffer-string))))
@@ -9830,14 +9830,14 @@ The parent provider remains buffer-local fallback only when the profile omits on
                        :name "test" :process nil :buffer (current-buffer))))
       (ellm-acp--handle-session-update
        connection '(:update (:sessionUpdate "tool_call"
-                              :toolCallId "call_1"
-                              :title "shell")))
+                             :toolCallId "call_1"
+                             :title "shell")))
       ;; Establish an initially empty result which a later update fills.
       (ellm-acp--handle-session-update
        connection '(:update (:sessionUpdate "tool_call_update"
-                              :toolCallId "call_1"
-                              :title "shell"
-                              :status "in_progress")))
+                             :toolCallId "call_1"
+                             :title "shell"
+                             :status "in_progress")))
       (ellm-acp--handle-session-update
        connection
        `(:update (:sessionUpdate "tool_call_update"
@@ -9856,12 +9856,12 @@ The parent provider remains buffer-local fallback only when the profile omits on
       (should (ellm-test--invisible-at-text "ASYNC-RESULT-END"))
       (ellm-acp--handle-session-update
        connection '(:update (:sessionUpdate "tool_call_update"
-                              :toolCallId "call_1"
-                              :title "shell"
-                              :status "in_progress"
-                              :content ((:type "content"
-                                         :content (:type "text"
-                                                   :text "ASYNC-SECOND"))))))
+                             :toolCallId "call_1"
+                             :title "shell"
+                             :status "in_progress"
+                             :content ((:type "content"
+                                        :content (:type "text"
+                                                  :text "ASYNC-SECOND"))))))
       (should (ellm-test--invisible-at-text "ASYNC-SECOND"))
       (goto-char (point-min))
       (re-search-forward "^>>-| tool-result")
@@ -9870,12 +9870,12 @@ The parent provider remains buffer-local fallback only when the profile omits on
       (should-not (ellm-test--invisible-at-text "ASYNC-SECOND"))
       (ellm-acp--handle-session-update
        connection '(:update (:sessionUpdate "tool_call_update"
-                              :toolCallId "call_1"
-                              :title "shell"
-                              :status "completed"
-                              :content ((:type "content"
-                                         :content (:type "text"
-                                                   :text "MANUALLY-OPEN"))))))
+                             :toolCallId "call_1"
+                             :title "shell"
+                             :status "completed"
+                             :content ((:type "content"
+                                        :content (:type "text"
+                                                  :text "MANUALLY-OPEN"))))))
       (should-not (ellm-test--invisible-at-text "MANUALLY-OPEN")))))
 
 (ert-deftest ellm-test-acp-folded-summary-keeps-following-turn-visible ()
@@ -9888,16 +9888,16 @@ The parent provider remains buffer-local fallback only when the profile omits on
                        :name "test" :process nil :buffer (current-buffer))))
       (ellm-acp--handle-session-update
        connection '(:update (:sessionUpdate "tool_call"
-                              :toolCallId "call_1"
-                              :title "shell")))
+                             :toolCallId "call_1"
+                             :title "shell")))
       (ellm-acp--handle-session-update
        connection '(:update (:sessionUpdate "tool_call_update"
-                              :toolCallId "call_1"
-                              :title "shell"
-                              :status "completed"
-                              :content ((:type "content"
-                                         :content (:type "text"
-                                                   :text "SUMMARY-RESULT"))))))
+                             :toolCallId "call_1"
+                             :title "shell"
+                             :status "completed"
+                             :content ((:type "content"
+                                        :content (:type "text"
+                                                  :text "SUMMARY-RESULT"))))))
       (should (ellm-test--invisible-at-text "SUMMARY-RESULT"))
       (ellm--insert-turn "assistant" :continuation t)
       (insert "VISIBLE-AFTER-SUMMARY\n")
@@ -9916,16 +9916,16 @@ The parent provider remains buffer-local fallback only when the profile omits on
           (setf (ellm-acp--connection-buffer connection) (current-buffer))
           (ellm-acp--handle-session-update
            connection '(:update (:sessionUpdate "tool_call"
-                                  :toolCallId "call_1"
-                                  :title "bash"
-                                  :kind "execute"
-                                  :status "pending")))
+                                 :toolCallId "call_1"
+                                 :title "bash"
+                                 :kind "execute"
+                                 :status "pending")))
           (ellm-acp--handle-session-update
            connection '(:update (:sessionUpdate "tool_call_update"
-                                   :toolCallId "call_1"
-                                   :title "mkdir -p /tmp/a-very-long-work-directory"
-                                   :status "in_progress"
-                                   :rawInput (:command "mkdir -p /tmp/a-very-long-work-directory"))))
+                                 :toolCallId "call_1"
+                                 :title "mkdir -p /tmp/a-very-long-work-directory"
+                                 :status "in_progress"
+                                 :rawInput (:command "mkdir -p /tmp/a-very-long-work-directory"))))
           (let ((contents (buffer-string)))
             (should (string-match-p
                      (regexp-quote
@@ -9944,9 +9944,9 @@ The parent provider remains buffer-local fallback only when the profile omits on
             (should-not (string-match-p ":status in_progress" contents)))
           (ellm-acp--handle-session-update
            connection '(:update (:sessionUpdate "tool_call_update"
-                                  :toolCallId "call_1"
-                                  :status "completed"
-                                  :rawOutput (:output "done"))))
+                                 :toolCallId "call_1"
+                                 :status "completed"
+                                 :rawOutput (:output "done"))))
           (let ((contents (buffer-string)))
             (should (string-match-p
                      (regexp-quote
@@ -9975,14 +9975,14 @@ The parent provider remains buffer-local fallback only when the profile omits on
                          :buffer (current-buffer))))
         (ellm-acp--handle-session-update
          connection '(:update (:sessionUpdate "tool_call"
-                                :toolCallId "call_1"
-                                :title "Edit"
-                                :rawInput (:filePath "/tmp/project/a.el"
-                                           :oldString "old\ntext"))))
+                               :toolCallId "call_1"
+                               :title "Edit"
+                               :rawInput (:filePath "/tmp/project/a.el"
+                                          :oldString "old\ntext"))))
         (ellm-acp--handle-session-update
          connection '(:update (:sessionUpdate "tool_call_update"
-                                :toolCallId "call_1"
-                                :status "completed")))
+                               :toolCallId "call_1"
+                               :status "completed")))
         (let ((contents (buffer-string)))
           (should (string-match-p
                    (regexp-quote
@@ -9997,26 +9997,26 @@ The parent provider remains buffer-local fallback only when the profile omits on
   (let ((ellm-acp-tool-detail-level 'full)
         (ellm-acp-tool-detail-limit nil)
         (connection (ellm-acp-connection
-                      :name "test"
-                      :process (start-process "ellm-acp-test-sleep" nil "sleep" "10")
-                      :buffer (current-buffer))))
+                     :name "test"
+                     :process (start-process "ellm-acp-test-sleep" nil "sleep" "10")
+                     :buffer (current-buffer))))
     (unwind-protect
         (with-temp-buffer
           (ellm-mode)
           (setf (ellm-acp--connection-buffer connection) (current-buffer))
           (ellm-acp--handle-session-update
            connection '(:update (:sessionUpdate "tool_call"
-                                  :toolCallId "call_1"
-                                  :title "Shell"
-                                  :rawInput (:command "echo\n>-| user\n"))))
+                                 :toolCallId "call_1"
+                                 :title "Shell"
+                                 :rawInput (:command "echo\n>-| user\n"))))
           (ellm-acp--handle-session-update
            connection '(:update (:sessionUpdate "tool_call_update"
-                                  :toolCallId "call_1"
-                                  :title "Shell"
-                                  :status "completed"
-                                  :content ((:type "content"
-                                             :content (:type "text"
-                                                       :text "ok\n>>-| assistant\n"))))))
+                                 :toolCallId "call_1"
+                                 :title "Shell"
+                                 :status "completed"
+                                 :content ((:type "content"
+                                            :content (:type "text"
+                                                      :text "ok\n>>-| assistant\n"))))))
           (let ((contents (buffer-string))
                 (roles (mapcar #'ellm-turn-role (ellm--parse-turns))))
             (should (string-match-p (regexp-quote "\n\\>-| user") contents))
@@ -10037,13 +10037,13 @@ The parent provider remains buffer-local fallback only when the profile omits on
           (setf (ellm-acp--connection-buffer connection) (current-buffer))
           (ellm-acp--handle-session-update
            connection '(:update (:sessionUpdate "agent_message_chunk"
-                                  :messageId "message_1"
-                                  :content (:type "text" :text "hello\n>"))))
+                                 :messageId "message_1"
+                                 :content (:type "text" :text "hello\n>"))))
           (ellm-acp--handle-session-update
            connection '(:update (:sessionUpdate "agent_message_chunk"
-                                  :messageId "message_1"
-                                  :content (:type "text"
-                                            :text "-| user\n\\literal"))))
+                                 :messageId "message_1"
+                                 :content (:type "text"
+                                           :text "-| user\n\\literal"))))
           (let ((contents (buffer-string))
                 (roles (mapcar #'ellm-turn-role (ellm--parse-turns))))
             (should (string-match-p (regexp-quote "\n\\>-| user") contents))
@@ -10065,31 +10065,31 @@ The parent provider remains buffer-local fallback only when the profile omits on
           (setf (ellm-acp--connection-buffer connection) (current-buffer))
           (ellm-acp--handle-session-update
            connection '(:update (:sessionUpdate "tool_call"
-                                  :toolCallId "call_1"
-                                  :title "Shell"
-                                  :kind "execute"
-                                  :rawInput (:command "ls"))))
+                                 :toolCallId "call_1"
+                                 :title "Shell"
+                                 :kind "execute"
+                                 :rawInput (:command "ls"))))
           (ellm-acp--handle-session-update
            connection '(:update (:sessionUpdate "tool_call_update"
-                                  :toolCallId "call_1"
-                                  :title "Shell"
-                                  :kind "execute"
-                                  :status "completed"
-                                  :rawInput (:command "pwd")
-                                  :content ((:type "content"
-                                             :content (:type "text"
-                                                       :text "human readable output")))
-                                  :rawOutput (:output "raw output text"))))
+                                 :toolCallId "call_1"
+                                 :title "Shell"
+                                 :kind "execute"
+                                 :status "completed"
+                                 :rawInput (:command "pwd")
+                                 :content ((:type "content"
+                                            :content (:type "text"
+                                                      :text "human readable output")))
+                                 :rawOutput (:output "raw output text"))))
           (ellm-acp--handle-session-update
            connection '(:update (:sessionUpdate "tool_call_update"
-                                  :toolCallId "call_1"
-                                  :title "Shell"
-                                  :kind "execute"
-                                  :status "completed"
-                                  :rawInput (:command "echo later")
-                                  :content ((:type "content"
-                                             :content (:type "text"
-                                                       :text "later output"))))))
+                                 :toolCallId "call_1"
+                                 :title "Shell"
+                                 :kind "execute"
+                                 :status "completed"
+                                 :rawInput (:command "echo later")
+                                 :content ((:type "content"
+                                            :content (:type "text"
+                                                      :text "later output"))))))
           (let ((contents (buffer-string))
                 (turns (ellm--parse-turns)))
             (should (string-match-p
@@ -10130,21 +10130,21 @@ The parent provider remains buffer-local fallback only when the profile omits on
           (setf (ellm-acp--connection-buffer connection) (current-buffer))
           (ellm-acp--handle-session-update
            connection '(:update (:sessionUpdate "tool_call"
-                                  :toolCallId "call_1"
-                                  :title "Shell"
-                                  :rawInput (:command "123456789"))))
+                                 :toolCallId "call_1"
+                                 :title "Shell"
+                                 :rawInput (:command "123456789"))))
           (ellm-acp--handle-session-update
            connection '(:update (:sessionUpdate "tool_call_update"
-                                  :toolCallId "call_1"
-                                  :title "Shell"
-                                  :status "completed"
-                                  :content ((:type "content"
-                                             :content (:type "text"
-                                                       :text "abcdefghijklmnop"))))))
+                                 :toolCallId "call_1"
+                                 :title "Shell"
+                                 :status "completed"
+                                 :content ((:type "content"
+                                            :content (:type "text"
+                                                      :text "abcdefghijklmnop"))))))
           (ellm-acp--handle-session-update
            connection '(:update (:sessionUpdate "tool_call_update"
-                                  :toolCallId "call_1"
-                                  :status "completed")))
+                                 :toolCallId "call_1"
+                                 :status "completed")))
           (let ((contents (buffer-string)))
             (should (string-match-p ":command 123456789" contents))
             (should (string-match-p ">>>-| tool-param | command\n123" contents))
@@ -10173,30 +10173,30 @@ The parent provider remains buffer-local fallback only when the profile omits on
           (setf (ellm-acp--connection-buffer connection) (current-buffer))
           (ellm-acp--handle-session-update
            connection '(:update (:sessionUpdate "tool_call"
-                                  :toolCallId "call_1"
-                                  :title "bash"
-                                  :kind "execute"
-                                  :rawInput (:command "initial raw input"))))
+                                 :toolCallId "call_1"
+                                 :title "bash"
+                                 :kind "execute"
+                                 :rawInput (:command "initial raw input"))))
           (ellm-acp--handle-session-update
            connection '(:update (:sessionUpdate "tool_call_update"
-                                  :toolCallId "call_1"
-                                  :title "git status --short"
-                                  :kind "execute"
-                                  :status "in_progress"
-                                  :locations [(:path "/tmp/project")]
-                                  :rawInput (:command "updated raw input")
-                                  :content ((:type "content"
-                                             :content (:type "text"
-                                                       :text "2 modified files"))
-                                            (:type "diff" :path "/tmp/project/a"
-                                             :oldText "old detail"
-                                             :newText "new detail"))
-                                  :rawOutput (:output "first raw output"))))
+                                 :toolCallId "call_1"
+                                 :title "git status --short"
+                                 :kind "execute"
+                                 :status "in_progress"
+                                 :locations [(:path "/tmp/project")]
+                                 :rawInput (:command "updated raw input")
+                                 :content ((:type "content"
+                                            :content (:type "text"
+                                                      :text "2 modified files"))
+                                           (:type "diff" :path "/tmp/project/a"
+                                            :oldText "old detail"
+                                            :newText "new detail"))
+                                 :rawOutput (:output "first raw output"))))
           (ellm-acp--handle-session-update
            connection '(:update (:sessionUpdate "tool_call_update"
-                                  :toolCallId "call_1"
-                                  :status "completed"
-                                  :rawOutput (:output "raw output detail"))))
+                                 :toolCallId "call_1"
+                                 :status "completed"
+                                 :rawOutput (:output "raw output detail"))))
           (let ((contents (buffer-string)))
             (should (string-match-p
                      "^>>-| tool-call | bash :command initial raw input :id call_1 :kind execute$"
@@ -10309,9 +10309,9 @@ The parent provider remains buffer-local fallback only when the profile omits on
   (let ((ellm-acp-tool-detail-level 'full)
         (ellm-acp-tool-detail-limit nil)
         (connection (ellm-acp-connection
-                      :name "test"
-                      :process (start-process "ellm-acp-test-sleep" nil "sleep" "10")
-                      :buffer (current-buffer))))
+                     :name "test"
+                     :process (start-process "ellm-acp-test-sleep" nil "sleep" "10")
+                     :buffer (current-buffer))))
     (unwind-protect
         (with-temp-buffer
           (ellm-mode)
@@ -10342,8 +10342,8 @@ The parent provider remains buffer-local fallback only when the profile omits on
                      ">>>-| tool-param | filePath\n/tmp/ellm"
                      contents))
             (should (string-match-p
-                      ">>-| tool-result | read :filePath /tmp/ellm :id call_1 :status completed"
-                      contents))
+                     ">>-| tool-result | read :filePath /tmp/ellm :id call_1 :status completed"
+                     contents))
             (should (string-match-p "done" contents))
             (should-not (string-match-p "Status: in_progress" contents))))
       (when (jsonrpc-running-p connection)
@@ -10366,9 +10366,9 @@ The parent provider remains buffer-local fallback only when the profile omits on
                   (ellm-acp--make-request
                    :connection connection))
                  (request
-                  (ellm--make-request
-                   :buffer (current-buffer) :backend driver
-                   :generation ellm--request-generation :attempt 1))
+                   (ellm--make-request
+                    :buffer (current-buffer) :backend driver
+                    :generation ellm--request-generation :attempt 1))
                  (emit
                   (lambda (event)
                     (ellm--request-handle-event request 1 event))))
@@ -10413,13 +10413,13 @@ The parent provider remains buffer-local fallback only when the profile omits on
                     "    else:\n"
                     "        out = {'jsonrpc':'2.0','id':mid,'error':{'code':-32601,'message':'unknown'}}\n"
                     "    print(json.dumps(out), flush=True)\n"))
-           (let ((ellm-provider-alist
-                  `((fake . ,(ellm-make-acp-provider
-                              :command "python3"
-                              :args (list agent-file)))))
-                 (ellm-buffer-name-function #'ellm-default-buffer-name)
-                 (ellm-current-project-function (lambda () nil))
-                 (default-directory "/tmp/"))
+          (let ((ellm-provider-alist
+                 `((fake . ,(ellm-make-acp-provider
+                             :command "python3"
+                             :args (list agent-file)))))
+                (ellm-buffer-name-function #'ellm-default-buffer-name)
+                (ellm-current-project-function (lambda () nil))
+                (default-directory "/tmp/"))
             (cl-letf (((symbol-function 'completing-read)
                        (lambda (_prompt collection &rest _)
                          (caar collection)))
@@ -10427,13 +10427,13 @@ The parent provider remains buffer-local fallback only when the profile omits on
                        (lambda (buffer-or-name &rest _)
                          (setq loaded-buffer (get-buffer buffer-or-name)))))
               (setq loaded-buffer (ellm-import-session)))
-             (with-current-buffer loaded-buffer
-               (let ((contents (buffer-string))
-                     (turns (ellm--parse-turns)))
-                 (should (equal (buffer-name) "*ellm: Loaded Session*"))
-                 (should (string-match-p "session-id: sess_load" contents))
-                 (should (string-match-p "loaded history" contents))
-                 (should (equal (ellm-turn-role (car (last turns))) "user"))))))
+            (with-current-buffer loaded-buffer
+              (let ((contents (buffer-string))
+                    (turns (ellm--parse-turns)))
+                (should (equal (buffer-name) "*ellm: Loaded Session*"))
+                (should (string-match-p "session-id: sess_load" contents))
+                (should (string-match-p "loaded history" contents))
+                (should (equal (ellm-turn-role (car (last turns))) "user"))))))
       (when (buffer-live-p loaded-buffer)
         (when ellm-acp--connection
           (delete-process (ellm-acp--connection-process ellm-acp--connection)))
@@ -10448,8 +10448,8 @@ The parent provider remains buffer-local fallback only when the profile omits on
 (ert-deftest ellm-test-mcp-tool-schema-normalization ()
   "MCP JSON Schema types should work with llm.el tool serialization."
   (let* ((args '((:name "files" :type "array"
-                   :items (:type "object"
-                           :properties (:file_path (:type "string"))))))
+                  :items (:type "object"
+                          :properties (:file_path (:type "string"))))))
          (tool (ellm-mcp--make-tool
                 (list :name "push_files" :description "Push files"
                       :args args :async t :function #'ignore)))
@@ -10524,7 +10524,7 @@ The parent provider remains buffer-local fallback only when the profile omits on
                               :args (list agent-file)))
               (ellm-mcp-servers
                '(("fs" . (:command "python3" :args ("-m" "fake")
-                           :env (:FOO "bar"))))))
+                          :env (:FOO "bar"))))))
           (with-temp-buffer
             (insert "---\nacp:\n  session-id: saved\n  additional-directories:\n    - /tmp/ellm-extra\nmcp: [fs]\n---\n\n")
             (ellm-mode)
@@ -10786,7 +10786,7 @@ The parent provider remains buffer-local fallback only when the profile omits on
         (unwind-protect
             (progn
               (ellm--authorize-tool-call request tool '("echo yolo")
-                                          (lambda (value) (setq decision value)))
+                                         (lambda (value) (setq decision value)))
               (should (eq decision 'allow))
               (should-not ellm--active-user-prompt))
           (ellm--set-active-request nil))))))
@@ -10813,14 +10813,14 @@ The parent provider remains buffer-local fallback only when the profile omits on
         (should (eq (ellm--tool-permission-policy frontmatter web-search) 'allow))
         (should (eq (ellm--tool-permission-policy frontmatter web-fetch) 'ask))
         (should (eq (ellm--tool-permission-policy-for-keys frontmatter
-                                                            '("@acp/read"))
+                                                           '("@acp/read"))
                     'allow))
         (should (eq (ellm--tool-permission-policy-for-keys frontmatter
-                                                            '("@acp/edit"))
+                                                           '("@acp/edit"))
                     'ask))
         (let ((ellm-default-tool-permission 'deny))
           (should (eq (ellm--tool-permission-policy-for-keys frontmatter
-                                                              '("@acp/other"))
+                                                             '("@acp/other"))
                       'deny)))))
     (with-temp-buffer
       (insert "---\nprofile: explore\n---\n")
@@ -10830,7 +10830,7 @@ The parent provider remains buffer-local fallback only when the profile omits on
         (should (eq (ellm--tool-permission-policy frontmatter web-search) 'allow))
         (should (eq (ellm--tool-permission-policy frontmatter web-fetch) 'ask))
         (should (eq (ellm--tool-permission-policy-for-keys frontmatter
-                                                            '("@acp/edit"))
+                                                           '("@acp/edit"))
                     'deny))))))
 
 (ert-deftest ellm-test-tool-permission-prompt-truncates-arguments ()
@@ -10868,7 +10868,7 @@ The parent provider remains buffer-local fallback only when the profile omits on
              (lambda (decision) (push decision decisions)))
             (should ellm--active-user-prompt)
             (ellm--resolve-user-prompt ellm--active-user-prompt
-                                        '(:status selected :value "allow-session"))
+                                       '(:status selected :value "allow-session"))
             (should (equal decisions '(allow)))
             (should (equal ellm--tool-session-permissions '("edit")))
             (ellm--authorize-tool-call
@@ -10881,7 +10881,7 @@ The parent provider remains buffer-local fallback only when the profile omits on
                later-request tool nil (lambda (decision) (push decision decisions))))
             (should-not ellm--active-user-prompt)
             (should (equal decisions '(allow allow allow)))
-        (ellm--set-active-request nil))))))
+            (ellm--set-active-request nil))))))
 
 (ert-deftest ellm-test-llm-tool-permission-allow-for-session-survives-request ()
   "An llm.el tool retains session approval after its request finishes."
@@ -10901,9 +10901,9 @@ The parent provider remains buffer-local fallback only when the profile omits on
                      (lambda (result) (push result results)))
             (should ellm--active-user-prompt)
             (ellm--resolve-user-prompt ellm--active-user-prompt
-                                        '(:status selected :value "allow-session"))
+                                       '(:status selected :value "allow-session"))
             (let* ((later-request (ellm--make-request :buffer (current-buffer)
-                                                       :frontmatter frontmatter))
+                                                      :frontmatter frontmatter))
                    (later (ellm-llm--make-llm-tool tool later-request)))
               (funcall (llm-tool-function later)
                        (lambda (result) (push result results))))
@@ -10928,7 +10928,7 @@ The parent provider remains buffer-local fallback only when the profile omits on
                request tool nil (lambda (decision) (push decision decisions))))
             (should (= (length ellm--user-prompt-queue) 2))
             (ellm--resolve-user-prompt ellm--active-user-prompt
-                                        '(:status selected :value "allow-session"))
+                                       '(:status selected :value "allow-session"))
             (should ellm--active-user-prompt)
             (ellm--activate-user-prompt ellm--active-user-prompt)
             (should-not ellm--active-user-prompt)
@@ -10962,8 +10962,8 @@ The parent provider remains buffer-local fallback only when the profile omits on
     (let ((connection (ellm-acp-connection :name "test" :buffer (current-buffer)))
           (request (ellm--make-request
                     :frontmatter '((tool-permissions .
-                                     ((default . "allow")
-                                      ("@acp/execute" . "deny")))))))
+                                                     ((default . "allow")
+                                                      ("@acp/execute" . "deny")))))))
       (should (eq (ellm-acp--permission-policy
                    request connection '(:kind "execute"))
                   'deny))
@@ -11006,7 +11006,7 @@ The parent provider remains buffer-local fallback only when the profile omits on
               (should ellm--active-user-prompt)
               (should-not reply)
               (ellm--resolve-user-prompt ellm--active-user-prompt
-                                          '(:status selected :value "allow"))
+                                         '(:status selected :value "allow"))
               (should (equal reply '(:id 7 :result (:outcome (:outcome "selected" :optionId "allow")))))
               (should (eq (cdr (assq 'before events)) request))
               (should (equal (nth 2 (car events)) "allow")))
@@ -11183,31 +11183,31 @@ The parent provider remains buffer-local fallback only when the profile omits on
   (let ((ellm-acp-tool-detail-level 'full)
         (ellm-acp-tool-detail-limit nil)
         (connection (ellm-acp-connection
-                      :name "test"
-                      :process (start-process "ellm-acp-test-sleep" nil "sleep" "10")
-                      :buffer (current-buffer))))
+                     :name "test"
+                     :process (start-process "ellm-acp-test-sleep" nil "sleep" "10")
+                     :buffer (current-buffer))))
     (unwind-protect
         (with-temp-buffer
           (ellm-mode)
           (setf (ellm-acp--connection-buffer connection) (current-buffer))
           (ellm-acp--handle-session-update
            connection '(:update (:sessionUpdate "user_message_chunk"
-                                :messageId "u1"
-                                :content (:type "text" :text "hello"))))
+                                 :messageId "u1"
+                                 :content (:type "text" :text "hello"))))
           (ellm-acp--handle-session-update
            connection '(:update (:sessionUpdate "agent_message_chunk"
-                                :messageId "a1"
-                                :content (:type "text" :text "one"))))
+                                 :messageId "a1"
+                                 :content (:type "text" :text "one"))))
           (ellm-acp--handle-session-update
            connection '(:update (:sessionUpdate "agent_message_chunk"
-                                :messageId "a2"
-                                :content (:type "text" :text "two"))))
+                                 :messageId "a2"
+                                 :content (:type "text" :text "two"))))
           (ellm-acp--handle-session-update
            connection '(:update (:sessionUpdate "plan"
-                                :entries ((:content "old" :priority "low" :status "pending")))))
+                                 :entries ((:content "old" :priority "low" :status "pending")))))
           (ellm-acp--handle-session-update
            connection '(:update (:sessionUpdate "plan"
-                                :entries ((:content "new" :priority "high" :status "in_progress")))))
+                                 :entries ((:content "new" :priority "high" :status "in_progress")))))
           (ellm-acp--handle-session-update
            connection '(:update (:sessionUpdate "usage_update"
                                  :used 10 :size 100
@@ -11376,7 +11376,7 @@ The parent provider remains buffer-local fallback only when the profile omits on
       (should ellm--active-user-prompt)
       (should-not result)
       (ellm--resolve-user-prompt ellm--active-user-prompt
-                                  '(:status selected :value "one"))
+                                 '(:status selected :value "one"))
       (should (equal result '(:status selected :value "one"))))))
 
 (ert-deftest ellm-test-user-prompt-lazy-activation-uses-active-head ()
@@ -11423,7 +11423,7 @@ The parent provider remains buffer-local fallback only when the profile omits on
       (dolist (id '("first" "second" "third"))
         (should (equal (ellm-user-prompt-title ellm--active-user-prompt) id))
         (ellm--resolve-user-prompt ellm--active-user-prompt
-                                    (list :status 'submitted :value id)))
+                                   (list :status 'submitted :value id)))
       (should-not ellm--active-user-prompt)
       (should-not ellm--user-prompt-queue)
       (should (equal (mapcar (lambda (entry) (car entry)) (nreverse results))
@@ -11477,12 +11477,12 @@ The parent provider remains buffer-local fallback only when the profile omits on
                  (:question "What should the commit be called?")))
               (should (= (length ellm--user-prompt-queue) 3))
               (ellm--resolve-user-prompt ellm--active-user-prompt
-                                          '(:status selected :value "main"))
+                                         '(:status selected :value "main"))
               (ellm--resolve-user-prompt ellm--active-user-prompt
-                                          '(:status selected
-                                            :value ("Implementation" "Tests")))
+                                         '(:status selected
+                                           :value ("Implementation" "Tests")))
               (ellm--resolve-user-prompt ellm--active-user-prompt
-                                          '(:status submitted :value "Add parser"))
+                                         '(:status submitted :value "Add parser"))
               (should (equal result
                              "Question: Which branch should I use?\nAnswer: main\n\nQuestion: Which areas should be updated?\nAnswer: Implementation, Tests\n\nQuestion: What should the commit be called?\nAnswer: Add parser")))
           (ellm--set-active-request nil))))))
@@ -11891,7 +11891,7 @@ The parent provider remains buffer-local fallback only when the profile omits on
             (insert (format "---\ncwd: %s\ntitle: Newer title\n---\n\n>-| user\nNewer prompt\n"
                             newer-directory)))
           (with-temp-file (expand-file-name "worker.ellm"
-                                             (expand-file-name "subagents/" newer-directory))
+                                            (expand-file-name "subagents/" newer-directory))
             (insert ">-| assistant\nWorking\n"))
           (set-file-times older-main (time-subtract (current-time) 60))
           (let* ((sessions (ellm--persisted-sessions root))
@@ -12428,7 +12428,7 @@ The parent provider remains buffer-local fallback only when the profile omits on
                         (concat "\\" link)))
       (should-not (ellm-attachment-references text)))
     (should (= 1 (length (ellm-attachment-references
-                         (concat "```\n" link "\n```\n" link)))))
+                          (concat "```\n" link "\n```\n" link)))))
     (should (= 1 (length (ellm-attachment-references (concat "` unmatched " link)))))
     (let ((ref (car (ellm-attachment-references (concat "hi " link " end")))))
       (should (= 3 (plist-get ref :beg)))
@@ -12438,126 +12438,126 @@ The parent provider remains buffer-local fallback only when the profile omits on
 
 (ert-deftest ellm-attachment-test-binary-roundtrip-and-dedup ()
   (ellm-attachment-test--store
-    (let* ((a (ellm-attachment-import ellm-attachment-test--png "image/png" "a.png"))
-           (b (ellm-attachment-import ellm-attachment-test--png "image/png" "b.png"))
-           (id (ellm-attachment-id a)))
-      (should (equal id (ellm-attachment-id b)))
-      (should (equal ellm-attachment-test--png
-                     (ellm-attachment-data (ellm-attachment-resolve id))))
-      (should-not (multibyte-string-p (ellm-attachment-data a)))
-      (should (equal "image/png" (ellm-attachment-mime a)))
-      (should (= (length ellm-attachment-test--png) (ellm-attachment-size a)))
-      (unless (eq system-type 'windows-nt)
-        (should (= #o600 (file-modes (ellm-attachment-file a))))
-        (should (= #o700 (file-modes (ellm-attachment--directory))))))))
+   (let* ((a (ellm-attachment-import ellm-attachment-test--png "image/png" "a.png"))
+          (b (ellm-attachment-import ellm-attachment-test--png "image/png" "b.png"))
+          (id (ellm-attachment-id a)))
+     (should (equal id (ellm-attachment-id b)))
+     (should (equal ellm-attachment-test--png
+                    (ellm-attachment-data (ellm-attachment-resolve id))))
+     (should-not (multibyte-string-p (ellm-attachment-data a)))
+     (should (equal "image/png" (ellm-attachment-mime a)))
+     (should (= (length ellm-attachment-test--png) (ellm-attachment-size a)))
+     (unless (eq system-type 'windows-nt)
+       (should (= #o600 (file-modes (ellm-attachment-file a))))
+       (should (= #o700 (file-modes (ellm-attachment--directory))))))))
 
 (ert-deftest ellm-attachment-test-corrupt-missing-and-unsafe ()
   (ellm-attachment-test--store
-    (should-error (ellm-attachment-resolve "../../etc/passwd") :type 'user-error)
-    (should-error (ellm-attachment-resolve (concat (make-string 64 ?a) ".png"))
-                  :type 'user-error)
-    (let ((a (ellm-attachment-import "abc" nil "notes.txt")))
-      (with-temp-file (ellm-attachment-file a) (insert "changed"))
-      (should-error (ellm-attachment-resolve (ellm-attachment-id a)) :type 'user-error)
-      (should-error (ellm-attachment-data a) :type 'user-error))))
+   (should-error (ellm-attachment-resolve "../../etc/passwd") :type 'user-error)
+   (should-error (ellm-attachment-resolve (concat (make-string 64 ?a) ".png"))
+                 :type 'user-error)
+   (let ((a (ellm-attachment-import "abc" nil "notes.txt")))
+     (with-temp-file (ellm-attachment-file a) (insert "changed"))
+     (should-error (ellm-attachment-resolve (ellm-attachment-id a)) :type 'user-error)
+     (should-error (ellm-attachment-data a) :type 'user-error))))
 
 (ert-deftest ellm-attachment-test-reject-symlinks ()
   (skip-unless (not (eq system-type 'windows-nt)))
   (ellm-attachment-test--store
-    (let* ((a (ellm-attachment-import "abc" nil "notes.txt"))
-           (file (ellm-attachment-file a))
-           (outside (expand-file-name "outside" root)))
-      (rename-file file outside)
-      (make-symbolic-link outside file)
-      (should-error (ellm-attachment-resolve (ellm-attachment-id a)) :type 'user-error))))
+   (let* ((a (ellm-attachment-import "abc" nil "notes.txt"))
+          (file (ellm-attachment-file a))
+          (outside (expand-file-name "outside" root)))
+     (rename-file file outside)
+     (make-symbolic-link outside file)
+     (should-error (ellm-attachment-resolve (ellm-attachment-id a)) :type 'user-error))))
 
 (ert-deftest ellm-attachment-test-order-and-escaped-label ()
   (ellm-attachment-test--store
-    (with-temp-buffer
-      (ellm-mode)
-      (insert ">-| user\nBefore\n")
-      (let* ((a (ellm-attachment-insert ellm-attachment-test--png "image/png" "a [b].png"))
-             (id (ellm-attachment-id a)))
-        (insert "After")
-        (let* ((content (ellm-turn-content (car (ellm--parse-turns))))
-               (parts (ellm-attachment-content-parts content)))
-          (should (= 3 (length parts)))
-          (should (equal "Before\n" (car parts)))
-          (should (equal "a [b].png" (ellm-attachment-name (nth 1 parts))))
-          (should (equal id (ellm-attachment-id (nth 1 parts))))
-          (should (equal "\nAfter" (nth 2 parts))))))))
+   (with-temp-buffer
+     (ellm-mode)
+     (insert ">-| user\nBefore\n")
+     (let* ((a (ellm-attachment-insert ellm-attachment-test--png "image/png" "a [b].png"))
+            (id (ellm-attachment-id a)))
+       (insert "After")
+       (let* ((content (ellm-turn-content (car (ellm--parse-turns))))
+              (parts (ellm-attachment-content-parts content)))
+         (should (= 3 (length parts)))
+         (should (equal "Before\n" (car parts)))
+         (should (equal "a [b].png" (ellm-attachment-name (nth 1 parts))))
+         (should (equal id (ellm-attachment-id (nth 1 parts))))
+         (should (equal "\nAfter" (nth 2 parts))))))))
 
 (ert-deftest ellm-attachment-test-save-move-and-reopen ()
   (ellm-attachment-test--store
-    (let (saved-directory saved-file text id)
-      (with-temp-buffer
-        (ellm-mode)
-        (insert ">-| user\n")
-        (let ((original (expand-file-name "original.pdf" root)))
-          (with-temp-file original (insert "%PDF-1.7\nfixture"))
-          (setq id (ellm-attachment-id (ellm-attach-file original)))
-          (delete-file original))
-        (ellm-save)
-        (setq saved-directory ellm--session-directory
-              saved-file buffer-file-name text (buffer-string))
-        (should (file-exists-p (ellm-attachment--path id)))
-        (should (file-exists-p (ellm-attachment--path id t))))
-      (delete-directory ellm-cache-directory t)
-      (let* ((moved (expand-file-name "moved/" root))
-             (file (expand-file-name (file-name-nondirectory saved-file) moved)))
-        (rename-file saved-directory (directory-file-name moved))
-        (with-temp-buffer
-          (insert-file-contents file)
-          (setq buffer-file-name file)
-          (ellm-mode)
-          (should (equal text (buffer-string)))
-          (should (equal "%PDF-1.7\nfixture"
-                         (ellm-attachment-data (ellm-attachment-resolve id)))))))))
+   (let (saved-directory saved-file text id)
+     (with-temp-buffer
+       (ellm-mode)
+       (insert ">-| user\n")
+       (let ((original (expand-file-name "original.pdf" root)))
+         (with-temp-file original (insert "%PDF-1.7\nfixture"))
+         (setq id (ellm-attachment-id (ellm-attach-file original)))
+         (delete-file original))
+       (ellm-save)
+       (setq saved-directory ellm--session-directory
+             saved-file buffer-file-name text (buffer-string))
+       (should (file-exists-p (ellm-attachment--path id)))
+       (should (file-exists-p (ellm-attachment--path id t))))
+     (delete-directory ellm-cache-directory t)
+     (let* ((moved (expand-file-name "moved/" root))
+            (file (expand-file-name (file-name-nondirectory saved-file) moved)))
+       (rename-file saved-directory (directory-file-name moved))
+       (with-temp-buffer
+         (insert-file-contents file)
+         (setq buffer-file-name file)
+         (ellm-mode)
+         (should (equal text (buffer-string)))
+         (should (equal "%PDF-1.7\nfixture"
+                        (ellm-attachment-data (ellm-attachment-resolve id)))))))))
 
 (ert-deftest ellm-attachment-test-save-failure-not-success ()
   (ellm-attachment-test--store
-    (with-temp-buffer
-      (ellm-mode)
-      (insert ">-| user\n![Missing](attachment:" (make-string 64 ?b) ".png)\n")
-      (should-error (ellm-save) :type 'user-error)
-      (should-not (file-exists-p buffer-file-name)))))
+   (with-temp-buffer
+     (ellm-mode)
+     (insert ">-| user\n![Missing](attachment:" (make-string 64 ?b) ".png)\n")
+     (should-error (ellm-save) :type 'user-error)
+     (should-not (file-exists-p buffer-file-name)))))
 
 (ert-deftest ellm-attachment-test-localization-only-user-input ()
   (ellm-attachment-test--store
-    (with-temp-buffer
-      (ellm-mode)
-      (insert ">-| assistant\n![Missing](attachment:" (make-string 64 ?b) ".png)\n"
-              ">-| user\n```\n![Example](attachment:" (make-string 64 ?c) ".png)\n```\n")
-      (setq ellm--session-directory (expand-file-name "session/" root))
-      (ellm-attachment-localize)
-      (should-not (file-exists-p (ellm-attachment--directory))))))
+   (with-temp-buffer
+     (ellm-mode)
+     (insert ">-| assistant\n![Missing](attachment:" (make-string 64 ?b) ".png)\n"
+             ">-| user\n```\n![Example](attachment:" (make-string 64 ?c) ".png)\n```\n")
+     (setq ellm--session-directory (expand-file-name "session/" root))
+     (ellm-attachment-localize)
+     (should-not (file-exists-p (ellm-attachment--directory))))))
 
 
 (ert-deftest ellm-attachment-test-ordinary-save-rejects-missing-data ()
   (ellm-attachment-test--store
-    (with-temp-buffer
-      (ellm-mode)
-      (insert ">-| user\nHello\n")
-      (ellm-save)
-      (let ((saved (ellm-attachment--read buffer-file-name)))
-        (goto-char (point-max))
-        (insert "![Missing](attachment:" (make-string 64 ?b) ".png)\n")
-        (should-error (save-buffer) :type 'user-error)
-        (should (equal saved (ellm-attachment--read buffer-file-name)))))))
+   (with-temp-buffer
+     (ellm-mode)
+     (insert ">-| user\nHello\n")
+     (ellm-save)
+     (let ((saved (ellm-attachment--read buffer-file-name)))
+       (goto-char (point-max))
+       (insert "![Missing](attachment:" (make-string 64 ?b) ".png)\n")
+       (should-error (save-buffer) :type 'user-error)
+       (should (equal saved (ellm-attachment--read buffer-file-name)))))))
 
 (ert-deftest ellm-attachment-test-automatic-localization ()
   (ellm-attachment-test--store
-    (with-temp-buffer
-      (ellm-mode)
-      (insert ">-| user\n")
-      (let* ((attachment (ellm-attachment-insert "%PDF-1.7\nfixture" nil "doc.pdf"))
-             (id (ellm-attachment-id attachment))
-             (ellm-persistence-enabled t))
-        ;; with-temp-buffer is intentionally ephemeral; opt in for this test.
-        (setq ellm--persistence-ephemeral-p nil)
-        (should (ellm--persistence-flush))
-        (should (file-exists-p (ellm-attachment--path id)))
-        (should (file-exists-p buffer-file-name))))))
+   (with-temp-buffer
+     (ellm-mode)
+     (insert ">-| user\n")
+     (let* ((attachment (ellm-attachment-insert "%PDF-1.7\nfixture" nil "doc.pdf"))
+            (id (ellm-attachment-id attachment))
+            (ellm-persistence-enabled t))
+       ;; with-temp-buffer is intentionally ephemeral; opt in for this test.
+       (setq ellm--persistence-ephemeral-p nil)
+       (should (ellm--persistence-flush))
+       (should (file-exists-p (ellm-attachment--path id)))
+       (should (file-exists-p buffer-file-name))))))
 
 (ert-deftest ellm-attachment-test-parent-and-subagent-save ()
   (ellm-attachment-test--store
@@ -13168,70 +13168,70 @@ The parent provider remains buffer-local fallback only when the profile omits on
   "Resolution, media construction, and repeated references share validated bytes."
   (dolist (backend '(llm acp))
     (ellm-attachment-test--store
-      (with-temp-buffer
-        (let* ((data ellm-attachment-test--png)
-               (attachment (ellm-attachment-import data "image/png" "image.png"))
-               (id (ellm-attachment-id attachment))
-               (first (format "![First](attachment:%s)" id))
-               (second (format "![Second](attachment:%s)" id))
-               (connection (ellm-acp-connection :name "attachment-data-test"
-                                                 :buffer (current-buffer)))
-               (read-file (symbol-function 'ellm-attachment--read))
-               (hash (symbol-function 'secure-hash))
-               (reads 0) (hashes 0))
-          (setf (ellm-acp--connection-agent-capabilities connection)
-                '(:promptCapabilities (:image t)))
-          (cl-labels
-              ((build ()
-                 (if (eq backend 'acp)
-                     (ellm-acp--prompt-blocks connection (concat first "\n" second))
-                   (let ((prompt (make-llm-chat-prompt)))
-                     (ellm-llm--apply-turns-to-prompt
-                      nil (list (ellm-turn-create :role "user" :content first)
-                                (ellm-turn-create :role "user" :content second)) prompt)
-                     (let* ((interactions (llm-chat-prompt-interactions prompt))
-                            (a (car (llm-multipart-parts
-                                     (llm-chat-prompt-interaction-content (car interactions)))))
-                            (b (car (llm-multipart-parts
-                                     (llm-chat-prompt-interaction-content (cadr interactions))))))
-                       (should (eq (llm-media-data a) (llm-media-data b)))
-                       (should (equal data (llm-media-data a))))))))
-            (cl-letf (((symbol-function 'ellm-attachment--read)
-                       (lambda (file) (cl-incf reads) (funcall read-file file)))
-                      ((symbol-function 'secure-hash)
-                       (lambda (&rest args) (cl-incf hashes) (apply hash args)))
-                      ((symbol-function 'llm-capabilities) (lambda (_) '(image-input))))
-              (build)
-              (should (= reads 1))
-              (should (= hashes 1))
-              (should-not ellm-attachment--request-data)
-              (build)
-              (should (= reads 2))
-              (should (= hashes 2))
-              ;; A later request must not mask corruption or missing files.
-              (with-temp-file (ellm-attachment-file attachment) (insert "changed"))
-              (should-error (build) :type 'user-error)
-              (should (= reads 3))
-              (should (= hashes 3))
-              (should-not ellm-attachment--request-data)
-              (delete-file (ellm-attachment-file attachment))
-              (should-error (build) :type 'user-error))))))))
+     (with-temp-buffer
+       (let* ((data ellm-attachment-test--png)
+              (attachment (ellm-attachment-import data "image/png" "image.png"))
+              (id (ellm-attachment-id attachment))
+              (first (format "![First](attachment:%s)" id))
+              (second (format "![Second](attachment:%s)" id))
+              (connection (ellm-acp-connection :name "attachment-data-test"
+                                               :buffer (current-buffer)))
+              (read-file (symbol-function 'ellm-attachment--read))
+              (hash (symbol-function 'secure-hash))
+              (reads 0) (hashes 0))
+         (setf (ellm-acp--connection-agent-capabilities connection)
+               '(:promptCapabilities (:image t)))
+         (cl-labels
+             ((build ()
+                     (if (eq backend 'acp)
+                         (ellm-acp--prompt-blocks connection (concat first "\n" second))
+                       (let ((prompt (make-llm-chat-prompt)))
+                         (ellm-llm--apply-turns-to-prompt
+                          nil (list (ellm-turn-create :role "user" :content first)
+                                    (ellm-turn-create :role "user" :content second)) prompt)
+                         (let* ((interactions (llm-chat-prompt-interactions prompt))
+                                (a (car (llm-multipart-parts
+                                         (llm-chat-prompt-interaction-content (car interactions)))))
+                                (b (car (llm-multipart-parts
+                                         (llm-chat-prompt-interaction-content (cadr interactions))))))
+                           (should (eq (llm-media-data a) (llm-media-data b)))
+                           (should (equal data (llm-media-data a))))))))
+           (cl-letf (((symbol-function 'ellm-attachment--read)
+                      (lambda (file) (cl-incf reads) (funcall read-file file)))
+                     ((symbol-function 'secure-hash)
+                      (lambda (&rest args) (cl-incf hashes) (apply hash args)))
+                     ((symbol-function 'llm-capabilities) (lambda (_) '(image-input))))
+             (build)
+             (should (= reads 1))
+             (should (= hashes 1))
+             (should-not ellm-attachment--request-data)
+             (build)
+             (should (= reads 2))
+             (should (= hashes 2))
+             ;; A later request must not mask corruption or missing files.
+             (with-temp-file (ellm-attachment-file attachment) (insert "changed"))
+             (should-error (build) :type 'user-error)
+             (should (= reads 3))
+             (should (= hashes 3))
+             (should-not ellm-attachment--request-data)
+             (delete-file (ellm-attachment-file attachment))
+             (should-error (build) :type 'user-error))))))))
 
 (ert-deftest ellm-attachment-request-data-preserves-labels-and-rejects-failed-validation ()
   (ellm-attachment-test--store
-    (let* ((attachment (ellm-attachment-import ellm-attachment-test--png "image/png" "image.png"))
-           (id (ellm-attachment-id attachment))
-           (ellm-attachment--request-data (make-hash-table :test #'equal)))
-      (should (equal "First" (ellm-attachment-name (ellm-attachment-resolve id "First"))))
-      (should (equal "Second" (ellm-attachment-name (ellm-attachment-resolve id "Second"))))
-      (should (= 1 (hash-table-count ellm-attachment--request-data)))
-      (should (eq (gethash id ellm-attachment--request-data)
-                  (ellm-attachment-data attachment)))
-      (clrhash ellm-attachment--request-data)
-      (with-temp-file (ellm-attachment-file attachment) (insert "changed"))
-      (should-error (ellm-attachment-resolve id) :type 'user-error)
-      (should (= 0 (hash-table-count ellm-attachment--request-data)))
-      (should-error (ellm-attachment-data attachment) :type 'user-error))))
+   (let* ((attachment (ellm-attachment-import ellm-attachment-test--png "image/png" "image.png"))
+          (id (ellm-attachment-id attachment))
+          (ellm-attachment--request-data (make-hash-table :test #'equal)))
+     (should (equal "First" (ellm-attachment-name (ellm-attachment-resolve id "First"))))
+     (should (equal "Second" (ellm-attachment-name (ellm-attachment-resolve id "Second"))))
+     (should (= 1 (hash-table-count ellm-attachment--request-data)))
+     (should (eq (gethash id ellm-attachment--request-data)
+                 (ellm-attachment-data attachment)))
+     (clrhash ellm-attachment--request-data)
+     (with-temp-file (ellm-attachment-file attachment) (insert "changed"))
+     (should-error (ellm-attachment-resolve id) :type 'user-error)
+     (should (= 0 (hash-table-count ellm-attachment--request-data)))
+     (should-error (ellm-attachment-data attachment) :type 'user-error))))
 
 ;;;; Request-owned asynchronous work
 
