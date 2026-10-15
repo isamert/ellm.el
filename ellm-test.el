@@ -6047,6 +6047,38 @@ Search results may change and this may fail."
                (plist-get (aref (plist-get (cadr input) :content) 0) :text)
                "Answer")))))
 
+(ert-deftest ellm-test-codex-sse-separates-reasoning-summaries ()
+  "Separate completed summaries without breaking chunks or duplicating newlines."
+  (let* ((provider (ellm-make-codex-provider))
+         accumulated
+         (media
+          (cdr
+           (llm-provider-streaming-media-handler
+            provider
+            (lambda (value)
+              (setq accumulated
+                    (llm-provider-utils-streaming-accumulate
+                     accumulated value)))
+            #'ignore)))
+         (events (oref media events)))
+    (dolist (summary '(("**Clarifying " "load and compile impact**")
+                       ("**another reasoning**")
+                       ("Already terminated\n")
+                       ("")))
+      (dolist (chunk summary)
+        (funcall
+         (cdr (assq 'response.reasoning_summary_text.delta events))
+         (plz-event-source-event
+          :data (json-serialize (list :delta chunk)))))
+      (funcall
+       (cdr (assq 'response.reasoning_summary_text.done events))
+       (plz-event-source-event
+        :data (json-serialize (list :text (apply #'concat summary))))))
+    (should (equal (plist-get accumulated :reasoning)
+                   (concat "**Clarifying load and compile impact**\n"
+                           "**another reasoning**\n"
+                           "Already terminated\n")))))
+
 (ert-deftest ellm-test-codex-sse-preserves-reasoning-and-call-id ()
   "Codex SSE output items should preserve opaque state and function call ids."
   (let* ((provider (ellm-make-codex-provider))

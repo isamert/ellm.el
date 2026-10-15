@@ -1046,6 +1046,13 @@ The handler passes partial results to RECEIVER and errors to ERR-RECEIVER."
                                           :delta))
                         ((not (string-empty-p delta))))
               (funcall receiver (list :reasoning delta)))))
+      (response.reasoning_summary_text.done
+       . ,(lambda (event)
+            (when-let* ((text (plist-get (ellm-codex--event-json event)
+                                         :text))
+                        ((not (string-empty-p text)))
+                        ((not (string-suffix-p "\n" text))))
+              (funcall receiver (list :reasoning "\n")))))
       (response.output_item.done
        . ,(lambda (event)
             (when-let* ((item (plist-get (ellm-codex--event-json event)
