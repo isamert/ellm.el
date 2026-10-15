@@ -909,6 +909,15 @@ pretty mode."
 
 ;;;; General utilities
 
+(defun ellm--uuid ()
+  "Return a randomly generated UUID."
+  (let ((hex (secure-hash 'sha256
+                          (format "%S" (list (current-time) (emacs-pid)
+                                             (random))))))
+    (format "%s-%s-4%s-8%s-%s"
+            (substring hex 0 8) (substring hex 8 12) (substring hex 13 16)
+            (substring hex 17 20) (substring hex 20 32))))
+
 (defun ellm--alist-set-nested (alist keys value)
   "Return ALIST with VALUE set at nested KEYS path, creating levels as needed.
 KEYS may be a single key or a list of keys."

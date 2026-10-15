@@ -5996,7 +5996,7 @@ Search results may change and this may fail."
     (cl-letf (((symbol-function 'completing-read)
                (lambda (_prompt candidates &rest _) (caar candidates)))
               ((symbol-function 'y-or-n-p) (lambda (_) t))
-              ((symbol-function 'ellm-codex--redeem-request-id)
+              ((symbol-function 'ellm--uuid)
                (lambda () "request-id"))
               ((symbol-function 'ellm-codex--request)
                (lambda (method url &rest args)

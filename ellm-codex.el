@@ -709,15 +709,6 @@ wraps it in a JSON object."
         (error "Codex reset-credit response did not contain a credit list"))
       (append credits nil))))
 
-(defun ellm-codex--redeem-request-id ()
-  "Return a UUID suitable for identifying a reset-credit redemption."
-  (let ((hex (secure-hash 'sha256
-                          (format "%S" (list (current-time) (emacs-pid)
-                                             (random))))))
-    (format "%s-%s-4%s-8%s-%s"
-            (substring hex 0 8) (substring hex 8 12) (substring hex 13 16)
-            (substring hex 17 20) (substring hex 20 32))))
-
 ;;;###autoload
 (defun ellm-codex-redeem-rate-limit-reset (&optional provider)
   "Redeem an available ChatGPT Codex rate-limit reset credit.
@@ -753,7 +744,7 @@ parsed redemption response."
                     :body (json-serialize
                            (list :credit_id credit-id
                                  :redeem_request_id
-                                 (ellm-codex--redeem-request-id))))))
+                                 (ellm--uuid))))))
         (unless (<= 200 status 299)
           (error "Codex reset-credit redemption failed (HTTP %s)" status))
         (when (called-interactively-p 'interactive)
