@@ -66,7 +66,6 @@
 - `ellm-new-buffer-with-configuration` accepts `:prompt` to fill in
   the first user turn. It does not send the prompt automatically.
 
-
 # v0.1.0
 
 - Added `ellm-attach-file` and `ellm-paste`. You can attach files,

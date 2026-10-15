@@ -45,7 +45,9 @@ cleanly.
   - [In buffer controls](#in-buffer-controls)
   - [Images and files](#images-and-files)
   - [Persistence](#persistence)
+    - [Automatic persistence](#automatic-persistence)
     - [Opening conversations](#opening-conversations)
+    - [Importing conversations](#importing-conversations)
   - [MCPs](#mcps)
 - [Configuration](#configuration)
   - [`ellm-new-buffer-default-configuration-function`](#ellm-new-buffer-default-configuration-function)
@@ -58,6 +60,14 @@ cleanly.
     - [Rate limits](#rate-limits)
   - [ACP](#acp)
   - [Kagi Assistant](#kagi-assistant)
+- [Extras](#extras)
+  - [Programmatic usage](#programmatic-usage)
+    - [Creating new buffers with given configuration using the API](#creating-new-buffers-with-given-configuration-using-the-api)
+  - [Org mode integration](#org-mode-integration)
+    - [Org mode links and backlinks for ellm buffers](#org-mode-links-and-backlinks-for-ellm-buffers)
+    - [Setting ellm workspaces for Org headers/files](#setting-ellm-workspaces-for-org-headersfiles)
+  - [Dired integration](#dired-integration)
+  - [Troubleshooting](#troubleshooting)
 - [Rationale](#rationale)
 - [Prior art](#prior-art)
 
@@ -405,8 +415,9 @@ tool-permissions:
 ```
 
 For an explicitly unrestricted conversation, use `yolo: true`.  It
-approves every enabled local tool call, overriding all `tool-permissions`
-rules.  Tools are not sandboxed, so use this only in a trusted workspace:
+approves every enabled local tool call, overriding all
+`tool-permissions` rules. Tools are not sandboxed, so use this only
+in a trusted workspace:
 
 ```markdown
 ---
@@ -707,32 +718,60 @@ etc., the better way is using `ellm-save` so that subagents, retained
 tool outputs, reasoning state, and attachments are also saved
 alongside them.
 
-### Opening conversations
+### Automatic persistence
 
-`M-x ellm-open-session` lists locally persisted `main.ellm` main
-conversations below the current persistence root and visits the selected
-transcript.  It is for sessions created with `ellm-save` or automatic
-persistence; open arbitrary `.ellm` files with Emacs's usual file commands.
+There is also optional automatic persistence. Set
+`ellm-persistence-enabled` to non-nil and new main conversations are
+saved with `ellm-save` in certain checkpoints (it also does some sort
+of debouncing, batching, idle timers etc. to keep things smooth). This
+is highly recommended.
 
-`M-x ellm-import-session` asks the selected provider to list its remote
-sessions, then imports the selected session into a new ellm buffer.  Its
-availability and scope are provider-dependent: ACP normally lists sessions
-for the current working directory, while Kagi lists account conversations.
+```elisp
+(setq ellm-persistence-enabled t)
+```
+
+When automatic persistence is enabled you can use
+`ellm-new-temp-buffer` to create temporary conversations.
 
 `ellm-persistence-location` controls where sessions go.  The default
 `global` location is `ellm-persistence-directory` (`~/ellm/`).  Set it
 to `project` to store sessions below
 `ellm-persistence-project-directory` (`.ellm`) in each project.
 
-<img width="761" height="113" alt="image" src="https://github.com/user-attachments/assets/8df682dd-046a-4051-93ee-82f3350978f1" />
+```elisp
+;; Global persistence where everything is saved under ellm-persistence-directory.
+;; This is the default, if ellm-persistence-enabled is true.
+(setq ellm-persistence-location 'global)
+(setq ellm-persistence-directory "~/ellm/")
 
- You can also do `C-u M-x ellm-save` to select where to save the
+;; Or you can make ellm to save conversations per project.
+;; This makes conversations persisted under current project's ".ellm" folder.
+(setq ellm-persistence-location 'project)
+(setq ellm-persistence-project-directory ".ellm")
+```
+
+You can also do `C-u M-x ellm-save` to select where to save the
 conversation manually.
 
-There is also optional automatic persistence.  Set
-`ellm-persistence-enabled` to non-nil and new main conversations are
-saved with `ellm-save` in certain checkpoints (it also does some sort
-of debouncing, batching, idle timers etc. to keep things smooth).
+### Opening conversations
+
+`M-x ellm-sessions` or `M-x ellm-open-session` lists locally persisted
+conversations.  First one is similar to `ellm-list` and the second one
+is just a completing-read interface for already persisted
+conversations.
+
+<img width="761" height="113" alt="image" src="https://github.com/user-attachments/assets/8df682dd-046a-4051-93ee-82f3350978f1" />
+
+<!-- TODO: Add ellm-sessions screenshot -->
+
+### Importing conversations
+
+Importing means turning non-ellm conversations to ellm conversations,
+from another provider. `M-x ellm-import-session` asks the selected
+provider to list its remote sessions, then imports the selected
+session into a new ellm buffer.  Its availability and scope are
+provider-dependent: ACP normally lists sessions for the current
+working directory, while Kagi lists account conversations.
 
 ## MCPs
 
@@ -885,21 +924,6 @@ project, you can check how much credit you have in your subscription
 and depending on that, you can select a different provider etc. Or you
 can do a small synchronous LLM call to determine all of these
 automatically. The sky is the limit here.
-
-## Creating new buffers with given configuration using the API
-
-Similarly to `ellm-new-buffer-default-configuration-function`, you can
-use the `ellm-new-buffer-with-configuration` directly to create one
-buffer with explicit settings without changing the defaults.
-
-```elisp
-(ellm-new-buffer-with-configuration
- :provider 'codex :model "o4-mini" :profile "agent" :cwd "/tmp"
- :ephemeral t)
-```
-
-This selects and returns the new buffer. The arguments uses the same
-keys as the default configuration function described above.
 
 ## Visuals and the header line
 
@@ -1213,6 +1237,114 @@ frontmatter, so later prompts continue the same remote branch.  Leave
 those values in place when saving or reopening a transcript.  Use `M-x
 ellm-import-session` to choose an existing Kagi Assistant conversation
 and import its active branch into a new ellm buffer.
+
+# Extras
+## Programmatic usage
+### Creating new buffers with given configuration using the API
+
+Similarly to `ellm-new-buffer-default-configuration-function`, you can
+use the `ellm-new-buffer-with-configuration` directly to create one
+buffer with explicit settings without changing the defaults.
+
+```elisp
+(ellm-new-buffer-with-configuration
+ :provider 'codex :model "o4-mini" :profile "agent" :cwd "/tmp"
+ :ephemeral t)
+```
+
+This selects and returns the new buffer. The arguments uses the same
+keys as the default configuration function described
+[here](#ellm-new-buffer-default-configuration-function).
+
+## Org mode integration
+
+ellm offers several integrations to manage your projects with the help
+of Org mode:
+
+### Org mode links and backlinks for ellm buffers
+
+- You can use `org-store-link` in any ellm buffer, or in
+  `ellm-sessions`/`ellm-list` buffers. It copies a persistent link for
+  the current conversation at point. Examples:
+  ```org
+  - A link to a conversation: [[ellm:20260911T142530-a1b2c3][ellm: Conversation title]]
+  - A link to a subagent: [[ellm:20260911T142530-a1b2c3/subagent/subagent_1][ellm: Research]]
+  - A link to a specific turn in a conversation: [[ellm:20260911T142530-a1b2c3#turn=fe109126-969c-43a5-96f1-af0e76d5c09f][ellm: How to implement this feature]]
+  ```
+- You can use `ellm-org-find-references` to list all Org headings in
+  your `org-agenda-files` that references current conversation at
+  point, using the links. This also works within
+  `ellm-sessions`/`ellm-list` buffers.
+
+Of course, persistence should be enabled so that links do work:
+
+```elisp
+(setq ellm-persistence-enabled t)
+```
+
+See [Persistence](#persistence) section for more details on this.
+
+### Setting ellm workspaces for Org headers/files
+
+Set an `ELLM_WORKSPACE` property on an Org heading/file so that ellm
+understands which project this header belongs to. This way, common
+ellm commands work like you are already in that project.
+
+```org
+* My awesome project
+:PROPERTIES:
+:ELLM_WORKSPACE: ~/Projects/my-awesome-project
+:END:
+
+** TODO A very important feature
+```
+
+Now, even if your project file is in a different folder, when you do
+`ellm-new-buffer` (or anything similar, any project related commands)
+on any of these headers, it'll work like it's called in the project
+directory.
+
+Similarly, you can link conversations with `ELLM` property and it'll
+also work the same way:
+
+```org
+* My awesome project
+
+** TODO A very important feature
+:PROPERTIES:
+:ELLM: [[ellm:20260911T142530-a1b2c3][ellm: Implementation of a very important feature]]
+:END:
+```
+
+For `ellm-org-find-references` works regardless of link being in
+`ELLM` property. This is just a convention I use but in the future
+there will be related workflows here.
+
+---
+
+You can customize `ellm-org-workspace-property` and
+`ellm-org-session-property` to use different property names or disable
+either lookup.
+
+## Dired integration
+By doing:
+
+```elisp
+    (add-hook 'dired-after-readin-hook #'ellm-dired-display-titles)
+```
+
+You can activate the Dired integration which simply makes it so that
+Dired shows session names instead of generated session id folder names
+in ellm folders only (in `ellm-persistence-location` and
+`ellm-persistence-project-directory`, see [Persistence](#persistence)
+for more details).
+
+## Troubleshooting
+
+Use `ellm-show-log` enables logging for the current buffer and
+switched to the log buffer. You can see what the API receives from
+here and you can create an issue with this output (outputs may contain
+API keys etc, clean them before sharing).
 
 # Rationale
 
