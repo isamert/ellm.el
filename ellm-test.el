@@ -12462,6 +12462,128 @@ The parent provider remains buffer-local fallback only when the profile omits on
         (kill-buffer buffer))
       (delete-directory root t))))
 
+(defmacro ellm-test--with-org-workspace (&rest body)
+  "Evaluate BODY in an Org heading with a disposable project WORKSPACE."
+  (declare (indent 0) (debug t))
+  `(let* ((root (make-temp-file "ellm-org-context-" t))
+          (workspace (expand-file-name "project/subdir/" root))
+          (ellm-persistence-directory (expand-file-name "sessions/" root))
+          (ellm-persistence-enabled nil)
+          (ellm-current-project-function #'ellm-current-project-root)
+          (ellm-org-workspace-property "ELLM_WORKSPACE")
+          (ellm-org-session-property "ELLM"))
+     (unwind-protect
+         (progn
+           (require 'org)
+           (make-directory workspace t)
+           (make-directory (expand-file-name "project/.git/" root) t)
+           (with-temp-buffer
+             (org-mode)
+             (setq buffer-file-name (expand-file-name "tasks.org" root))
+             (insert "* Project\n:PROPERTIES:\n:ELLM_WORKSPACE: project/subdir/\n:END:\n** Task\n")
+             ,@body))
+       (delete-directory root t))))
+
+(ert-deftest ellm-test-org-context-inherits-workspace-for-project-resolution ()
+  (ellm-test--with-org-workspace
+    (let ((directory default-directory))
+      (should (equal (ellm--base-directory) workspace))
+      (should (equal (ellm--working-directory) workspace))
+      (should (equal (ellm--current-project-root-or-directory)
+                     (expand-file-name "project/" root)))
+      (should (equal (ellm--project-root-in-buffer (current-buffer))
+                     (expand-file-name "project/" root)))
+      (should (equal (car (ellm--persistence-search-roots))
+                     (expand-file-name "project/.ellm/" root)))
+      (should (equal default-directory directory)))))
+
+(ert-deftest ellm-test-org-context-workspace-precedes-local-session ()
+  (ellm-test--with-org-workspace
+    (org-entry-put nil "ELLM" "ellm:unavailable-session")
+    (should (equal (ellm--org-context-directory) workspace))
+    (let ((ellm-org-workspace-property nil))
+      (should-error (ellm--org-context-directory) :type 'user-error))))
+
+(ert-deftest ellm-test-org-context-custom-property-names-and-disabled-lookup ()
+  (ellm-test--with-org-workspace
+    (let ((ellm-org-workspace-property "PROJECT_DIR")
+          (ellm-org-session-property nil))
+      (should-not (ellm--org-context-directory))
+      (org-entry-put nil "PROJECT_DIR" workspace)
+      (should (equal (ellm--org-context-directory) workspace))
+      (org-entry-put nil "PROJECT_DIR" "missing-directory")
+      (should-error (ellm--org-context-directory) :type 'user-error)
+      (let ((ellm-org-workspace-property nil))
+        (should-not (ellm--org-context-directory))))))
+
+(ert-deftest ellm-test-org-context-new-conversations-and-explicit-cwd ()
+  (ellm-test--with-org-workspace
+    (let ((ellm-provider-alist nil)
+          (ellm-new-buffer-default-configuration-function (lambda () nil)))
+      (dolist (case (list (cons #'ellm-new-buffer workspace)
+                          (cons #'ellm-new-temp-buffer workspace)
+                          (cons (lambda ()
+                                  (ellm-new-buffer-with-configuration :cwd root))
+                                root)))
+        (let ((source (current-buffer)) buffer)
+          (unwind-protect
+              (save-window-excursion
+                (setq buffer (funcall (car case)))
+                (with-current-buffer buffer
+                  (should (equal (ellm--frontmatter-value 'cwd) (cdr case)))
+                  (should (equal (ellm--working-directory (ellm--parse-frontmatter))
+                                 (file-name-as-directory (cdr case))))))
+            (set-buffer source)
+            (when (buffer-live-p buffer)
+              (with-current-buffer buffer (set-buffer-modified-p nil))
+              (kill-buffer buffer))))))))
+
+(ert-deftest ellm-test-org-context-linked-live-session-uses-cwd ()
+  (ellm-test--with-org-workspace
+    (let ((ellm-org-workspace-property nil)
+          (ellm-org-session-property "CONVERSATION")
+          (conversation (generate-new-buffer " *ellm org context session*")))
+      (unwind-protect
+          (progn
+            (with-current-buffer conversation
+              (insert (format "---\ncwd: %s\nellm:\n  session-id: context-session\n---\n\n>-| user\n" workspace))
+              (ellm-mode)
+              (narrow-to-region (point-max) (point-max)))
+            (org-entry-put nil "CONVERSATION" "[[ellm:context-session#turn=abc][Investigation]]")
+            (should (equal (ellm--org-context-directory) workspace))
+            (with-current-buffer conversation (should (buffer-narrowed-p))))
+        (when (buffer-live-p conversation) (kill-buffer conversation))))))
+
+(ert-deftest ellm-test-org-context-explicit-link-ignores-workspace-property ()
+  (ellm-test--with-org-workspace
+    (let ((file (expand-file-name "context-session/main.ellm" ellm-persistence-directory))
+          buffer)
+      (unwind-protect
+          (save-window-excursion
+            (make-directory (file-name-directory file) t)
+            (with-temp-file file
+              (insert (format "---\ncwd: %s\nellm:\n  session-id: context-session\n---\n\n>-| user\n" workspace)))
+            (org-entry-put nil "ELLM_WORKSPACE" "missing-directory")
+            (ellm-org-open-link "context-session" nil)
+            (setq buffer (current-buffer))
+            (should (equal buffer-file-name file)))
+        (when (buffer-live-p buffer)
+          (with-current-buffer buffer (set-buffer-modified-p nil))
+          (kill-buffer buffer))))))
+
+(ert-deftest ellm-test-org-context-linked-saved-session-does-not-visit-file ()
+  (ellm-test--with-org-workspace
+    (let* ((ellm-org-workspace-property nil)
+           (file (expand-file-name "context-session/main.ellm" ellm-persistence-directory)))
+      (make-directory (file-name-directory file) t)
+      (with-temp-file file
+        (insert (format "---\ncwd: %s\nellm:\n  session-id: context-session\n---\n\n>-| user\n" workspace)))
+      (org-entry-put nil "ELLM" "ellm:context-session")
+      (should (equal (ellm--org-context-directory) workspace))
+      (should-not (find-buffer-visiting file))
+      (org-entry-put nil "ELLM" "not a session link")
+      (should-error (ellm--org-context-directory) :type 'user-error))))
+
 (ert-deftest ellm-test-org-reference-label-styles-breadcrumbs ()
   (with-temp-buffer
     (insert "* Project\n** Task\n")

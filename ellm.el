@@ -329,6 +329,24 @@ closest parent containing a `.git' directory."
   :type 'function
   :group 'ellm)
 
+(defcustom ellm-org-workspace-property "ELLM_WORKSPACE"
+  "Org property supplying a directory for context-sensitive ellm commands.
+The property is inherited.  Relative paths are resolved against the Org
+file's directory.  This takes precedence over `ellm-org-session-property',
+even when the workspace is inherited and the session property is local.
+Set to nil to disable workspace-property lookup."
+  :type '(choice (const :tag "Disabled" nil) string)
+  :group 'ellm)
+
+(defcustom ellm-org-session-property "ELLM"
+  "Org property containing an ellm link whose workspace supplies context.
+The property is inherited and accepts plain or bracketed ellm links.
+Use the linked conversation's working directory, not its storage directory.
+`ellm-org-workspace-property' takes precedence.  No other session settings
+are inherited.  Set to nil to disable session-property lookup."
+  :type '(choice (const :tag "Disabled" nil) string)
+  :group 'ellm)
+
 (defcustom ellm-session-title-changed-hook nil
   "Normal hook run after a session title renames its conversation buffer.
 Functions run without arguments in the renamed conversation buffer."
@@ -3269,7 +3287,8 @@ KEY may be a symbol/string or a list naming a nested path."
 (defun ellm--base-directory ()
   "Return the buffer's base directory before request-time cwd changes."
   (file-name-as-directory
-   (expand-file-name (or ellm--base-default-directory default-directory))))
+   (expand-file-name (or (ellm--org-context-directory)
+                         ellm--base-default-directory default-directory))))
 
 (defun ellm--validate-directory (directory label)
   "Return DIRECTORY as an absolute directory, or signal using LABEL."
@@ -3295,8 +3314,8 @@ KEY may be a symbol/string or a list naming a nested path."
 (defun ellm--working-directory (&optional frontmatter override)
   "Return the effective working directory for FRONTMATTER.
 OVERRIDE, when non-nil, takes precedence.  Otherwise use frontmatter `cwd',
-the working directory already applied for the request, the current project
-root, then the buffer base directory."
+the working directory already applied for the request, inherited Org context,
+the current project root, then the buffer base directory."
   (cond
    ((and override (stringp override) (not (string-empty-p override)))
     (ellm--validate-directory
@@ -3309,6 +3328,7 @@ root, then the buffer base directory."
                               "working directory"))
    (ellm--frontmatter-cwd-directory
     (ellm--validate-directory ellm--frontmatter-cwd-directory "cwd"))
+   ((ellm--org-context-directory))
    ((ellm--project-directory))
    (t
     (ellm--validate-directory (ellm--base-directory) "default-directory"))))
@@ -4011,7 +4031,7 @@ The current session store is preferred over the global cache."
 (defun ellm--persistence-project-root ()
   "Return the project-local persistence root for the current buffer."
   (when-let* ((default-directory
-               (or ellm--base-default-directory default-directory))
+               (ellm--base-directory))
               (project-root (funcall ellm-current-project-function)))
     (file-name-as-directory
      (expand-file-name ellm-persistence-project-directory project-root))))
@@ -4488,6 +4508,56 @@ PROJECT-CACHE, when supplied, shares workspace project names across roots."
 
 (declare-function org-link-set-parameters "ol")
 (declare-function org-link-store-props "ol")
+(declare-function org-entry-get "org")
+
+(defvar ellm--org-resolving-context nil
+  "Non-nil while resolving an Org workspace, preventing recursive lookup.")
+
+(defun ellm--org-context-directory ()
+  "Return the inherited Org workspace at point, or nil outside that context.
+An explicit workspace property wins over a linked session's working directory.
+Do not change the source Org buffer or open conversation buffers."
+  (when (and (derived-mode-p 'org-mode) (not ellm--org-resolving-context))
+    (let* ((ellm--org-resolving-context t)
+           (workspace (and ellm-org-workspace-property
+                           (org-entry-get nil ellm-org-workspace-property t)))
+           (session (and (not workspace) ellm-org-session-property
+                         (org-entry-get nil ellm-org-session-property t)))
+           (default-directory (if buffer-file-name
+                                  (file-name-directory buffer-file-name)
+                                default-directory)))
+      (cond
+       (workspace
+        (ellm--validate-directory workspace ellm-org-workspace-property))
+       (session
+        (let* ((target (with-temp-buffer
+                         (insert session)
+                         (delay-mode-hooks (org-mode))
+                         (goto-char (point-min))
+                         (let ((link (org-element-context)))
+                           (unless (and (eq (org-element-type link) 'link)
+                                        (equal (org-element-property :type link) "ellm"))
+                             (user-error "ellm: %s must contain an ellm link"
+                                         ellm-org-session-property))
+                           (org-element-property :path link))))
+               (ids (ellm--org-link-parse-target target))
+               (buffer (ellm--org-link-live-buffer (car ids) (cadr ids))))
+          (if buffer
+              (with-current-buffer buffer
+                (save-restriction
+                  (widen)
+                  (ellm--working-directory
+                   (ellm--effective-frontmatter (ellm--parse-frontmatter)))))
+            (let* ((saved (ellm--persisted-session-by-id (car ids)))
+                   (file (and saved (ellm--org-link-file saved (cadr ids)))))
+              (unless file
+                (user-error "ellm: Cannot resolve session in %s: %s"
+                            ellm-org-session-property session))
+              (with-temp-buffer
+                (insert-file-contents file)
+                (let ((default-directory (file-name-directory file)))
+                  (ellm--working-directory
+                   (ellm--effective-frontmatter (ellm--parse-frontmatter)))))))))))))
 
 (defun ellm--org-link-session-id ()
   "Return the session id to use for an Org link from this buffer.
@@ -4657,7 +4727,8 @@ fallback for a session directory that was renamed after saving."
   "Open the ellm Org link TARGET.
 An optional #turn=ID fragment reveals the first turn with a matching :id.
 If that turn is missing, open the conversation and display a warning."
-  (pcase-let ((`(,session-id ,subagent-id ,turn-id)
+  (pcase-let ((ellm--org-resolving-context t)
+              (`(,session-id ,subagent-id ,turn-id)
                (ellm--org-link-parse-target target)))
     (if-let* ((buffer (ellm--org-link-live-buffer session-id subagent-id)))
         (switch-to-buffer buffer)
@@ -5149,7 +5220,13 @@ keywords follow them, except the reserved `:provider', `:model', `:created',
 When EPHEMERAL or CONFIGURATION's `:ephemeral' is non-nil, do not
 automatically persist it.  When SELECT-PROVIDER-MODEL is non-nil, prompt
 for the provider and model."
-  (let* ((buf (generate-new-buffer (if (functionp ellm-initial-buffer-name)
+  (let* ((workspace (unless (plist-get configuration :cwd)
+                      (ellm--org-context-directory)))
+         (default-directory (or workspace default-directory))
+         (configuration (if workspace
+                            (plist-put (copy-sequence configuration) :cwd workspace)
+                          configuration))
+         (buf (generate-new-buffer (if (functionp ellm-initial-buffer-name)
                                        (funcall ellm-initial-buffer-name)
                                      ellm-initial-buffer-name)))
          (default-provider
@@ -8141,15 +8218,16 @@ according to `ellm-fold-tool-calls' / `ellm-fold-reasoning-blocks'."
   "Return the project root associated with ellm BUFFER, or nil."
   (with-current-buffer buffer
     (let ((default-directory
-            (or ellm--base-default-directory default-directory)))
+            (ellm--base-directory)))
       (when-let* ((root (funcall ellm-current-project-function)))
         (file-name-as-directory (expand-file-name root))))))
 
 (defun ellm--current-project-root-or-directory ()
   "Return the current project root, or `default-directory' outside a project."
-  (file-name-as-directory
-   (expand-file-name
-    (or (funcall ellm-current-project-function) default-directory))))
+  (let ((default-directory (ellm--base-directory)))
+    (file-name-as-directory
+     (expand-file-name
+      (or (funcall ellm-current-project-function) default-directory)))))
 
 (defun ellm--buffer-root-or-directory (buffer)
   "Return BUFFER's project root, or base directory outside a project."
