@@ -10706,6 +10706,41 @@ When NOERROR is non-nil, return nil on a group heading or unrelated line."
   (funcall refresh)
   (ellm-list--goto-group group))
 
+(defvar-local ellm-list--marks nil
+  "Marked conversation buffers or saved session files in this browser.")
+
+(defun ellm-list--mark-prefix (item)
+  "Return the display prefix for ITEM's mark."
+  (if (member item ellm-list--marks) "*" " "))
+
+(defun ellm-list--mark-item (mark)
+  "Set or clear MARK on the row at point, then move to the next row."
+  (let* ((saved (derived-mode-p 'ellm-sessions-mode))
+         (property (if saved 'ellm-sessions-file 'ellm-list-buffer))
+         (item (get-text-property (point) property)))
+    (unless item
+      (user-error "ellm: No conversation at point"))
+    (if mark
+        (cl-pushnew item ellm-list--marks :test #'equal)
+      (setq ellm-list--marks (delete item ellm-list--marks)))
+    (let ((inhibit-read-only t))
+      (save-excursion
+        (beginning-of-line)
+        (let ((properties (text-properties-at (point))))
+          (delete-char 1)
+          (insert (apply #'propertize (ellm-list--mark-prefix item) properties)))))
+    (forward-line 1)))
+
+(defun ellm-list-mark ()
+  "Mark the conversation at point for bulk actions."
+  (interactive)
+  (ellm-list--mark-item t))
+
+(defun ellm-list-unmark ()
+  "Unmark the conversation at point."
+  (interactive)
+  (ellm-list--mark-item nil))
+
 (defun ellm-list--insert-record (record indent)
   "Insert RECORD and its expanded subagents at INDENT."
   (let* ((buffer (plist-get record :buffer))
@@ -10713,7 +10748,8 @@ When NOERROR is non-nil, return nil on a group heading or unrelated line."
          (folded (member buffer ellm-list--folded-subagents))
          (start (point))
          (prefix (if children (if folded "▸ " "▾ ") "  ")))
-    (insert (make-string indent ? ) prefix (ellm-list--format-row record) "\n")
+    (insert (ellm-list--mark-prefix buffer) (make-string (max 0 (1- indent)) ? )
+            prefix (ellm-list--format-row record) "\n")
     (add-text-properties
      start (point)
      `(ellm-list-buffer ,buffer
@@ -10802,7 +10838,8 @@ Return non-nil when BUFFER has a row in the current list."
              (inhibit-read-only t))
         (goto-char start)
         (delete-region start end)
-        (insert (make-string indent ? ) prefix (ellm-list--format-row record) "\n")
+        (insert (ellm-list--mark-prefix buffer) (make-string (max 0 (1- indent)) ? )
+                prefix (ellm-list--format-row record) "\n")
         (add-text-properties
          start (point)
          `(ellm-list-buffer ,buffer
@@ -10923,13 +10960,19 @@ Return non-nil when BUFFER has a row in the current list."
     (dired directory)))
 
 (defun ellm-list-cancel ()
-  "Cancel the active request for the conversation at point, retaining point."
+  "Cancel requests for marked conversations, or the conversation at point."
   (interactive nil ellm-list-mode)
-  (let ((buffer (ellm-list--buffer-at-point)))
-    (when (y-or-n-p (format "Cancel request for %s? " (buffer-name buffer)))
-      (with-current-buffer buffer
-        (ellm-cancel))
-      (ellm-list-refresh-buffer buffer))))
+  (let* ((marked ellm-list--marks)
+         (buffers (if marked (cl-remove-if-not #'buffer-live-p marked)
+                    (list (ellm-list--buffer-at-point)))))
+    (unless buffers (user-error "ellm: No live marked conversations"))
+    (when (y-or-n-p (if marked
+                        (format "Cancel requests for %d marked conversations? "
+                                (length buffers))
+                      (format "Cancel request for %s? " (buffer-name (car buffers)))))
+      (dolist (buffer buffers)
+        (with-current-buffer buffer (ellm-cancel))
+        (ellm-list-refresh-buffer buffer)))))
 
 (defun ellm-list-answer-prompt ()
   "Answer the pending prompt for the conversation at point.
@@ -10989,7 +11032,7 @@ surviving neighbour can be located before REFRESH rebuilds the list."
     (when item
       (ellm-list--goto-item property item (or test #'equal)))))
 
-(defun ellm-list-kill ()
+(defun ellm-list--kill-at-point ()
   "Kill the conversation at point and its subagents, retaining point."
   (interactive nil ellm-list-mode)
   (let* ((start (line-beginning-position))
@@ -11022,6 +11065,25 @@ surviving neighbour can be located before REFRESH rebuilds the list."
       (ellm-list--refresh-after-kill start end 'ellm-list-buffer
                                      #'ellm-list-refresh #'eq))))
 
+(defun ellm-list-kill ()
+  "Kill marked conversations and their subagents, or the one at point."
+  (interactive nil ellm-list-mode)
+  (if (null ellm-list--marks)
+      (ellm-list--kill-at-point)
+    (let* ((buffers (cl-remove-if-not #'buffer-live-p ellm-list--marks))
+           (victims (delete-dups
+                     (append buffers
+                             (apply #'append
+                                    (mapcar #'ellm-list--subagent-buffers buffers))))))
+      (unless buffers (user-error "ellm: No live marked conversations"))
+      (when (yes-or-no-p (format "Kill %d marked ellm conversation(s) and their subagents? "
+                                 (length buffers)))
+        (unwind-protect
+            (dolist (buffer victims)
+              (when (buffer-live-p buffer) (kill-buffer buffer)))
+          (setq ellm-list--marks (cl-remove-if-not #'buffer-live-p ellm-list--marks))
+          (ellm-list-refresh))))))
+
 (defconst ellm-list--keybindings
   '(("r" . ellm-list-refresh)
     ("TAB" . ellm-list-toggle-at-point)
@@ -11031,6 +11093,8 @@ surviving neighbour can be located before REFRESH rebuilds the list."
     ("c" . ellm-list-cancel)
     ("a" . ellm-list-answer-prompt)
     ("C" . ellm-list-new)
+    ("m" . ellm-list-mark)
+    ("u" . ellm-list-unmark)
     ("x" . ellm-list-kill)
     ("q" . quit-window))
   "Bindings shared by `ellm-list-mode' and its Evil normal state.")
@@ -11071,7 +11135,8 @@ conversation state only when such updates were skipped."
 \\[ellm-list-cycle-groups] cycles all groups, \\[ellm-list-visit] visits,
 \\[ellm-list-cancel] cancels, \\[ellm-list-answer-prompt] answers input,
 \\[ellm-list-new] creates a conversation for the group at point, and
-\\[ellm-list-kill] kills the selected conversation and its subagents."
+\\[ellm-list-kill] kills the selected conversation and its subagents.
+Use \\[ellm-list-mark] and \\[ellm-list-unmark] to select bulk targets."
   (setq-local truncate-lines t)
   (hl-line-mode 1)
   (add-to-invisibility-spec '(ellm-list-group . t))
@@ -11133,7 +11198,8 @@ conversation state only when such updates were skipped."
   (unless (ellm-list--insert-group group)
     (dolist (record (plist-get group :records))
       (let ((start (point)))
-        (insert "   " (ellm-list--format-row record ellm-sessions--columns) "\n")
+        (insert (ellm-list--mark-prefix (plist-get record :file)) "  "
+                (ellm-list--format-row record ellm-sessions--columns) "\n")
         (add-text-properties start (point)
                              `(ellm-sessions-file ,(plist-get record :file)
                                                   mouse-face highlight))))))
@@ -11206,7 +11272,16 @@ conversation state only when such updates were skipped."
       (user-error "ellm: No saved session at point"))
     (dired (file-name-directory file))))
 
-(defun ellm-sessions-kill ()
+(defun ellm-sessions--delete (directory session-id)
+  "Delete DIRECTORY and kill live buffers related to SESSION-ID."
+  (let ((seeds (ellm--session-buffers session-id directory)))
+    (ellm--kill-session-buffers
+     (if (stringp session-id)
+         (ellm--related-session-buffers session-id seeds)
+       seeds)))
+  (delete-directory directory t))
+
+(defun ellm-sessions--kill-at-point ()
   "Delete the saved conversation at point from disk.
 This removes the conversation directory, including its transcript, subagents,
 attachments, retained outputs, and local reasoning state.  It does not delete
@@ -11224,15 +11299,30 @@ its subagents, are killed."
         (user-error "ellm: Session files are already gone"))
       (unless (yes-or-no-p (format "Delete saved ellm conversation in %s? " directory))
         (user-error "ellm: Session deletion cancelled"))
-      (let ((seeds (ellm--session-buffers session-id directory)))
-        (ellm--kill-session-buffers
-         (if (stringp session-id)
-             (ellm--related-session-buffers session-id seeds)
-           seeds)))
-      (delete-directory directory t)
+      (ellm-sessions--delete directory session-id)
       (ellm-list--refresh-after-kill start end 'ellm-sessions-file
                                      #'ellm-sessions-refresh)
       (message "ellm: deleted saved conversation in %s" directory))))
+
+(defun ellm-sessions-kill ()
+  "Delete marked saved conversations, or the conversation at point.
+Delete their directories and kill related live buffers, but not backend
+sessions."
+  (interactive nil ellm-sessions-mode)
+  (if (null ellm-list--marks)
+      (ellm-sessions--kill-at-point)
+    (let ((files (copy-sequence ellm-list--marks)))
+      (when (yes-or-no-p (format "Delete %d marked saved ellm conversation(s) from disk? "
+                                 (length files)))
+        (unwind-protect
+            (dolist (file files)
+              (let* ((directory (file-name-directory file))
+                     (session-id (car (ellm--persisted-session-metadata file))))
+                (unless (file-directory-p directory)
+                  (user-error "ellm: Session files are already gone: %s" directory))
+                (ellm-sessions--delete directory session-id)
+                (setq ellm-list--marks (delete file ellm-list--marks))))
+          (ellm-sessions-refresh))))))
 
 (defconst ellm-sessions--keybindings
   '(("r" . ellm-sessions-refresh)
@@ -11240,6 +11330,8 @@ its subagents, are killed."
     ("<backtab>" . ellm-sessions-cycle-groups)
     ("RET" . ellm-sessions-visit)
     ("M-RET" . ellm-sessions-open-directory)
+    ("m" . ellm-list-mark)
+    ("u" . ellm-list-unmark)
     ("x" . ellm-sessions-kill)
     ("q" . quit-window))
   "Bindings for the persisted session browser.")
@@ -11260,7 +11352,8 @@ its subagents, are killed."
    ellm-sessions--keybindings))
 
 (define-derived-mode ellm-sessions-mode special-mode "eLLM Saved Sessions"
-  "Mode for browsing persisted ellm conversations."
+  "Mode for browsing persisted ellm conversations.
+Use \\<ellm-sessions-mode-map>\\[ellm-list-mark] and \\[ellm-list-unmark] to select bulk deletion targets."
   (setq-local truncate-lines t)
   (hl-line-mode 1))
 
