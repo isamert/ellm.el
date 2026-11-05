@@ -645,7 +645,10 @@ To supply settings for a single buffer instead, use
 `ellm-new-buffer-with-configuration'.  `:provider' and `:model' select the
 initial provider and model; missing values retain the standard first-provider
 and network-free model fallback.  `:system' is a prompt string inserted as a
-leading system turn rather than as frontmatter.  Other keywords are written
+leading system turn rather than as frontmatter.  `:system+' appends a string
+to that prompt or the selected profile's system prompt, separated by a blank
+line, using a `system+' turn containing only the added text.
+Other keywords are written
 to the initial frontmatter after the standard `provider', `model', and
 `created' keys; those standard keys are reserved.  For example, `:tools',
 `:cwd', and `:mcp' configure their corresponding frontmatter keys.  Set
@@ -785,7 +788,7 @@ The function receives a plist containing at least `:event', `:request',
 (defconst ellm-turn-regexp
   (concat "^\\("
           ellm--turn-header-regexp
-          "\\) \\([a-zA-Z-]+\\)\\(?: | \\)?\\(.*\\)$")
+          "\\) \\([a-zA-Z-]+\\+?\\)\\(?: | \\)?\\(.*\\)$")
   "Regexp matching turn delimiter lines.
 Group 1: header (`ellm-turn-header-1', `ellm-turn-header-2', or
 `ellm-turn-header-3'), Group 2: role, Group 3: rest of attributes.")
@@ -3656,13 +3659,16 @@ template in approval prompts and errors."
 (defun ellm--resolve-system-prompts (provider frontmatter)
   "Return resolved system state for PROVIDER and FRONTMATTER.
 The result is a plist with `:initial', `:leading', and resolved `:turns'.
-Templates are memoized by exact text across frontmatter and system turns."
+Templates are memoized by exact text across frontmatter and system turns.
+A `system+' turn appends to the preceding system prompt (or frontmatter
+prompt), separated by a blank line.  Adjacent system turns are combined
+when appending; the buffer itself is never rewritten."
   (let* ((turns (ellm--parse-turns))
          (leading (and turns
                        (equal (ellm-turn-role (car turns)) "system")))
          (context (ellm--prompt-context provider frontmatter))
          (frontmatter-template (alist-get 'system frontmatter))
-         initial)
+         initial current-system resolved)
     (unless leading
       (when frontmatter-template
         (unless (stringp frontmatter-template)
@@ -3670,14 +3676,29 @@ Templates are memoized by exact text across frontmatter and system turns."
         (setq initial
               (ellm--memoized-prompt-template
                frontmatter-template context "frontmatter system prompt"))))
+    (setq current-system initial)
     (dolist (turn turns)
-      (when (equal (ellm-turn-role turn) "system")
-        (let* ((line (line-number-at-pos (ellm--turn-delimiter-beg turn)))
-               (rendered
-                (ellm--memoized-prompt-template
-                 (ellm-turn-content turn) context
-                 (format "system turn on line %d" line))))
-          (setf (ellm-turn-content turn) rendered))))
+      (let ((role (ellm-turn-role turn)))
+        (when (member role '("system" "system+"))
+          (let* ((line (line-number-at-pos (ellm--turn-delimiter-beg turn)))
+                 (rendered
+                  (ellm--memoized-prompt-template
+                   (ellm-turn-content turn) context
+                   (format "%s turn on line %d" role line))))
+            (setq current-system
+                  (if (equal role "system+")
+                      (string-join (seq-remove #'string-empty-p
+                                               (list (or current-system "") rendered))
+                                   "\n\n")
+                    rendered))
+            (setf (ellm-turn-role turn) "system"
+                  (ellm-turn-content turn) current-system)))
+        (if (and (equal role "system+")
+                 (equal (and resolved (ellm-turn-role (car resolved))) "system"))
+            (setf (ellm-turn-content (car resolved)) current-system)
+          (push turn resolved))))
+    (setq turns (nreverse resolved)
+          leading (and turns (equal (ellm-turn-role (car turns)) "system")))
     (when leading
       (setq initial (ellm-turn-content (car turns))))
     (list :initial initial :leading leading :turns turns)))
@@ -3711,7 +3732,7 @@ keeps its resolved prompt; clearing the cache only affects future requests."
                     (ellm--cached-prompt-template template))
               sources)))
     (dolist (turn turns)
-      (when (equal (ellm-turn-role turn) "system")
+      (when (member (ellm-turn-role turn) '("system" "system+"))
         (let ((line (line-number-at-pos (ellm--turn-delimiter-beg turn))))
           (push (list (format "System turn on line %d" line)
                       (ellm-turn-content turn)
@@ -5212,12 +5233,12 @@ accepted."
 
 `provider', `model', and `created' lead the frontmatter.  Other configuration
 keywords follow them, except the reserved `:provider', `:model', `:created',
-`:system', `:prompt', and `:ephemeral' keys."
+`:system', `:system+', `:prompt', and `:ephemeral' keys."
   (let ((frontmatter `((provider . ,(or provider "null"))
                        (model . ,(or model "null"))
                        (created . ,(ellm--timestamp)))))
     (cl-loop for (key value) on configuration by #'cddr
-             unless (memq key '(:provider :model :created :system :prompt :ephemeral))
+             unless (memq key '(:provider :model :created :system :system+ :prompt :ephemeral))
              do (setq frontmatter
                       (append frontmatter
                               (list (cons (intern (substring (symbol-name key) 1))
@@ -5259,9 +5280,12 @@ for the provider and model."
                       (plist-get configuration :model)
                     (ellm-provider-default-model provider-name))))
          (system (plist-get configuration :system))
+         (system+ (plist-get configuration :system+))
          (prompt (plist-get configuration :prompt)))
     (when (and system (not (stringp system)))
       (user-error "ellm: `:system' must be a string"))
+    (when (and system+ (not (stringp system+)))
+      (user-error "ellm: `:system+' must be a string"))
     (when (and prompt (not (stringp prompt)))
       (user-error "ellm: `:prompt' must be a string"))
     (with-current-buffer buf
@@ -5275,6 +5299,9 @@ for the provider and model."
       (when system
         (ellm--insert-turn "system")
         (insert (ellm--ensure-newline system)))
+      (when system+
+        (ellm--insert-turn "system+")
+        (insert (ellm--ensure-newline system+)))
       (ellm--insert-turn "user")
       (when prompt
         (insert prompt))
@@ -5337,6 +5364,10 @@ buffer only:
               the first provider.
   :model      Model name; defaults to `ellm-provider-default-model'.
   :system     String inserted as a leading system turn, not frontmatter.
+  :system+    String appended to :system or the selected profile's system
+              prompt, separated by a blank line.  Only the added text is
+              inserted, in a system+ turn; resolution happens when sending.
+              Without a base prompt, this becomes the system prompt.
   :prompt     String inserted into the first user turn, not frontmatter.
               The prompt is not sent automatically.
   :profile    Name of a profile from `ellm-profiles'.

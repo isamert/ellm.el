@@ -8811,6 +8811,73 @@ The parent provider remains buffer-local fallback only when the profile omits on
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
+(ert-deftest ellm-test-new-buffer-with-configuration-system-append ()
+  "Append instructions to the explicit or selected profile system prompt."
+  (let ((ellm-profiles '((custom . ((system . "Profile system"))))))
+    (dolist (case '(((:profile "custom") "Profile system\n\nExtra instructions")
+                    ((:profile "custom" :system "Explicit system")
+                     "Explicit system\n\nExtra instructions")
+                    ((:system "Explicit system")
+                     "Explicit system\n\nExtra instructions")
+                    (nil "Extra instructions")
+                    ((:system "") "Extra instructions")))
+      (let ((buffer (apply #'ellm-new-buffer-with-configuration
+                           :system+ "Extra instructions" (car case))))
+        (unwind-protect
+            (with-current-buffer buffer
+              (should-not (assq 'system+ (ellm--parse-frontmatter)))
+              (should-not (assq 'system (ellm--parse-frontmatter)))
+              (let ((turns (ellm--parse-turns)))
+                (should (equal (mapcar #'ellm-turn-role turns)
+                               (if (plist-get (car case) :system)
+                                   '("system" "system+" "user")
+                                 '("system+" "user"))))
+                (should (equal (ellm-turn-content (car (last turns 2)))
+                               "Extra instructions")))
+              (let ((prompt (ellm-llm--parse-buffer-as-chat (make-llm-fake))))
+                (should (equal (llm-chat-prompt-context prompt) (cadr case)))
+                (should (equal (mapcar #'llm-chat-prompt-interaction-role
+                                      (llm-chat-prompt-interactions prompt))
+                               '(user)))))
+          (when (buffer-live-p buffer)
+            (kill-buffer buffer)))))))
+
+(ert-deftest ellm-test-new-buffer-with-configuration-system-append-empty ()
+  "Nil and empty additions should preserve the selected system prompt."
+  (dolist (addition '(nil ""))
+    (let ((buffer (ellm-new-buffer-with-configuration
+                   :system "Base system" :system+ addition)))
+      (unwind-protect
+          (with-current-buffer buffer
+            (should (equal (ellm-turn-content (car (ellm--parse-turns)))
+                           "Base system"))
+            (should-not (assq 'system+ (ellm--parse-frontmatter)))
+            (should (equal (plist-get (ellm--resolve-system-prompts
+                                      (make-llm-fake) (ellm--effective-frontmatter))
+                                     :initial)
+                           "Base system")))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
+(ert-deftest ellm-test-system-append-follows-profile-changes ()
+  "Resolve additions against the current profile, not a copied prompt."
+  (let ((ellm-profiles '((first . ((system . "First")))
+                         (second . ((system . "Second"))))))
+    (with-temp-buffer
+      (insert "---\nprofile: first\n---\n\n"
+              ">-| system+\nExtra\n>-| system+\nMore\n>-| user\nQuestion\n")
+      (ellm-mode)
+      (let ((provider (make-llm-fake)))
+        (should (equal (llm-chat-prompt-context
+                        (ellm-llm--parse-buffer-as-chat provider))
+                       "First\n\nExtra\n\nMore"))
+        (ellm--set-frontmatter-value 'profile "second")
+        (should (equal (llm-chat-prompt-context
+                        (ellm-llm--parse-buffer-as-chat provider))
+                       "Second\n\nExtra\n\nMore"))
+        (should (equal (mapcar #'ellm-turn-role (ellm--parse-turns))
+                       '("system+" "system+" "user")))))))
+
 (ert-deftest ellm-test-new-buffer-with-configuration-prompt ()
   "The initial prompt belongs in the first user turn, not frontmatter."
   (dolist (prompt '(nil "" "First prompt" "First line\nSecond line\n"))

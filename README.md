@@ -1247,9 +1247,15 @@ use the `ellm-new-buffer-with-configuration` directly to create one
 buffer with explicit settings without changing the defaults.
 
 ```elisp
+;; All of the keys are optional.
 (ellm-new-buffer-with-configuration
- :provider 'codex :model "o4-mini" :profile "agent" :cwd "/tmp"
- :ephemeral t)
+ :provider 'codex
+ :model "o4-mini"
+ :profile "agent"
+ :cwd "/tmp"
+ :ephemeral t
+ :system+ "Run the tests before calling it done."
+ :tools+ '("@buffers"))
 ```
 
 This selects and returns the new buffer. The arguments uses the same
