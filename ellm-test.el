@@ -14519,3 +14519,26 @@ If NAMED is non-nil, use a real persistent Elisp worker."
             (should (ellm-list--goto-item 'ellm-sessions-file (nth 1 files)))))
       (when (buffer-live-p browser) (kill-buffer browser))
       (when (file-exists-p root) (delete-directory root t)))))
+
+(ert-deftest ellm-sessions-new-in-group-directory ()
+  (with-temp-buffer
+    (ellm-sessions-mode)
+    (let* ((directory (file-name-as-directory temporary-file-directory))
+           (ellm-sessions--cached-groups
+            (list (list :key (concat "directory:" directory)
+                        :label "Directory" :records nil)))
+           (created (generate-new-buffer " *ellm-new-test*"))
+           seen-directory refreshed)
+      (unwind-protect
+          (progn
+            (ellm-sessions--redraw)
+            (should (eq (key-binding (kbd "C")) #'ellm-list-new))
+            (cl-letf (((symbol-function 'ellm-new-buffer)
+                       (lambda () (setq seen-directory default-directory) created))
+                      ((symbol-function 'ellm-sessions-refresh)
+                       (lambda () (setq refreshed t)))
+                      ((symbol-function 'pop-to-buffer) #'ignore))
+              (call-interactively (key-binding (kbd "C"))))
+            (should (equal seen-directory directory))
+            (should refreshed))
+        (kill-buffer created)))))

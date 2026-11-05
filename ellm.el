@@ -11014,8 +11014,9 @@ Keep the session list selected while reading the answer."
 
 (defun ellm-list-new ()
   "Create and visit an ellm conversation for the group at point."
-  (interactive nil ellm-list-mode)
-  (let* ((buffer (ellm-list--buffer-at-point t))
+  (interactive)
+  (let* ((buffer (and (derived-mode-p 'ellm-list-mode)
+                      (ellm-list--buffer-at-point t)))
          (directory
           (or (and buffer (ellm--buffer-root-or-directory buffer))
               (when-let* ((group (ellm-list--group-at-point)))
@@ -11024,11 +11025,13 @@ Keep the session list selected while reading the answer."
                   (substring group (length "project:")))
                  ((string-prefix-p "directory:" group)
                   (substring group (length "directory:"))))))))
-    (unless directory
+    (unless (and directory (not (string-empty-p directory)))
       (user-error "ellm: No project or directory at point"))
     (let* ((default-directory directory)
            (new-buffer (save-window-excursion (ellm-new-buffer))))
-      (ellm-list-refresh)
+      (if (derived-mode-p 'ellm-sessions-mode)
+          (ellm-sessions-refresh)
+        (ellm-list-refresh))
       (pop-to-buffer new-buffer))))
 
 (defun ellm-list--subagent-buffers (buffer)
@@ -11361,6 +11364,7 @@ sessions."
     ("<backtab>" . ellm-sessions-cycle-groups)
     ("RET" . ellm-sessions-visit)
     ("M-RET" . ellm-sessions-open-directory)
+    ("C" . ellm-list-new)
     ("m" . ellm-list-mark)
     ("u" . ellm-list-unmark)
     ("x" . ellm-sessions-kill)
