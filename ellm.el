@@ -4153,7 +4153,8 @@ metadata is written in one frontmatter replacement."
       (unless (alist-get 'cwd effective)
         (setq updated
               (ellm--alist-set-nested
-               updated 'cwd (ellm--working-directory effective))))
+               updated 'cwd (abbreviate-file-name
+                             (ellm--working-directory effective)))))
       (unless (equal (ellm--alist-get-nested updated '(ellm session-id))
                      session-id)
         (setq updated
@@ -5242,7 +5243,9 @@ keywords follow them, except the reserved `:provider', `:model', `:created',
              do (setq frontmatter
                       (append frontmatter
                               (list (cons (intern (substring (symbol-name key) 1))
-                                          value)))))
+                                          (if (and (eq key :cwd) (stringp value))
+                                              (abbreviate-file-name value)
+                                            value))))))
     frontmatter))
 
 (defun ellm--new-buffer (configuration ephemeral &optional select-provider-model)

@@ -4535,10 +4535,18 @@ Search results may change and this may fail."
           (kill-buffer buffer)))
       (delete-directory root t))))
 
+(ert-deftest ellm-test-new-buffer-frontmatter-abbreviates-cwd ()
+  "New conversations should use portable home-relative working directories."
+  (dolist (directory (list (expand-file-name "workspace/" "~/")
+                           "~/workspace/" "relative/workspace/" "/tmp/workspace/"))
+    (should (equal (alist-get 'cwd (ellm--new-buffer-frontmatter
+                                   (list :cwd directory) nil nil))
+                   (abbreviate-file-name directory)))))
+
 (ert-deftest ellm-test-save-records-and-restores-working-directory ()
   "Explicit persistence should retain a conversation workspace, not its storage path."
   (let* ((root (make-temp-file "ellm-save-root-" t))
-         (workspace (make-temp-file "ellm-save-workspace-" t))
+         (workspace (make-temp-file (expand-file-name "ellm-save-workspace-" "~/") t))
          (provider (make-llm-fake :chat-action-func (lambda () "done")))
          (ellm-provider-alist `((test . ,provider)))
          (ellm-persistence-enabled nil)
@@ -4553,7 +4561,8 @@ Search results may change and this may fail."
                 (ellm-save t))
               (setq file buffer-file-name)
               (should (equal (ellm--frontmatter-value 'cwd)
-                             (file-name-as-directory workspace)))
+                             (abbreviate-file-name
+                              (file-name-as-directory workspace))))
               (should (equal default-directory
                              (file-name-as-directory workspace)))))
           (kill-buffer buffer)
