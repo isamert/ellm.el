@@ -6172,6 +6172,86 @@ Search results may change and this may fail."
                       (car (last (llm-chat-prompt-interactions prompt))))
                      "Hello")))))
 
+(ert-deftest ellm-test-codex-tool-failures-continue-with-paired-results ()
+  "Tool failures in the current llm API must not abort the Codex tool loop."
+  (dolist (case '(("unknown" "{}" nil "Unknown tool")
+                  ("test" "{}" nil "Missing required argument")
+                  ("test" "{\"value\":1,\"extra\":2}" nil "Unknown argument")
+                  ("test" "{\"value\":1}" nil "Tool call error")
+                  ("test" "{\"value\":1}" t "Tool call error")))
+    (ert-info ((format "Tool failure case: %S" case))
+      (with-temp-buffer
+        (ellm-mode)
+        (let* ((ellm-llm-auto-title nil)
+               (provider (ellm-make-codex-provider))
+               (prompt
+                (make-llm-chat-prompt
+                 :context "test"
+                 :tools
+                 (list (llm-make-tool
+                        :name "test" :description "Fail"
+                        :args '((:name "value" :type integer :description "Value"))
+                        :async (nth 2 case)
+                        :function (lambda (&rest _) (error "Tool failed")))
+                       (llm-make-tool
+                        :name "ok" :description "Succeed" :args nil
+                        :function (lambda () "success")))))
+               (driver (ellm-llm--make-driver
+                        :buffer (current-buffer) :provider provider :prompt prompt))
+               events)
+          (cl-letf (((symbol-function 'ellm-codex--stream-request)
+                     (lambda (_url &rest args)
+                       (let* ((media (cdr (plist-get args :media-type)))
+                              (handlers (oref media events)))
+                         (dolist (item
+                                  (list
+                                   (list :type "function_call" :id "fc_bad"
+                                         :call_id "call_bad" :name (nth 0 case)
+                                         :arguments (nth 1 case))
+                                   '(:type "function_call" :id "fc_ok"
+                                     :call_id "call_ok" :name "ok" :arguments "{}")))
+                           (funcall
+                            (cdr (assq 'response.output_item.done handlers))
+                            (plz-event-source-event
+                             :data (json-serialize (list :item item)))))
+                         (funcall
+                          (cdr (assq 'response.completed handlers))
+                          (plz-event-source-event
+                           :data (json-serialize '(:response (:usage nil)))))
+                         (funcall (plist-get args :on-success) nil)))))
+            (ellm-backend-start driver (lambda (event) (push event events))))
+          (should (eq (plist-get (car events) :type) 'continue))
+          (should-not (seq-find (lambda (event)
+                                 (memq (plist-get event :type) '(failure complete)))
+                               events))
+          (let* ((batch (seq-find (lambda (event)
+                                   (eq (plist-get event :type) 'tool-call))
+                                 events))
+                 (results (plist-get batch :tool-results))
+                 (outputs (seq-filter
+                           (lambda (item)
+                             (equal (plist-get item :type) "function_call_output"))
+                           (append (ellm-codex--input prompt) nil))))
+            (should (= (length (plist-get batch :tool-uses)) 2))
+            (should (= (length results) 2))
+            (should (equal (cdr (assoc "ok" results)) "success"))
+            (should (string-match-p (nth 3 case)
+                                    (cdr (assoc (car case) results))))
+            (should (= (length outputs) 2))
+            (should (equal (plist-get
+                            (seq-find (lambda (item)
+                                        (equal (plist-get item :call_id) "call_ok"))
+                                      outputs)
+                            :output)
+                           "success"))
+            (should (string-match-p
+                     (nth 3 case)
+                     (plist-get
+                      (seq-find (lambda (item)
+                                  (equal (plist-get item :call_id) "call_bad"))
+                                outputs)
+                      :output)))))))))
+
 (ert-deftest ellm-test-codex-sse-service-failure-is-retryable ()
   "Codex SSE service failures must enter the core retry path."
   (let ((provider (ellm-make-codex-provider))
