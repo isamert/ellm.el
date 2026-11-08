@@ -1386,11 +1386,7 @@ response, and ERROR-CALLBACK receives failures.  MULTI-OUTPUT has its standard
                          (lambda (result)
                            (unless (ellm-codex-request-cancelled request)
                              (llm-provider-utils-callback-in-buffer
-                              buffer response-callback result)))
-                         (lambda (type message)
-                           (unless (ellm-codex-request-cancelled request)
-                             (llm-provider-utils-callback-in-buffer
-                              buffer error-callback type message))))))))
+                              buffer response-callback result))))))))
                 :on-error
                 (lambda (type data)
                   (if (and (eq type 'llm-request-authentication-error)

@@ -6146,6 +6146,32 @@ Search results may change and this may fail."
       (should (equal (append (ellm-codex--input prompt) nil)
                      (append items nil))))))
 
+(ert-deftest ellm-test-codex-stream-processes-completed-result ()
+  "A completed Codex stream should use the current llm result processing API."
+  (let ((provider (ellm-make-codex-provider))
+        (prompt (make-llm-chat-prompt :context "test"))
+        response)
+    (cl-letf (((symbol-function 'ellm-codex--stream-request)
+               (lambda (_url &rest args)
+                 (let* ((media (cdr (plist-get args :media-type)))
+                        (events (oref media events)))
+                   (funcall
+                    (cdr (assq 'response.output_text.delta events))
+                    (plz-event-source-event
+                     :data (json-serialize '(:delta "Hello"))))
+                   (funcall
+                    (cdr (assq 'response.completed events))
+                    (plz-event-source-event
+                     :data (json-serialize '(:response (:usage nil)))))
+                   (funcall (plist-get args :on-success) nil)))))
+      (llm-chat-streaming
+       provider prompt nil (lambda (result) (setq response result))
+       (lambda (&rest error) (ert-fail error)))
+      (should (equal response "Hello"))
+      (should (equal (llm-chat-prompt-interaction-content
+                      (car (last (llm-chat-prompt-interactions prompt))))
+                     "Hello")))))
+
 (ert-deftest ellm-test-codex-sse-service-failure-is-retryable ()
   "Codex SSE service failures must enter the core retry path."
   (let ((provider (ellm-make-codex-provider))
