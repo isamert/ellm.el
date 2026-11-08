@@ -571,7 +571,7 @@ multiple Codex providers are configured."
            (deadline (+ (float-time) 900))
            code-response)
       (kill-new user-code)
-      (browse-url-firefox (concat ellm-codex--issuer "/codex/device"))
+      (browse-url (concat ellm-codex--issuer "/codex/device"))
       (message "Enter Codex device code %s (copied to kill ring)" user-code)
       (while (and (not code-response) (< (float-time) deadline))
         (pcase-let* ((poll-body
