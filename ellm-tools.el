@@ -1949,11 +1949,16 @@ absolute name so `src/**/*.ts' matches only
 that root's src directory, while basename globs like `*.el' match at any
 depth.  Escape glob syntax in PATH, which is a literal directory name, and
 set case sensitivity from PATTERN alone so uppercase letters in PATH cannot
-change fd's default smart-case behavior.  This translation is only for the
-default fd command; configured commands receive the original PATTERN."
+change fd's default smart-case behavior.  For relative PATH, resolve the
+working directory as the subprocess does, while preserving any symlinks in
+PATH itself.  This translation is only for the default fd command;
+configured commands receive the original PATTERN."
   (let* ((root (replace-regexp-in-string
                 "[][?*{}\\\\]" (lambda (match) (concat "\\" match))
-                (expand-file-name path) t t))
+                (expand-file-name path (if (file-name-absolute-p path)
+                                           default-directory
+                                         (file-truename default-directory)))
+                t t))
          (glob (concat (file-name-as-directory root)
                        (unless (string-match-p "/" pattern) "**/")
                        pattern))

@@ -1128,6 +1128,29 @@
                                     (search "src/nested" dir)))))
       (delete-directory dir t))))
 
+(ert-deftest ellm-test-tools-glob-fd-relative-to-symlinked-directory ()
+  "Relative fd searches work when the working directory contains a symlink."
+  (skip-unless (executable-find "fd"))
+  (let* ((root (make-temp-file "ellm-glob-link-" t))
+         (real (expand-file-name "real" root))
+         (link (expand-file-name "link" root)))
+    (unwind-protect
+        (progn
+          (make-directory real)
+          (make-symbolic-link real link)
+          (with-temp-file (expand-file-name "upper.TS" real)
+            (insert "contents\n"))
+          (let ((default-directory (file-name-as-directory link))
+                (ellm-current-project-function (lambda () link))
+                (ellm-tools-glob-program "fd")
+                (ellm-tools-glob-options ellm-tools--default-glob-options)
+                result)
+            (ellm-tools/glob-tool (lambda (value) (setq result value))
+                                  "*.TS" "." 20)
+            (should (ellm-test--wait-for (lambda () result)))
+            (should (string-match-p (regexp-quote "./upper.TS") result))))
+      (delete-directory root t))))
+
 (ert-deftest ellm-test-tools-glob-fd-only-translates-default-command ()
   "Non-default glob commands keep the caller's original pattern."
   (let ((ellm-tools-glob-program "fd")
